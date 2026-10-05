@@ -669,11 +669,11 @@ test('image preview: automatic requests stay capped and refill after completion 
   await settle();
   assert.strictEqual(Object.keys(app.api.requested).length, 4);
   assert.strictEqual(app.sent.filter((item) => item.packet.t === 'imgreq').length, 4);
-  for (const chunk of imageChunks(messages[0], url)) app.api.onImgChunk('testserver', chunk, 'bobuuid');
+  for (const chunk of imageChunks(messages[6], url)) app.api.onImgChunk('testserver', chunk, 'bobuuid'); // newest is requested first
   await settle();
   assert.strictEqual(Object.keys(app.api.requested).length, 4, 'Completion refills one slot from visible history');
   assert.strictEqual(app.sent.filter((item) => item.packet.t === 'imgreq').length, 5);
-  const cancelled = messages[1], cancelledKey = app.api.imageKey('testserver', cancelled);
+  const cancelled = messages[5], cancelledKey = app.api.imageKey('testserver', cancelled);
   app.api.onImgChunk('testserver', imageChunks(cancelled, url)[0], 'bobuuid');
   assert(app.api.incoming[cancelledKey]);
   app.api.addMsg('testserver', { ...cancelled, del: true, text: '' });

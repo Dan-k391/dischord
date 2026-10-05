@@ -125,6 +125,38 @@
     if (svg) svg.innerHTML = P[name] || '';
   }
 
+  // Timers that keep their pace in a background tab. Browsers slow page timers there (to once a second,
+  // later once a minute), which stalled image transfers and presence pings from anyone who had switched
+  // to another window. A worker's timers are not slowed. Falls back to page timers without workers.
+  const bgTimer = (() => {
+    let worker = null, seq = 0;
+    const waits = new Map(), loops = [];
+    const fail = () => {
+      if (!worker) return;
+      try { worker.terminate(); } catch { }
+      worker = null;
+      waits.forEach((done) => done()); waits.clear();
+      loops.forEach(([ms, fn]) => setInterval(fn, ms));
+    };
+    try {
+      if (typeof Worker !== 'function') throw new Error('no workers');
+      const src = 'onmessage=function(e){var d=e.data;if(d.every)setInterval(function(){postMessage({every:d.every})},d.every);else setTimeout(function(){postMessage({id:d.id})},d.ms)}';
+      const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+      worker = new Worker(url);
+      URL.revokeObjectURL(url);
+      worker.onmessage = (e) => {
+        const d = e.data || {};
+        if (d.every) loops.forEach(([ms, fn]) => { if (ms === d.every) fn(); });
+        else { const done = waits.get(d.id); waits.delete(d.id); if (done) done(); }
+      };
+      worker.onerror = fail;
+    } catch { worker = null; }
+    return {
+      sleep: (ms) => new Promise((done) => { if (!worker) return setTimeout(done, ms); const id = ++seq; waits.set(id, done); worker.postMessage({ id, ms }); }),
+      every(ms, fn) { loops.push([ms, fn]); if (worker) worker.postMessage({ every: ms }); else setInterval(fn, ms); },
+    };
+  })();
+
   // ---------------------------------------------------------------- state
   let me = store.get('me', null);
   let servers = store.get('servers', []);
@@ -892,7 +924,7 @@
     }
   }
 
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const sleep = (ms) => bgTimer.sleep(ms);
   const pushing = new Map();   // id/uuid -> ts (avoid duplicate sends)
   async function pushImage(sid, id, uuid, cid, mid) {
     if (!uuid) return;
@@ -927,7 +959,11 @@
     const b = (incoming[request.key] = incoming[request.key] || { n: p.n, parts: new Array(p.n), got: 0 });
     if (b.n !== p.n || b.parts[p.i] !== undefined) return;
     b.parts[p.i] = p.d; b.got++;
-    if (b.got < b.n) return;
+    armImageRequest(request, 20000); // data is flowing: only a stall ends the request, not the total time
+    if (b.got < b.n) {
+      if (b.got % 8 === 0) imageProgress(request, Math.round(b.got / b.n * 100));
+      return;
+    }
     const url = b.parts.join('');
     delete incoming[request.key];
     clearTimeout(request.timer); delete requested[request.key];
@@ -946,13 +982,27 @@
     if (Object.keys(requested).length >= 4) return; // bound preview buffers and mesh traffic
     const messageKey = imageMessageKey(sid, m.cid, m.id);
     if (!force && (imageRetryAfter.get(messageKey) || 0) > now()) return;
-    requested[key] = { key, sid, id, cid: m.cid, mid: m.id, length: m.img.n, timer: setTimeout(() => {
-      delete requested[key]; delete incoming[key];
-      imageErrors.add(messageKey);
-      imageRetryAfter.set(messageKey, now() + 15000);
-      renderIfCurrent(sid, m.cid);
-    }, 30000) };
+    requested[key] = { key, sid, id, cid: m.cid, mid: m.id, length: m.img.n, messageKey, timer: null };
+    armImageRequest(requested[key], 10000); // nobody who has it is online: free the slot quickly for other images
     send(sid, { t: 'imgreq', id, cid: m.cid, mid: m.id });
+  }
+  function armImageRequest(request, ms) {
+    clearTimeout(request.timer);
+    request.timer = setTimeout(() => {
+      if (requested[request.key] !== request) return;
+      delete requested[request.key]; delete incoming[request.key];
+      imageErrors.add(request.messageKey);
+      imageRetryAfter.set(request.messageKey, now() + 15000);
+      renderIfCurrent(request.sid, request.cid);
+    }, ms);
+  }
+  function imageProgress(request, pct) {
+    if (request.sid !== cur.sid || request.cid !== cur.cid) return;
+    document.querySelectorAll('img[data-img]:not([src])').forEach((el) => {
+      if (el.dataset.imgMid !== request.mid) return;
+      const status = el.parentElement.querySelector('.image-preview-status');
+      if (status) status.textContent = `Loading image… ${pct}%`;
+    });
   }
   function cancelImageRequests(sid, cid, mid) {
     for (const [key, request] of Object.entries(requested)) {
@@ -966,7 +1016,8 @@
     for (const key of imageRetryAfter.keys()) if ((key + '/').startsWith(prefix)) imageRetryAfter.delete(key);
   }
   function paintImages() {
-    document.querySelectorAll('img[data-img]:not([src])').forEach(async (el) => {
+    // newest first: the picture someone just sent must not wait behind old ones nobody online still has
+    [...document.querySelectorAll('img[data-img]:not([src])')].reverse().forEach(async (el) => {
       const sid = el.dataset.imgSid, cid = el.dataset.imgCid, mid = el.dataset.imgMid;
       const m = findImageMessage(sid, el.dataset.img, cid, mid);
       if (!m) return;
@@ -989,9 +1040,11 @@
           imageErrors.add(imageMessageKey(sid, cid, mid));
           el.hidden = true;
           el.parentElement.classList.remove('loading');
-          if (status) { status.hidden = false; status.textContent = m.file ? 'Image preview unavailable. Download the original to open it.' : 'Image preview unavailable.'; }
+          if (status) { status.hidden = false; status.textContent = 'Image preview unavailable.'; }
         };
         el.src = url;
+        // the load event can be held back while the page is hidden; decoding is not
+        if (typeof el.decode === 'function') el.decode().then(() => { if (el.onload) el.onload(); }, () => {});
       } else requestImg(sid, m.img.id, cid, mid);
     });
   }
@@ -1028,6 +1081,23 @@
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       saveFileDownload(new Blob([bytes], { type: 'image/' + ext }), (base || 'image') + '.' + ext);
     } catch { toast('Could not save that image.'); }
+  }
+  async function copyImage(sid, cid, mid) {
+    const m = (getMsgs(sid)[cid] || []).find((x) => x.id === mid && !x.del && x.img);
+    const url = m && await getImg(sid, m);
+    if (!url) return toast('Image is still loading. Try again in a moment.');
+    try {
+      // the clipboard only takes PNG, so redraw the shared image
+      const im = new Image();
+      im.src = url;
+      await im.decode();
+      const c = document.createElement('canvas');
+      c.width = im.naturalWidth; c.height = im.naturalHeight;
+      c.getContext('2d').drawImage(im, 0, 0);
+      const blob = await new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('encode'))), 'image/png'));
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      toast('Image copied');
+    } catch { toast('Could not copy the image. Your browser may not allow it.'); }
   }
   async function openImage(sid, cid, mid) {
     const m = (getMsgs(sid)[cid] || []).find((m) => m.id === mid && !m.del && m.img);
@@ -1627,6 +1697,12 @@
   const tileEls = new Map();   // uid -> tile element
   const streamBr = {};         // vs -> chosen kbps (0 = auto)
   const autoFocused = new Set();
+  const unwatched = new Set();  // screen share stream ids I chose not to watch (no video is received for them)
+  function setWatching(vss, on) {
+    if (!vss) return;
+    if (on) unwatched.delete(vss); else unwatched.add(vss);
+    renderStage();
+  }
   let focusUid = null;
   let winFs = null;            // tile key filling the whole app window, or null
   let hideStrip = store.get('hideStrip', false); // focus mode: hide the row of other people under the big tile
@@ -1653,7 +1729,8 @@
       const hideSelf = o.self && av.selfPreview === 'off';
       const hideCam = !o.self && hiddenVid[o.user.id];
       out.push({ key: o.user.id, uid: o.user.id, user: o.user, st, self: !!o.self, screen: false, vs: st.c && o.vs && !hideSelf && !hideCam ? o.vs : '' });
-      if (st.s && o.vss) out.push({ key: o.user.id + ':s', uid: o.user.id, user: o.user, st, self: !!o.self, screen: true, vs: hideSelf ? '' : o.vss });
+      const off = !o.self && unwatched.has(o.vss);
+      if (st.s && o.vss) out.push({ key: o.user.id + ':s', uid: o.user.id, user: o.user, st, self: !!o.self, screen: true, vs: hideSelf || off ? '' : o.vss, vss: o.vss, unwatched: off });
     }
     return out;
   }
@@ -1697,8 +1774,9 @@
       el.style.setProperty('--c', t.user.color);
       const media = el.querySelector('.tile-media');
       const br = hasVid ? wantedBr(t) : 0;
-      if (el.dataset.vs !== t.vs) {
-        el.dataset.vs = t.vs;
+      const vsKey = t.vs || (t.unwatched ? 'unwatched' : '');
+      if (el.dataset.vs !== vsKey) {
+        el.dataset.vs = vsKey;
         el.dataset.br = br;
         if (hasVid) {
           const f = document.createElement('iframe');
@@ -1706,7 +1784,8 @@
           f.src = viewUrl(t.vs, br, t.self && av.selfPreview === 'low' ? 35 : 100);
           media.innerHTML = '';
           media.appendChild(f);
-        } else if (t.screen) media.innerHTML = `<div class="share-ph">${icon('screen')}<span>You're sharing your screen</span></div>`;
+        } else if (t.unwatched) media.innerHTML = `<div class="share-ph">${icon('eyeOff')}<span>${esc(t.user.name)} is sharing their screen</span><button type="button" class="btn primary" data-watch="${esc(t.vss)}">Watch stream</button></div>`;
+        else if (t.screen) media.innerHTML = `<div class="share-ph">${icon('screen')}<span>You're sharing your screen</span></div>`;
         else media.innerHTML = avatar(t.user, false, 'big');
       } else if (hasVid && +el.dataset.br !== br) {
         el.dataset.br = br; // live bitrate change, no reconnect
@@ -1723,7 +1802,8 @@
       const nameEl = el.querySelector('.tile-name');
       if (nameEl.innerHTML !== name) nameEl.innerHTML = name;
       const tools = hasVid
-        ? (t.self ? '' : `<button class="tool-btn q-btn" data-q="${esc(t.key)}" title="Stream quality">${esc(streamBr[t.vs] ? mbps(br) : 'Auto · ' + mbps(br))}</button>`) +
+        ? (t.screen && !t.self ? `<button class="tool-btn" data-unwatch="${esc(t.vss)}" title="Stop watching">${icon('eyeOff')}</button>` : '') +
+          (t.self ? '' : `<button class="tool-btn q-btn" data-q="${esc(t.key)}" title="Stream quality">${esc(streamBr[t.vs] ? mbps(br) : 'Auto · ' + mbps(br))}</button>`) +
           `<button class="tool-btn" data-wfs="${esc(t.key)}" title="${winFs === t.key ? 'Exit window fullscreen' : 'Fill the window'}">${icon(winFs === t.key ? 'collapse' : 'winfs')}</button>` +
           `<button class="tool-btn fs-btn" data-fs="${esc(t.key)}" title="${document.fullscreenElement === el ? 'Exit fullscreen' : 'Fullscreen'}">${icon(document.fullscreenElement === el ? 'collapse' : 'expand')}</button>`
         : '';
@@ -1731,7 +1811,7 @@
       if (toolsEl.innerHTML !== tools) toolsEl.innerHTML = tools;
 
       // someone else's new screen share takes the stage once (click away any time)
-      if (t.screen && !t.self && !autoFocused.has(t.vs)) { autoFocused.add(t.vs); focusUid = t.key; }
+      if (t.screen && !t.self && hasVid && !autoFocused.has(t.vs)) { autoFocused.add(t.vs); focusUid = t.key; }
     }
     for (const [key, el] of tileEls) if (!seen.has(key)) { el.remove(); tileEls.delete(key); }
     if (focusUid && !(tileEls.get(focusUid) && tileEls.get(focusUid).classList.contains('video'))) focusUid = null;
@@ -2185,7 +2265,8 @@
         if (st.c) h += ctxCheck('hidevid', 'Hide video', !!hiddenVid[uid]);
         if (st.c && occ.vs && !hiddenVid[uid]) h += ctxSelect('qcam', 'Video quality', streamBr[occ.vs] || 0, qOpts(st.cb));
         if (st.s && occ.vss) h += ctxSelect('qss', 'Stream quality', streamBr[occ.vss] || 0, qOpts(st.sb));
-        if (st.s && occ.vss) h += ctxItem('watch', 'expand', 'Focus stream') + ctxItem('fs', 'expand', 'Fullscreen stream');
+        if (st.s && occ.vss) h += ctxCheck('watching', 'Watch stream', !unwatched.has(occ.vss));
+        if (st.s && occ.vss && !unwatched.has(occ.vss)) h += ctxItem('watch', 'expand', 'Focus stream') + ctxItem('fs', 'expand', 'Fullscreen stream');
         h += ctxCheck('stats', 'Show stream stats', !!av.showStats);
         h += '<div class="ctx-sep"></div>';
       } else if (c.m || (c.v ?? 100) !== 100) {
@@ -2225,6 +2306,7 @@
           case 'profile': closeCtx(); return settingsModal('profile');
           case 'mute': setVol(uid, { m: !(userVol[uid] || {}).m }); return reopen();
           case 'hidevid': hiddenVid[uid] = !hiddenVid[uid]; if (!hiddenVid[uid]) delete hiddenVid[uid]; store.set('hidevid', hiddenVid); renderStage(); return reopen();
+          case 'watching': { const o = voice && voiceOccupants(voice.sid, voice.cid).find((x) => x.user.id === uid); if (o && o.vss) setWatching(o.vss, unwatched.has(o.vss)); return reopen(); }
           case 'watch': closeCtx(); showVoice(); focusUid = uid + ':s'; return renderStage();
           case 'fs': { closeCtx(); showVoice(); const el = tileEls.get(uid + ':s'); if (el && el.requestFullscreen) el.requestFullscreen(); return; }
           case 'mention': {
@@ -2247,7 +2329,7 @@
     let h = `<div class="ctx-emojis">${REACTS.slice(0, 6).map((e) => `<button data-emo="${e}">${e}</button>`).join('')}</div>`;
     h += ctxItem('react', 'smile', 'Add reaction') + ctxItem('reply', 'reply', 'Reply');
     if (m.text) h += ctxItem('copy', 'copy', 'Copy text');
-    if (m.img) h += ctxItem('openimg', 'image', 'Open image') + ctxItem('saveimg', 'download', 'Download image');
+    if (m.img) h += ctxItem('openimg', 'image', 'Open image') + ctxItem('copyimg', 'copy', 'Copy image') + ctxItem('saveimg', 'download', 'Download image');
     if (!mine) h += ctxItem('mention', 'at', 'Mention ' + esc(m.a.name));
     if (mine && m.text) h += ctxItem('edit', 'edit', 'Edit message');
     if (mine) h += ctxItem('del', 'trash', 'Delete message', 'danger');
@@ -2263,6 +2345,7 @@
           case 'reply': return replyToMessage(mid);
           case 'copy': navigator.clipboard && navigator.clipboard.writeText(m.text); return toast('Copied');
           case 'openimg': return openImage(cur.sid, m.cid, m.id);
+          case 'copyimg': return copyImage(cur.sid, m.cid, m.id);
           case 'saveimg': return saveImage(cur.sid, m.cid, m.id);
           case 'mention': { const inp = $('msgInput'); inp.value += '@' + m.a.name.replace(/\s+/g, '') + ' '; return inp.focus(); }
           case 'edit': return editMessage(mid);
@@ -2372,7 +2455,7 @@
       const failedPreview = imageErrors.has(imageStateKey);
       const imgW = m.img ? Math.max(48, Math.round(m.img.w * Math.min(1, 550 / m.img.w, 350 / m.img.h))) : 0;
       const img = m.img ? `<button type="button" class="msg-img ${failedPreview ? '' : 'loading'}" style="aspect-ratio:${m.img.w}/${m.img.h};width:min(100%, ${imgW}px)" data-image-open="${esc(m.id)}" aria-label="Open image preview">
-        <img data-img="${esc(m.img.id)}" data-img-sid="${esc(s.id)}" data-img-cid="${esc(m.cid)}" data-img-mid="${esc(m.id)}" loading="lazy" decoding="async" alt="${esc(m.file ? m.file.name : 'Shared image')}"><span class="image-preview-status" role="status">${failedPreview ? 'Preview unavailable. Someone with it must be online.' : 'Loading image preview…'}</span><span class="img-save" data-image-save="${esc(m.id)}" role="button" tabindex="0" title="Download image">${icon('download')}</span></button>` : m.file && window.DischordImages.isImage(m.file)
+        <img data-img="${esc(m.img.id)}" data-img-sid="${esc(s.id)}" data-img-cid="${esc(m.cid)}" data-img-mid="${esc(m.id)}" decoding="async" alt="${esc(m.file ? m.file.name : 'Shared image')}"><span class="image-preview-status" role="status">${failedPreview ? 'Preview unavailable. Someone with it must be online.' : 'Loading image preview…'}</span><span class="img-save" data-image-save="${esc(m.id)}" role="button" tabindex="0" title="Download image">${icon('download')}</span></button>` : m.file && window.DischordImages.isImage(m.file)
         ? `<div class="image-preview-placeholder" role="status">${icon('image')}<span>${imagePreparing.has(imageStateKey) && !failedPreview ? 'Preparing image preview…' : 'Image preview unavailable.'}</span></div>` : '';
       // images are preview-only; every other file is a card that transfers on Download
       const file = m.file && !window.DischordImages.isImage(m.file) ? `<div class="msg-file" data-file-card="${esc(m.id)}">${fileCardContent(s.id, m)}</div>` : '';
@@ -2820,6 +2903,24 @@
   $('vsShare').onclick = toggleShare;
   $('cbShare').onclick = toggleShare;
   $('voiceWhere').onclick = showVoice;
+  // the call bar and the member-strip pill fade out after a few seconds without mouse movement
+  (function idleControls() {
+    const stage = $('voiceStage');
+    let timer = null, overBar = false;
+    const menuOpen = () => ['ctxMenu', 'emojiMenu', 'qMenu'].some((id) => !$(id).classList.contains('hidden'));
+    const wake = () => {
+      stage.classList.remove('idle');
+      clearTimeout(timer);
+      timer = setTimeout(() => { if (overBar || menuOpen()) wake(); else stage.classList.add('idle'); }, 3000);
+    };
+    stage.addEventListener('mousemove', wake);
+    stage.addEventListener('mousedown', wake);
+    document.addEventListener('keydown', wake);
+    $('callBar').addEventListener('mouseenter', () => { overBar = true; wake(); });
+    $('callBar').addEventListener('mouseleave', () => { overBar = false; wake(); });
+    wake();
+  })();
+
   // the call preview: drag it anywhere inside the chat area; a plain click returns to the call
   (function miniPreview() {
     const stage = $('voiceStage');
@@ -2844,7 +2945,14 @@
       place(drag.pos.r, drag.pos.b);
     });
     const end = () => {
-      if (drag && drag.pos) store.set('miniPos', drag.pos);
+      if (drag && drag.pos) {
+        // spring into the nearest corner (clear of the header and the message box)
+        const rs = [16, Math.max(16, drag.maxR - 16)], bs = [84, Math.max(84, drag.maxB - 64)];
+        const near = (v, list) => list.reduce((a, c) => (Math.abs(c - v) < Math.abs(a - v) ? c : a));
+        drag.pos = { r: near(drag.pos.r, rs), b: near(drag.pos.b, bs) };
+        place(drag.pos.r, drag.pos.b);
+        store.set('miniPos', drag.pos);
+      }
       drag = null;
       stage.classList.remove('dragging');
     };
@@ -2862,9 +2970,13 @@
     if (q) { e.stopPropagation(); return qualityMenu(q.dataset.q, q); }
     const wf = e.target.closest('[data-wfs]');
     if (wf) { winFs = winFs === wf.dataset.wfs ? null : wf.dataset.wfs; if (document.fullscreenElement) document.exitFullscreen(); return renderStage(); }
-    if (winFs) return; // a click on the picture shouldn't change the layout underneath
     const fs = e.target.closest('[data-fs]');
     if (fs) { const el = tileEls.get(fs.dataset.fs); if (document.fullscreenElement) document.exitFullscreen(); else if (el && el.requestFullscreen) el.requestFullscreen(); return; }
+    const un = e.target.closest('[data-unwatch]');
+    if (un) { if (winFs) winFs = null; return setWatching(un.dataset.unwatch, false); }
+    const wa = e.target.closest('[data-watch]');
+    if (wa) return setWatching(wa.dataset.watch, true);
+    if (winFs) return; // a click on the picture shouldn't change the layout underneath
     const t = e.target.closest('.tile.video');
     if (t) { focusUid = focusUid === t.dataset.key ? null : t.dataset.key; renderStage(); }
   });
@@ -2888,6 +3000,8 @@
 
   // right-click menus
   document.addEventListener('contextmenu', (e) => {
+    const btn = e.target.closest('#cbMic, #micBtn, #micCaret, #cbMicCaret, #cbDeaf, #deafBtn, #deafCaret, #cbDeafCaret, #cbCam, #vsCam, #cbCamCaret, #cbShare, #vsShare, #cbShareCaret');
+    if (btn && ctxToggled === btn) { e.preventDefault(); ctxToggled = null; return; } // its menu was open: this right-click just closed it
     const mic = e.target.closest('#cbMic, #micBtn, #micCaret, #cbMicCaret');
     if (mic) { e.preventDefault(); return deviceMenu(mic, 'audioinput'); }
     const out = e.target.closest('#cbDeaf, #deafBtn, #deafCaret, #cbDeafCaret');
@@ -3016,18 +3130,7 @@
   let pendingInvite = null;
 
   // ---------------------------------------------------------------- timers
-  // Heartbeat from a worker: browsers slow main-thread timers in background tabs (to once a minute),
-  // which made people who were presenting from another window look offline to everyone else.
-  (function startHeartbeat() {
-    try {
-      if (typeof Worker !== 'function') throw new Error('no workers');
-      const url = URL.createObjectURL(new Blob(['setInterval(function () { postMessage(0); }, ' + PING_MS + ');'], { type: 'text/javascript' }));
-      const worker = new Worker(url);
-      URL.revokeObjectURL(url);
-      worker.onmessage = broadcastState;
-      worker.onerror = () => { worker.terminate(); setInterval(broadcastState, PING_MS); };
-    } catch { setInterval(broadcastState, PING_MS); }
-  })();
+  bgTimer.every(PING_MS, broadcastState); // presence heartbeat, unaffected by background-tab throttling
   setInterval(() => {
     renderTyping();
     if (cur.sid) renderPresence();

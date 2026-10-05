@@ -587,7 +587,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 body.resizing iframe { pointer-events: none !important; }
 
 /* ---------- v25: call preview while browsing elsewhere, emoji button, ping ---------- */
-#voiceStage.offstage.mini { visibility: visible; pointer-events: auto; top: auto; left: auto; right: var(--mini-r, 16px); bottom: var(--mini-b, 84px); touch-action: none; width: 320px; height: 180px; z-index: 30; border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.6); cursor: pointer; }
+#voiceStage.offstage.mini { visibility: visible; pointer-events: auto; top: auto; left: auto; right: var(--mini-r, 16px); bottom: var(--mini-b, 84px); touch-action: none; transition: right .5s cubic-bezier(.34, 1.56, .64, 1), bottom .5s cubic-bezier(.34, 1.56, .64, 1), transform .2s cubic-bezier(.34, 1.56, .64, 1); animation: miniPop .4s cubic-bezier(.34, 1.56, .64, 1); width: 320px; height: 180px; z-index: 30; border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.6); cursor: pointer; }
 #voiceStage.offstage.mini #tiles { inset: 0; padding: 0; display: block; visibility: visible !important; }
 #voiceStage.offstage.mini .tile.mini-main { display: grid !important; position: absolute; left: 0; right: 0; top: 0; bottom: 0; width: auto; height: auto; aspect-ratio: auto; border-radius: 0; box-shadow: none; }
 #voiceStage.offstage.mini .tile.mini-main, #voiceStage.offstage.mini .tile.mini-main .tile-media, #voiceStage.offstage.mini .tile.mini-main .tile-media *,
@@ -603,7 +603,7 @@ body.resizing iframe { pointer-events: none !important; }
 
 /* ---------- v26: carets on every call button; the bar tightens when the stage is narrow ---------- */
 #voiceStage { container-type: inline-size; }
-#voiceStage.offstage.mini.dragging { cursor: grabbing; }
+#voiceStage.offstage.mini.dragging { cursor: grabbing; transition: transform .2s cubic-bezier(.34, 1.56, .64, 1); transform: scale(1.04); }
 #voiceStage.offstage.mini.dragging::after { opacity: 0; }
 @container (max-width: 640px) {
   #callBar { gap: 6px; }
@@ -621,3 +621,14 @@ body.resizing iframe { pointer-events: none !important; }
   #callBar .call-sep { display: none; }
 }
 .ctx-select { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+
+/* ---------- v27 ---------- */
+@keyframes miniPop { from { transform: scale(.6); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+/* call media and avatars are not text: no selection highlight, no ghost image when dragged */
+#voiceStage, #voiceStage *, .avatar, .voice-user, .mem, #userPanel, #rail, .msg .gutter { user-select: none; -webkit-user-select: none; }
+#voiceStage img, .avatar, .msg-img img { -webkit-user-drag: none; }
+/* controls fade out while the mouse is still */
+#callBar, #stripToggle { transition: opacity .3s; }
+#voiceStage.idle:not(.offstage) #callBar, #voiceStage.idle:not(.offstage) #stripToggle { opacity: 0; pointer-events: none; }
+#voiceStage.idle:not(.offstage) { cursor: none; }
+.share-ph .btn { margin-top: 4px; }
