@@ -26,7 +26,11 @@
   const STALE_LOOSE = 25000;      // peer with no live connection considered gone after this
   const COLORS = ['#7b61ff', '#5865f2', '#3ba55c', '#faa61a', '#ed4245', '#eb459e', '#00a8fc', '#1abc9c', '#e67e22', '#9b59b6'];
 
-  const AV_DEFAULTS = { camQ: '720', camFps: 30, ssQ: '1080', ssFps: 30, sendBr: 2500, recvBr: 0 };
+  const AV_DEFAULTS = { camQ: '720', camFps: 30, camBr: 2500, ssQ: '1080', ssFps: 30, ssBr: 6000, recvCap: 0 };
+  const CAM_BRS = [300, 600, 1000, 1500, 2500, 4000, 6000, 8000];
+  const SS_BRS = [1000, 2500, 4000, 6000, 8000, 12000, 16000, 20000];
+  const VIEW_BRS = [300, 800, 1500, 2500, 4000, 6000, 8000, 12000, 20000];
+  const mbps = (k) => (k >= 1000 ? (k / 1000).toFixed(k % 1000 ? 1 : 0) + ' Mbps' : k + ' kbps');
   const CAM_Q = { '360': 2, '720': 1, '1080': 0 };
   const SS_Q = { '720': 1, '1080': 0, '1440': -3 };
 
@@ -75,6 +79,7 @@
     trash: '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>',
     logout: '<path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/>',
     signal: '<path d="M4 20v-3M9 20v-7M14 20V9M19 20V4"/>',
+    expand: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
     live: '<rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><circle cx="12" cy="10.5" r="2" fill="currentColor"/>',
   };
   const icon = (name, cls = '') => `<svg class="ico-svg ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[name] || ''}</svg>`;
@@ -92,6 +97,8 @@
   let reads = store.get('reads', {});
   let lastChan = store.get('lastChan', {});
   let av = { ...AV_DEFAULTS, ...store.get('av', {}) };
+  if (av.sendBr && !store.get('av', {}).camBr) av.camBr = av.sendBr; // migrate v4 settings
+  delete av.sendBr; delete av.recvBr;
   const cur = { sid: store.get('lastSid', null), cid: null };
   const msgs = {};       // sid -> { cid: [msg] }
   const known = {};      // sid -> { userId: user }   (persisted)
@@ -147,7 +154,8 @@
   }
   function cleanState(st) {
     st = st && typeof st === 'object' ? st : {};
-    return { m: !!st.m, d: !!st.d, c: !!st.c, s: !!st.s };
+    const br = (v) => (Number.isFinite(+v) && +v >= 100 && +v <= 50000 ? Math.round(+v) : 0);
+    return { m: !!st.m, d: !!st.d, c: !!st.c, s: !!st.s, cb: br(st.cb), sb: br(st.sb) };
   }
 
   // ---------------------------------------------------------------- mesh (hidden VDO.Ninja rooms)
@@ -178,7 +186,7 @@
   }
 
   const myVoiceIn = (sid) => (voice && voice.sid === sid ? voice.cid : null);
-  const myState = () => ({ m: !micOn || deaf, d: deaf, c: !!(voice && voice.cam), s: !!(voice && voice.ss) });
+  const myState = () => ({ m: !micOn || deaf, d: deaf, c: !!(voice && voice.cam), s: !!(voice && voice.ss), cb: av.camBr, sb: av.ssBr });
 
   // Every payload carries who I am and my voice state, so presence is never stale.
   function send(sid, payload, uuid) {
@@ -450,16 +458,22 @@
   }
 
   // ---------------------------------------------------------------- voice
+  // The publisher sends my mic/camera/screen and plays everyone's audio (&novideo: no video in).
   function voiceUrl(s, c, withCam, vs) {
     const p = new URLSearchParams({ room: roomFor(s, 'v' + c.id), password: s.key, label: me.name, push: vs });
     let u = VDO + '?' + p.toString();
-    u += '&autostart&webcam&nocontrolbar&hideheader&showlabels&chatbutton=false&nohangupbutton';
+    u += '&autostart&webcam&novideo&nocontrolbar&hideheader&chatbutton=false&nohangupbutton';
     u += withCam ? `&quality=${CAM_Q[av.camQ] ?? 1}&maxframerate=${av.camFps}` : '&videodevice=0';
     u += `&screensharequality=${SS_Q[av.ssQ] ?? 0}&screensharefps=${av.ssFps}`;
-    u += `&maxvideobitrate=${av.sendBr}&roombitrate=${av.sendBr}`;
-    if (av.recvBr) u += `&bitrate=${av.recvBr}`;
+    u += `&maxvideobitrate=${Math.max(av.camBr, av.ssBr)}`;
     if (!micOn || deaf) u += '&mute';
     return u;
+  }
+
+  // Each video/screen on the stage is its own view-only connection, so we control layout + bitrate.
+  function viewUrl(vs, br) {
+    const p = new URLSearchParams({ view: vs, room: roomFor(server(voice.sid), 'v' + voice.cid), password: server(voice.sid).key });
+    return VDO + '?' + p.toString() + '&solo&noaudio&cleanoutput&nocontrolbar&hideheader' + (br ? `&bitrate=${br}` : '');
   }
 
   function joinVoice(sid, cid, withCam) {
@@ -472,7 +486,7 @@
     f.allow = 'autoplay; camera; microphone; display-capture; fullscreen; picture-in-picture; clipboard-write';
     // give the old connection a moment to release the camera / stream id
     setTimeout(() => { f.src = voiceUrl(s, c, withCam, vs); }, rejoin ? 500 : 0);
-    $('stageFrame').appendChild(f);
+    $('pubHost').appendChild(f);
     voice = { sid, cid, iframe: f, cam: !!withCam, ss: false, vs };
     f.addEventListener('load', () => {
       setTimeout(() => {
@@ -496,6 +510,7 @@
     if (!voice) return;
     dropVoiceFrame();
     voice = null;
+    focusUid = null;
     for (const k in speaking) delete speaking[k];
     broadcastState();
     playTone(false);
@@ -526,7 +541,8 @@
   }
   function toggleShare() {
     if (!voice) return;
-    voicePost({ function: 'commands', action: 'togglescreenshare' });
+    // NB: send only `action` — {function:'commands', action} is handled twice by VDO.Ninja (two pickers)
+    voicePost({ action: 'togglescreenshare' });
     showVoice();
   }
   function showVoice() { if (voice) { if (cur.sid !== voice.sid) selectServer(voice.sid); selectChannel(voice.cid); } }
@@ -719,9 +735,9 @@
 
   function voiceOccupants(sid, cid) {
     const out = [];
-    if (voice && voice.sid === sid && voice.cid === cid) out.push({ user: me, st: myState(), self: true });
+    if (voice && voice.sid === sid && voice.cid === cid) out.push({ user: me, st: myState(), vs: voice.vs, self: true });
     const ms = members[sid] || {};
-    for (const id in ms) if (isOnline(ms[id]) && ms[id].vc === cid) out.push({ user: ms[id].user, st: ms[id].st });
+    for (const id in ms) if (isOnline(ms[id]) && ms[id].vc === cid) out.push({ user: ms[id].user, st: ms[id].st, vs: ms[id].vs });
     return out;
   }
 
@@ -784,18 +800,128 @@
     } else renderVoiceIdle();
   }
 
-  // Audio-only calls: show Discord-style avatar tiles over the (blank) VDO.Ninja stage.
+  // ---------------------------------------------------------------- call stage
+  // One tile per person. Tiles are never moved in the DOM (moving an iframe reloads it);
+  // focus / strip layout is pure CSS driven by classes and custom properties.
+  const tileEls = new Map();   // uid -> tile element
+  const streamBr = {};         // vs -> chosen kbps (0 = auto)
+  const autoFocused = new Set();
+  let focusUid = null;
+
+  function wantedBr(o) {
+    if (o.self) return 1000; // own preview: keep it cheap
+    const pick = streamBr[o.vs];
+    if (pick) return pick;
+    const st = o.st || {};
+    let br = (st.s ? st.sb : st.cb) || (st.s ? 6000 : 2500);
+    if (av.recvCap) br = Math.min(br, av.recvCap);
+    return br;
+  }
+
   function renderStage() {
-    if (!voice) return;
-    const who = voiceOccupants(voice.sid, voice.cid);
-    const anyVideo = voice.devices || who.some((o) => o.st && (o.st.c || o.st.s));
+    const host = $('tiles');
+    if (!voice) {
+      tileEls.forEach((el) => el.remove()); tileEls.clear();
+      return;
+    }
     $('devDone').classList.toggle('hidden', !voice.devices);
-    const tiles = $('voiceTiles');
-    tiles.classList.toggle('hidden', anyVideo);
-    if (anyVideo) return;
-    tiles.dataset.n = Math.min(who.length, 9);
-    tiles.innerHTML = who.map((o) => `<div class="tile" data-uid="${esc(o.user.id)}" style="--c:${esc(o.user.color)}">${avatar(o.user, false, 'big')}<div class="tile-name">${o.st && (o.st.m || o.st.d) ? icon(o.st.d ? 'deaf' : 'micOff', 'mini off') : ''}${esc(o.user.name)}</div></div>`).join('');
+    $('pubHost').classList.toggle('devices', !!voice.devices);
+    const who = voiceOccupants(voice.sid, voice.cid);
+    const seen = new Set();
+    for (const o of who) {
+      const uid = o.user.id;
+      seen.add(uid);
+      const st = o.st || {};
+      const hasVid = !!((st.c || st.s) && o.vs);
+      let el = tileEls.get(uid);
+      if (!el) {
+        el = document.createElement('div');
+        el.className = 'tile';
+        el.dataset.uid = uid;
+        el.innerHTML = '<div class="tile-media"></div><div class="tile-name"></div><div class="tile-tools"></div>';
+        host.appendChild(el);
+        tileEls.set(uid, el);
+      }
+      el.style.setProperty('--c', o.user.color);
+      const want = hasVid ? o.vs : '';
+      const media = el.querySelector('.tile-media');
+      const br = hasVid ? wantedBr(o) : 0;
+      if (el.dataset.vs !== want) {
+        el.dataset.vs = want;
+        el.dataset.br = br;
+        if (want) {
+          const f = document.createElement('iframe');
+          f.allow = 'autoplay; fullscreen; picture-in-picture';
+          f.src = viewUrl(want, br);
+          media.innerHTML = '';
+          media.appendChild(f);
+        } else media.innerHTML = avatar(o.user, false, 'big');
+      } else if (want && +el.dataset.br !== br) {
+        el.dataset.br = br; // live bitrate change, no reconnect
+        const f = media.querySelector('iframe');
+        if (f && f.contentWindow) f.contentWindow.postMessage({ bitrate: br }, '*');
+      }
+      el.classList.toggle('video', hasVid);
+      el.classList.toggle('screen', hasVid && !!st.s);
+      el.classList.toggle('self', !!o.self);
+      const name = (st.s ? '<span class="live-tag">LIVE</span>' : '') + (st.d ? icon('deaf', 'mini off') : st.m ? icon('micOff', 'mini off') : '') + `<span>${esc(o.user.name)}${o.self ? ' (you)' : ''}</span>`;
+      const nameEl = el.querySelector('.tile-name');
+      if (nameEl.innerHTML !== name) nameEl.innerHTML = name;
+      const tools = hasVid
+        ? (o.self ? '' : `<button class="tool-btn q-btn" data-q="${esc(uid)}" title="Stream quality">${esc(streamBr[o.vs] ? mbps(br) : 'Auto · ' + mbps(br))}</button>`) +
+          `<button class="tool-btn fs-btn" data-fs="${esc(uid)}" title="Fullscreen">${icon('expand')}</button>`
+        : '';
+      const toolsEl = el.querySelector('.tile-tools');
+      if (toolsEl.innerHTML !== tools) toolsEl.innerHTML = tools;
+
+      // a new screen share takes the stage once (you can click away from it)
+      const key = uid + ':' + o.vs;
+      if (st.s && !o.self && hasVid && !autoFocused.has(key)) { autoFocused.add(key); focusUid = uid; }
+      if (!st.s) autoFocused.delete(key);
+    }
+    for (const [uid, el] of tileEls) if (!seen.has(uid)) { el.remove(); tileEls.delete(uid); }
+    if (focusUid && !(tileEls.get(focusUid) && tileEls.get(focusUid).classList.contains('video'))) focusUid = null;
+
+    // layout
+    const n = tileEls.size;
+    host.classList.toggle('focus-mode', !!focusUid);
+    if (focusUid) {
+      let i = 0;
+      const others = n - 1;
+      host.style.setProperty('--sn', others);
+      tileEls.forEach((el, uid) => {
+        el.classList.toggle('focused', uid === focusUid);
+        if (uid !== focusUid) el.style.setProperty('--i', i++);
+      });
+      host.classList.toggle('no-strip', others === 0);
+    } else {
+      const cols = Math.ceil(Math.sqrt(n || 1));
+      host.style.setProperty('--cols', cols);
+      host.style.setProperty('--rows', Math.ceil((n || 1) / cols));
+      tileEls.forEach((el) => el.classList.remove('focused'));
+    }
     paintSpeaking();
+  }
+
+  function qualityMenu(uid, btn) {
+    const el = tileEls.get(uid);
+    if (!el || !el.dataset.vs) return;
+    const vs = el.dataset.vs;
+    const cur = streamBr[vs] || 0;
+    const m = $('qMenu');
+    m.innerHTML = `<div class="qm-title">Stream quality</div>` +
+      [0, ...VIEW_BRS].map((k) => `<button data-qv="${k}" class="${k === cur ? 'sel' : ''}">${k ? mbps(k) : 'Auto (sender\'s setting)'}</button>`).join('');
+    const r = btn.getBoundingClientRect(), sr = $('voiceStage').getBoundingClientRect();
+    m.style.top = (r.bottom - sr.top + 6) + 'px';
+    m.style.right = (sr.right - r.right) + 'px';
+    m.classList.remove('hidden');
+    m.onclick = (e) => {
+      const b = e.target.closest('[data-qv]');
+      if (!b) return;
+      streamBr[vs] = +b.dataset.qv;
+      m.classList.add('hidden');
+      renderStage();
+    };
   }
 
   function renderVoiceIdle() {
@@ -989,15 +1115,23 @@
         ${'Notification' in window && Notification.permission !== 'granted' ? '<label>Notifications</label><button class="btn" id="mNotif">Enable desktop notifications</button>' : ''}
       </div>
       <div class="tab-body" data-body="av">
-        <div class="grid2">
-          <div><label>Camera resolution</label><select id="aCamQ">${opt('360', av.camQ, '360p')}${opt('720', av.camQ, '720p (HD)')}${opt('1080', av.camQ, '1080p (Full HD)')}</select></div>
-          <div><label>Camera frame rate</label><select id="aCamFps">${opt(15, av.camFps, '15 fps')}${opt(30, av.camFps, '30 fps')}${opt(60, av.camFps, '60 fps')}</select></div>
-          <div><label>Screen share resolution</label><select id="aSsQ">${opt('720', av.ssQ, '720p')}${opt('1080', av.ssQ, '1080p')}${opt('1440', av.ssQ, '1440p')}</select></div>
-          <div><label>Screen share frame rate</label><select id="aSsFps">${opt(5, av.ssFps, '5 fps (text/slides)')}${opt(15, av.ssFps, '15 fps')}${opt(30, av.ssFps, '30 fps')}${opt(60, av.ssFps, '60 fps (games)')}</select></div>
-          <div><label>Upload quality (what others get)</label><select id="aSend">${opt(500, av.sendBr, 'Data saver · 0.5 Mbps')}${opt(1500, av.sendBr, 'Balanced · 1.5 Mbps')}${opt(2500, av.sendBr, 'High · 2.5 Mbps')}${opt(6000, av.sendBr, 'Ultra · 6 Mbps')}</select></div>
-          <div><label>Download quality (what you get)</label><select id="aRecv">${opt(0, av.recvBr, 'Auto')}${opt(300, av.recvBr, 'Data saver')}${opt(1500, av.recvBr, 'Balanced')}${opt(4000, av.recvBr, 'High')}${opt(8000, av.recvBr, 'Maximum')}</select></div>
+        <h3>Camera</h3>
+        <div class="grid3">
+          <div><label>Resolution</label><select id="aCamQ">${opt('360', av.camQ, '360p')}${opt('720', av.camQ, '720p')}${opt('1080', av.camQ, '1080p')}</select></div>
+          <div><label>Frame rate</label><select id="aCamFps">${opt(15, av.camFps, '15 fps')}${opt(30, av.camFps, '30 fps')}${opt(60, av.camFps, '60 fps')}</select></div>
+          <div><label>Bitrate</label><select id="aCamBr">${CAM_BRS.map((k) => opt(k, av.camBr, mbps(k))).join('')}</select></div>
         </div>
-        <p class="hint">Each person sends a stream to everyone else in the call, so high upload settings need a good connection when many people are in a channel. ${voice ? 'Saving reconnects your call to apply the changes.' : ''}</p>
+        <h3>Screen share</h3>
+        <div class="grid3">
+          <div><label>Resolution</label><select id="aSsQ">${opt('720', av.ssQ, '720p')}${opt('1080', av.ssQ, '1080p')}${opt('1440', av.ssQ, '1440p')}</select></div>
+          <div><label>Frame rate</label><select id="aSsFps">${opt(5, av.ssFps, '5 fps (slides)')}${opt(15, av.ssFps, '15 fps')}${opt(30, av.ssFps, '30 fps')}${opt(60, av.ssFps, '60 fps (games)')}</select></div>
+          <div><label>Bitrate</label><select id="aSsBr">${SS_BRS.map((k) => opt(k, av.ssBr, mbps(k))).join('')}</select></div>
+        </div>
+        <h3>Watching others</h3>
+        <div class="grid3">
+          <div style="grid-column: span 2"><label>Max download per stream</label><select id="aRecv">${opt(0, av.recvCap, 'No limit (use each sender\'s setting)')}${VIEW_BRS.map((k) => opt(k, av.recvCap, 'Up to ' + mbps(k))).join('')}</select></div>
+        </div>
+        <p class="hint">Bitrate is the biggest quality factor: higher = sharper, but every viewer pulls that much from your upload. You can also change any stream's quality from the button on its tile. ${voice ? 'Saving reconnects your call to apply camera/screen changes.' : ''}</p>
         ${voice ? '<button class="btn" id="aDevices">Choose microphone / camera…</button>' : '<p class="hint">Join a voice channel to pick your microphone and camera.</p>'}
       </div>
       <div class="actions"><button class="btn link" data-close>Cancel</button><button class="btn primary" id="mOk">Save</button></div>`, () => {
@@ -1017,10 +1151,11 @@
         me = { ...me, name, color };
         store.set('me', me);
         const next = {
-          camQ: $('aCamQ').value, camFps: +$('aCamFps').value, ssQ: $('aSsQ').value, ssFps: +$('aSsFps').value,
-          sendBr: +$('aSend').value, recvBr: +$('aRecv').value,
+          camQ: $('aCamQ').value, camFps: +$('aCamFps').value, camBr: +$('aCamBr').value,
+          ssQ: $('aSsQ').value, ssFps: +$('aSsFps').value, ssBr: +$('aSsBr').value, recvCap: +$('aRecv').value,
         };
-        const avChanged = JSON.stringify(next) !== JSON.stringify(av);
+        const sendKeys = ['camQ', 'camFps', 'camBr', 'ssQ', 'ssFps', 'ssBr'];
+        const avChanged = sendKeys.some((k) => String(next[k]) !== String(av[k]));
         av = next;
         store.set('av', av);
         closeModal();
@@ -1031,6 +1166,7 @@
         }
         if (voice && (avChanged || nameChanged)) joinVoice(voice.sid, voice.cid, voice.cam);
         render();
+        renderStage();
       };
     }, true, true);
   }
@@ -1200,6 +1336,16 @@
   $('vsShare').onclick = toggleShare;
   $('cbShare').onclick = toggleShare;
   $('voiceWhere').onclick = showVoice;
+  $('tiles').addEventListener('click', (e) => {
+    const q = e.target.closest('[data-q]');
+    if (q) { e.stopPropagation(); return qualityMenu(q.dataset.q, q); }
+    const fs = e.target.closest('[data-fs]');
+    if (fs) { const el = tileEls.get(fs.dataset.fs); if (el && el.requestFullscreen) el.requestFullscreen(); return; }
+    const t = e.target.closest('.tile.video');
+    if (t) { focusUid = focusUid === t.dataset.uid ? null : t.dataset.uid; renderStage(); }
+  });
+  document.addEventListener('click', (e) => { if (!e.target.closest('#qMenu')) $('qMenu').classList.add('hidden'); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && focusUid && $('modalBack').classList.contains('hidden')) { focusUid = null; renderStage(); } });
   $('devDone').onclick = () => { if (!voice) return; voice.devices = false; voicePost({ toggleSettings: false }); renderStage(); };
   $('micBtn').onclick = toggleMic;
   $('cbMic').onclick = toggleMic;

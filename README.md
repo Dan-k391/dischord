@@ -6,7 +6,7 @@ A Discord-style chat app built on [VDO.Ninja](https://vdo.ninja). No accounts, n
 - **Servers** with text and voice channels, shareable **invite links**
 - **Text chat** sent peer-to-peer (Markdown-ish formatting, edit/delete, typing indicators, unread badges, desktop notifications)
 - **History sync**: when you come online, peers send you recent messages you missed
-- **Voice channels** with mute/deafen, **camera**, **screen share**, speaking indicators and **quality settings** (resolution, frame rate, upload/download bitrate)
+- **Voice channels** with mute/deafen, **camera**, **screen share**, speaking indicators, focus view + fullscreen for streams, and **quality settings** (resolution, frame rate and bitrate for camera and screen share, plus a per-stream bitrate picker on every video tile)
 - **Presence**: member list, online/offline, who's in which voice channel
 
 ## Run it
@@ -23,8 +23,10 @@ To use it with friends over the internet, host the folder on any static host
 - For each server you've joined, a hidden VDO.Ninja iframe joins a room with no
   camera or mic (`&videodevice=0&audiodevice=0`). Messages, presence, channel changes and history travel over its WebRTC
   data channels using the VDO.Ninja IFRAME API (`sendData` / `dataReceived`).
-- Each voice channel is its own VDO.Ninja room shown in the main area. It stays connected
-  while you browse text channels.
+- Each voice channel is its own VDO.Ninja room. One hidden connection sends your mic/camera/screen
+  and plays everyone's audio (`&novideo`); every camera or screen on the stage is a separate
+  view-only connection (`&view=…&solo&noaudio`), so Dischord controls the layout and the bitrate
+  of each stream. The call stays connected while you browse text channels.
 - Everything is saved in your browser's `localStorage` (last 500 messages per channel).
 
 ## Limits (by design, since there's no server)
