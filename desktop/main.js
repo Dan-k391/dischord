@@ -157,7 +157,7 @@ function finishCapture(pending, source, includeAudio = false) {
   if (streams.video) {
     const streamId = captureStreamId(pending.request.frame);
     if (streamId) selectedCaptureFrames.set(pending.request.frame, {
-      sourceId: source.id, streamId, includeAudio: !!streams.audio, restart: null
+      sourceId: source.id, displayId: source.display_id || '', streamId, includeAudio: !!streams.audio, restart: null
     });
   }
   try { pending.callback(streams); } catch { }
@@ -252,6 +252,9 @@ async function chooseCapture(request, callback) {
       if (restart.expiresAt < Date.now()) throw new Error('The quality change has expired.');
       const source = sources.find((item) => item.id === selection.sourceId);
       if (!source) throw new Error('The previously shared window or screen has closed or disconnected.');
+      if (selection.displayId && source.display_id !== selection.displayId) {
+        throw new Error('The previously shared display has disconnected or changed.');
+      }
       const streams = { video: source };
       if (selection.includeAudio && request.audioRequested && process.platform === 'win32') streams.audio = 'loopback';
       callback(streams);
