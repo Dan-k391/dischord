@@ -561,3 +561,5 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .att.file .ico-svg { width: 28px; height: 28px; }
 .att-name { max-width: 100%; font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .att-size { font-size: 11px; }
+
+.ctx-note { padding: 8px; font-size: 13px; color: var(--text-muted); max-width: 240px; }

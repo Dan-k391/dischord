@@ -23,8 +23,10 @@
   const MAX_MSGS = 500;
   const HIST_SEND = 80;           // messages per channel sent during history sync
   const PING_MS = 8000;           // presence heartbeat
-  const STALE_CONNECTED = 90000;  // connected peer considered gone after this long silent
-  const STALE_LOOSE = 25000;      // peer with no live connection considered gone after this
+  const STALE_CONNECTED = 120000; // connected peer considered gone after this long silent
+  const STALE_LOOSE = 60000;      // peer with no live connection considered gone after this
+  const STALE_VOICE = 180000;     // someone in a call: their voice/screen keep flowing even if chat pings stall (background tab)
+  const PEER_GRACE = 20000;       // a dropped mesh connection may just be reconnecting: wait this long for the next ping
   const COLORS = ['#5865f2', '#7b61ff', '#9b59b6', '#eb459e', '#ed4245', '#f47b67', '#e67e22', '#faa61a',
     '#f1c40f', '#57f287', '#3ba55c', '#1abc9c', '#00a8fc', '#3498db', '#607d8b', '#99aab5'];
   const REACTS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '🎉', '👀', '💯', '😎', '🙏', '🤔', '👏', '😡', '✅', '❌'];
@@ -299,7 +301,8 @@
     const m = p && p.uid && members[sid] && members[sid][p.uid];
     if (m) {
       m.uuids.delete(uuid);
-      if (!m.uuids.size) m.seen = 0;
+      // Not offline at once: the connection may be reconnecting. The next ping revives them; silence expires them.
+      if (!m.uuids.size) m.seen = Math.min(m.seen, now() - (m.vc ? STALE_VOICE : STALE_LOOSE) + PEER_GRACE);
     }
     if (sid === cur.sid) renderPresence();
   }
@@ -314,7 +317,7 @@
 
   function isOnline(m) {
     if (!m || !m.seen) return false;
-    return now() - m.seen < (m.uuids && m.uuids.size ? STALE_CONNECTED : STALE_LOOSE);
+    return now() - m.seen < (m.vc ? STALE_VOICE : m.uuids && m.uuids.size ? STALE_CONNECTED : STALE_LOOSE);
   }
 
   function touch(sid, body, uuid) {
@@ -1015,6 +1018,7 @@
     let u = VDO + '?' + p.toString();
     u += '&autostart&webcam&novideo&nocontrolbar&hideheader&chatbutton=false&nohangupbutton';
     u += `&audiogain=${audioPercent(av.micGain)}`;
+    if (store.get('micLabel', '')) u += '&audiodevice=' + encodeURIComponent(store.get('micLabel', '')); // remembered microphone; falls back to default if unplugged
     u += withCam ? `&quality=${CAM_Q[av.camQ] ?? 1}&maxframerate=${av.camFps}` : '&videodevice=0';
     u += `&screensharequality=${SS_Q[av.ssQ] ?? 0}&screensharefps=${av.ssFps}`;
     u += `&maxvideobitrate=${av.camBr}&exclude=${ssVs}`; // preserve exclusion when camera reconnects during a share
@@ -1314,6 +1318,7 @@
         scheduleVoice(call, () => syncVoiceState(call), 250);
       }
       if (d.loudness) { voice.loudnessReady = true; onLoudness(d.loudness); }
+      if (Array.isArray(d.deviceList) && d.cib === 'dischord-mics' && micWait) micWait.show(d.deviceList);
       if (d.stats) onSendStats(false, d.stats);
       return;
     }
@@ -1831,6 +1836,59 @@
   const ctxSelect = (act, label, val, opts) => `<div class="ctx-select"><span>${label}</span><select data-sel="${act}">${opts.map(([v, l]) => `<option value="${v}" ${String(v) === String(val) ? 'selected' : ''}>${l}</option>`).join('')}</select></div>`;
   const qOpts = (auto) => [[0, 'Auto' + (auto ? ' · ' + mbps(auto) : '')], ...VIEW_BRS.map((k) => [k, mbps(k)])];
 
+  // ---- microphone picker (right-click the mic button); stays inside Dischord instead of VDO.Ninja's page
+  let micWait = null;
+  const micLabelNow = () => store.get('micLabel', '');
+  const sameLabel = (a, b) => !!a && !!b && String(a).replace(/\W+/g, '_').toLowerCase() === String(b).replace(/\W+/g, '_').toLowerCase();
+  function micMenu(anchor) {
+    closeCtx();
+    const rect = anchor.getBoundingClientRect();
+    const token = {};
+    clearTimeout(micWait && micWait.timer);
+    const show = (list) => {
+      if (!micWait || micWait.token !== token) return;
+      clearTimeout(micWait.timer); micWait = null;
+      const mics = (list || []).filter((d) => d.kind === 'audioinput' && d.deviceId !== 'communications');
+      const named = mics.some((d) => d.label);
+      const saved = micLabelNow();
+      let h = '<div class="ctx-head"><span>Microphone</span></div>';
+      if (!mics.length) h += '<div class="ctx-note">No microphone found.</div>';
+      else if (!named) h += '<div class="ctx-note">Join a voice channel and allow microphone access to see device names.</div>';
+      else h += mics.map((d, i) => {
+        const on = saved ? sameLabel(saved, d.label) : d.deviceId === 'default';
+        return `<button class="ctx-item check ${on ? 'on' : ''}" data-act="mic" data-i="${i}"><span>${esc(d.label)}</span><i class="box">${on ? icon('check') : ''}</i></button>`;
+      }).join('');
+      openCtx(rect.left, rect.top, h, (menu) => {
+        // open upwards from bottom-of-screen buttons
+        if (rect.top > window.innerHeight / 2) menu.style.top = Math.max(6, rect.top - menu.offsetHeight - 8) + 'px';
+        menu.onclick = (e) => {
+          const b = e.target.closest('[data-act="mic"]');
+          if (!b) return;
+          closeCtx();
+          pickMic(mics[+b.dataset.i]);
+        };
+      });
+    };
+    micWait = { token, show, timer: null };
+    const ownList = () => (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices ? navigator.mediaDevices.enumerateDevices() : Promise.resolve([]))
+      .then((l) => show(l.map((d) => ({ kind: d.kind, deviceId: d.deviceId, label: d.label })))).catch(() => show([]));
+    if (voice && voice.iframe && voice.iframe.contentWindow) {
+      voicePost({ getDeviceList: true, cib: 'dischord-mics' });
+      micWait.timer = setTimeout(ownList, 2500); // the call frame did not answer
+    } else ownList();
+  }
+  function pickMic(d) {
+    if (!d) return;
+    store.set('micLabel', d.label || '');
+    if (voice) {
+      // run inside the call frame: switch to that device id (ids are per-origin, so they come from the frame's own list)
+      voicePost({ function: 'eval', value: `if (typeof changeAudioDeviceById === 'function') changeAudioDeviceById(${JSON.stringify(String(d.deviceId))});` });
+      const call = voice;
+      scheduleVoice(call, () => syncVoiceState(call), 1500); // re-apply mute / gain after the device swap
+    }
+    toast('Microphone: ' + (d.label || 'selected'));
+  }
+
   function userMenu(uid, x, y) {
     const self = uid === me.id;
     const sid = cur.sid;
@@ -2139,7 +2197,7 @@
 
   function renderControls() {
     const muted = !micOn || deaf;
-    for (const id of ['micBtn', 'cbMic']) { const b = $(id); setIcon(b, muted ? 'micOff' : 'mic'); b.classList.toggle('off', muted); b.title = muted ? 'Unmute' : 'Mute'; }
+    for (const id of ['micBtn', 'cbMic']) { const b = $(id); setIcon(b, muted ? 'micOff' : 'mic'); b.classList.toggle('off', muted); b.title = (muted ? 'Unmute' : 'Mute') + ' (right-click: choose microphone)'; }
     for (const id of ['deafBtn', 'cbDeaf']) { const b = $(id); setIcon(b, deaf ? 'deaf' : 'headphones'); b.classList.toggle('off', deaf); b.title = deaf ? 'Undeafen' : 'Deafen'; }
     const cam = !!(voice && voice.cam), ss = !!(voice && voice.ss);
     setIcon($('cbCam'), cam ? 'camera' : 'cameraOff');
@@ -2269,7 +2327,7 @@
         </div>
         <label class="inline-check"><input type="checkbox" id="aStats" ${av.showStats ? 'checked' : ''}> Always show stream stats (resolution · fps · bitrate · codec) on video tiles</label>
         <p class="hint">Higher bitrate improves detail, and every viewer needs that much upload bandwidth. Change any stream's quality from its tile. ${voice ? 'Camera changes reconnect your call. Screen share changes apply after you stop and share again.' : ''}</p>
-        ${voice ? '<button class="btn" id="aDevices">Choose microphone / camera…</button>' : '<p class="hint">Join a voice channel to pick your microphone and camera.</p>'}
+        ${voice ? '<button class="btn" id="aDevices">Choose camera…</button><p class="hint">Right-click the microphone button to choose your microphone.</p>' : '<p class="hint">Join a voice channel to pick your camera. Right-click the microphone button to choose your microphone.</p>'}
       </div>
       <div class="actions"><button class="btn link" data-close>Cancel</button><button class="btn primary" id="mOk">Save</button></div>`, () => {
       const show = (t) => {
@@ -2524,8 +2582,12 @@
 
   // right-click menus
   document.addEventListener('contextmenu', (e) => {
+    const mic = e.target.closest('#cbMic, #micBtn');
+    if (mic) { e.preventDefault(); return micMenu(mic); }
     const u = e.target.closest('#channelList .voice-user[data-uid], #members .mem[data-uid], #tiles .tile[data-key], [data-ctx="user"][data-uid], #userPanel');
     const msg = !u && e.target.closest('#messages .msg[data-mid]');
+    // never show the browser's own menu, except in text fields where it provides paste / spellcheck
+    if (!e.target.closest('input, textarea, [contenteditable="true"]')) e.preventDefault();
     if (!u && !msg) return closeCtx();
     e.preventDefault();
     if (msg) return messageMenu(msg.dataset.mid, e.clientX, e.clientY);
@@ -2577,7 +2639,18 @@
   let pendingInvite = null;
 
   // ---------------------------------------------------------------- timers
-  setInterval(broadcastState, PING_MS);
+  // Heartbeat from a worker: browsers slow main-thread timers in background tabs (to once a minute),
+  // which made people who were presenting from another window look offline to everyone else.
+  (function startHeartbeat() {
+    try {
+      if (typeof Worker !== 'function') throw new Error('no workers');
+      const url = URL.createObjectURL(new Blob(['setInterval(function () { postMessage(0); }, ' + PING_MS + ');'], { type: 'text/javascript' }));
+      const worker = new Worker(url);
+      URL.revokeObjectURL(url);
+      worker.onmessage = broadcastState;
+      worker.onerror = () => { worker.terminate(); setInterval(broadcastState, PING_MS); };
+    } catch { setInterval(broadcastState, PING_MS); }
+  })();
   setInterval(() => {
     renderTyping();
     if (cur.sid) renderPresence();
