@@ -23,10 +23,12 @@ To use it with friends over the internet, host the folder on any static host
 - For each server you've joined, a hidden VDO.Ninja iframe joins a room with no
   camera or mic (`&videodevice=0&audiodevice=0`). Messages, presence, channel changes and history travel over its WebRTC
   data channels using the VDO.Ninja IFRAME API (`sendData` / `dataReceived`).
-- Each voice channel is its own VDO.Ninja room. One hidden connection sends your mic/camera/screen
-  and plays everyone's audio (`&novideo`); every camera or screen on the stage is a separate
-  view-only connection (`&view=…&solo&noaudio`), so Dischord controls the layout and the bitrate
-  of each stream. The call stays connected while you browse text channels.
+- Each voice channel is its own VDO.Ninja room. One hidden connection sends your mic + camera and
+  plays everyone's audio (`&novideo`). Screen sharing is a second, separate stream (`&screenshare`),
+  so camera and screen can run at the same time. Every camera or screen on the stage is its own
+  view-only connection (`&view=…&solo&noaudio&scale=100`), so Dischord controls the layout and the
+  bitrate of each stream, and videos are never downscaled to the tile size.
+  The call stays connected while you browse text channels.
 - Everything is saved in your browser's `localStorage` (last 500 messages per channel).
 
 ## Limits (by design, since there's no server)

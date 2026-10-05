@@ -26,7 +26,7 @@
   const STALE_LOOSE = 25000;      // peer with no live connection considered gone after this
   const COLORS = ['#7b61ff', '#5865f2', '#3ba55c', '#faa61a', '#ed4245', '#eb459e', '#00a8fc', '#1abc9c', '#e67e22', '#9b59b6'];
 
-  const AV_DEFAULTS = { camQ: '720', camFps: 30, camBr: 2500, ssQ: '1080', ssFps: 30, ssBr: 6000, recvCap: 0 };
+  const AV_DEFAULTS = { camQ: '720', camFps: 30, camBr: 2500, ssQ: '1080', ssFps: 30, ssBr: 6000, ssHint: 'detail', recvCap: 0, codec: '' };
   const CAM_BRS = [300, 600, 1000, 1500, 2500, 4000, 6000, 8000];
   const SS_BRS = [1000, 2500, 4000, 6000, 8000, 12000, 16000, 20000];
   const VIEW_BRS = [300, 800, 1500, 2500, 4000, 6000, 8000, 12000, 20000];
@@ -192,7 +192,8 @@
   function send(sid, payload, uuid) {
     const m = meshes[sid];
     if (!m || !m.iframe.contentWindow) return;
-    const body = { v: PROTO, u: me, vc: myVoiceIn(sid), vs: myVoiceIn(sid) ? voice.vs : null, st: myState(), ...payload };
+    const inV = myVoiceIn(sid);
+    const body = { v: PROTO, u: me, vc: inV, vs: inV ? voice.vs : null, vss: inV && voice.ss ? voice.ssVs : null, st: myState(), ...payload };
     const o = { sendData: { dischord: body } };
     if (uuid) o.UUID = uuid;
     m.iframe.contentWindow.postMessage(o, '*');
@@ -254,6 +255,7 @@
     m.user = user;
     m.vc = isId(body.vc) ? body.vc : null;
     m.vs = m.vc && isId(body.vs) ? body.vs : null;
+    m.vss = m.vc && isId(body.vss) ? body.vss : null;
     m.st = cleanState(body.st);
     m.seen = now();
     if (uuid) m.uuids.add(uuid);
@@ -465,29 +467,40 @@
     u += '&autostart&webcam&novideo&nocontrolbar&hideheader&chatbutton=false&nohangupbutton';
     u += withCam ? `&quality=${CAM_Q[av.camQ] ?? 1}&maxframerate=${av.camFps}` : '&videodevice=0';
     u += `&screensharequality=${SS_Q[av.ssQ] ?? 0}&screensharefps=${av.ssFps}`;
-    u += `&maxvideobitrate=${Math.max(av.camBr, av.ssBr)}`;
+    u += `&maxvideobitrate=${av.camBr}&exclude=${vs}s`; // never play our own screen-share audio back
     if (!micOn || deaf) u += '&mute';
     return u;
+  }
+
+  // Screen share is its own stream (so it never replaces the camera). It only sends; it plays nothing.
+  function screenUrl(ssVs) {
+    const s = server(voice.sid);
+    const p = new URLSearchParams({ room: roomFor(s, 'v' + voice.cid), password: s.key, label: me.name + ' (screen)', push: ssVs });
+    return VDO + '?' + p.toString() + `&screenshare&autostart&noaudio&novideo&nocontrolbar&hideheader&chatbutton=false&nohangupbutton` +
+      `&screensharequality=${SS_Q[av.ssQ] ?? 0}&screensharefps=${av.ssFps}&maxvideobitrate=${av.ssBr}&contenthint=${av.ssHint || 'detail'}`;
   }
 
   // Each video/screen on the stage is its own view-only connection, so we control layout + bitrate.
   function viewUrl(vs, br) {
     const p = new URLSearchParams({ view: vs, room: roomFor(server(voice.sid), 'v' + voice.cid), password: server(voice.sid).key });
-    return VDO + '?' + p.toString() + '&solo&noaudio&cleanoutput&nocontrolbar&hideheader' + (br ? `&bitrate=${br}` : '');
+    // &scale=100: don't let VDO.Ninja downscale to the tile size (that was the blur)
+    return VDO + '?' + p.toString() + '&solo&noaudio&cleanoutput&nocontrolbar&hideheader&scale=100&sharperscreen' +
+      (br ? `&bitrate=${br}` : '') + (av.codec ? `&codec=${av.codec}` : '');
   }
 
   function joinVoice(sid, cid, withCam) {
     const s = server(sid), c = channel(s, cid);
     if (!s || !c) return;
     const rejoin = voice && voice.sid === sid && voice.cid === cid;
-    if (voice) dropVoiceFrame();
+    const keepShare = rejoin && voice.ssFrame ? { ssFrame: voice.ssFrame, ss: voice.ss, ssVs: voice.ssVs } : null;
+    if (voice) { dropVoiceFrame(); if (!keepShare) stopShare(true); }
     const vs = 'dc' + me.id.slice(0, 10) + rid(5);
     const f = document.createElement('iframe');
     f.allow = 'autoplay; camera; microphone; display-capture; fullscreen; picture-in-picture; clipboard-write';
     // give the old connection a moment to release the camera / stream id
     setTimeout(() => { f.src = voiceUrl(s, c, withCam, vs); }, rejoin ? 500 : 0);
     $('pubHost').appendChild(f);
-    voice = { sid, cid, iframe: f, cam: !!withCam, ss: false, vs };
+    voice = { sid, cid, iframe: f, cam: !!withCam, ss: false, vs, ssFrame: null, ssVs: null, ...(keepShare || {}) };
     f.addEventListener('load', () => {
       setTimeout(() => {
         voicePost({ getLoudness: true });
@@ -509,6 +522,7 @@
   function leaveVoice() {
     if (!voice) return;
     dropVoiceFrame();
+    stopShare(true);
     voice = null;
     focusUid = null;
     for (const k in speaking) delete speaking[k];
@@ -541,9 +555,25 @@
   }
   function toggleShare() {
     if (!voice) return;
-    // NB: send only `action` — {function:'commands', action} is handled twice by VDO.Ninja (two pickers)
-    voicePost({ action: 'togglescreenshare' });
+    if (voice.ssFrame) return stopShare();
+    const ssVs = voice.vs + 's';
+    const f = document.createElement('iframe');
+    f.allow = 'autoplay; display-capture; fullscreen';
+    f.src = screenUrl(ssVs);
+    $('pubHost').appendChild(f);
+    voice.ssFrame = f; voice.ssVs = ssVs; voice.ss = false;
+    clearTimeout(voice.ssTimer);
+    voice.ssTimer = setTimeout(() => { if (voice && voice.ssFrame === f && !voice.ss) stopShare(true); }, 120000);
+    renderControls();
     showVoice();
+  }
+  function stopShare(silent) {
+    if (!voice || !voice.ssFrame) return;
+    const f = voice.ssFrame;
+    try { f.contentWindow.postMessage({ close: true }, '*'); } catch { }
+    setTimeout(() => f.remove(), 300);
+    voice.ssFrame = null; voice.ss = false;
+    if (!silent) { broadcastState(); renderControls(); renderPresence(); }
   }
   function showVoice() { if (voice) { if (cur.sid !== voice.sid) selectServer(voice.sid); selectChannel(voice.cid); } }
 
@@ -596,8 +626,14 @@
     if (!d || typeof d !== 'object') return;
 
     if (voice && e.source === voice.iframe.contentWindow) {
-      if (d.action === 'screen-share-state') { voice.ss = !!d.value; broadcastState(); renderControls(); renderPresence(); }
       if (d.loudness) onLoudness(d.loudness);
+      return;
+    }
+    if (voice && voice.ssFrame && e.source === voice.ssFrame.contentWindow) {
+      if (d.action === 'screen-share-state') {
+        if (d.value) { voice.ss = true; broadcastState(); renderControls(); renderPresence(); }
+        else stopShare(); // cancelled the picker, or hit Chrome's "Stop sharing"
+      }
       return;
     }
 
@@ -735,9 +771,9 @@
 
   function voiceOccupants(sid, cid) {
     const out = [];
-    if (voice && voice.sid === sid && voice.cid === cid) out.push({ user: me, st: myState(), vs: voice.vs, self: true });
+    if (voice && voice.sid === sid && voice.cid === cid) out.push({ user: me, st: myState(), vs: voice.vs, vss: voice.ss ? voice.ssVs : null, self: true });
     const ms = members[sid] || {};
-    for (const id in ms) if (isOnline(ms[id]) && ms[id].vc === cid) out.push({ user: ms[id].user, st: ms[id].st, vs: ms[id].vs });
+    for (const id in ms) if (isOnline(ms[id]) && ms[id].vc === cid) out.push({ user: ms[id].user, st: ms[id].st, vs: ms[id].vs, vss: ms[id].vss });
     return out;
   }
 
@@ -808,14 +844,25 @@
   const autoFocused = new Set();
   let focusUid = null;
 
-  function wantedBr(o) {
-    if (o.self) return 1000; // own preview: keep it cheap
-    const pick = streamBr[o.vs];
+  function wantedBr(t) {
+    if (t.self) return t.screen ? 1500 : 800; // own previews: keep them cheap
+    const pick = streamBr[t.vs];
     if (pick) return pick;
-    const st = o.st || {};
-    let br = (st.s ? st.sb : st.cb) || (st.s ? 6000 : 2500);
+    const st = t.st || {};
+    let br = (t.screen ? st.sb : st.cb) || (t.screen ? 6000 : 2500);
     if (av.recvCap) br = Math.min(br, av.recvCap);
     return br;
+  }
+
+  // what should be on stage: a tile per person (camera or avatar) + a tile per screen share
+  function stageSpecs() {
+    const out = [];
+    for (const o of voiceOccupants(voice.sid, voice.cid)) {
+      const st = o.st || {};
+      out.push({ key: o.user.id, uid: o.user.id, user: o.user, st, self: !!o.self, screen: false, vs: st.c && o.vs ? o.vs : '' });
+      if (st.s && o.vss) out.push({ key: o.user.id + ':s', uid: o.user.id, user: o.user, st, self: !!o.self, screen: true, vs: o.vss });
+    }
+    return out;
   }
 
   function renderStage() {
@@ -826,60 +873,57 @@
     }
     $('devDone').classList.toggle('hidden', !voice.devices);
     $('pubHost').classList.toggle('devices', !!voice.devices);
-    const who = voiceOccupants(voice.sid, voice.cid);
     const seen = new Set();
-    for (const o of who) {
-      const uid = o.user.id;
-      seen.add(uid);
-      const st = o.st || {};
-      const hasVid = !!((st.c || st.s) && o.vs);
-      let el = tileEls.get(uid);
+    for (const t of stageSpecs()) {
+      seen.add(t.key);
+      const hasVid = !!t.vs;
+      let el = tileEls.get(t.key);
       if (!el) {
         el = document.createElement('div');
         el.className = 'tile';
-        el.dataset.uid = uid;
+        el.dataset.key = t.key;
+        if (!t.screen) el.dataset.uid = t.uid; // speaking ring is for people, not screens
         el.innerHTML = '<div class="tile-media"></div><div class="tile-name"></div><div class="tile-tools"></div>';
         host.appendChild(el);
-        tileEls.set(uid, el);
+        tileEls.set(t.key, el);
       }
-      el.style.setProperty('--c', o.user.color);
-      const want = hasVid ? o.vs : '';
+      el.style.setProperty('--c', t.user.color);
       const media = el.querySelector('.tile-media');
-      const br = hasVid ? wantedBr(o) : 0;
-      if (el.dataset.vs !== want) {
-        el.dataset.vs = want;
+      const br = hasVid ? wantedBr(t) : 0;
+      if (el.dataset.vs !== t.vs) {
+        el.dataset.vs = t.vs;
         el.dataset.br = br;
-        if (want) {
+        if (hasVid) {
           const f = document.createElement('iframe');
           f.allow = 'autoplay; fullscreen; picture-in-picture';
-          f.src = viewUrl(want, br);
+          f.src = viewUrl(t.vs, br);
           media.innerHTML = '';
           media.appendChild(f);
-        } else media.innerHTML = avatar(o.user, false, 'big');
-      } else if (want && +el.dataset.br !== br) {
+        } else media.innerHTML = avatar(t.user, false, 'big');
+      } else if (hasVid && +el.dataset.br !== br) {
         el.dataset.br = br; // live bitrate change, no reconnect
         const f = media.querySelector('iframe');
         if (f && f.contentWindow) f.contentWindow.postMessage({ bitrate: br }, '*');
       }
       el.classList.toggle('video', hasVid);
-      el.classList.toggle('screen', hasVid && !!st.s);
-      el.classList.toggle('self', !!o.self);
-      const name = (st.s ? '<span class="live-tag">LIVE</span>' : '') + (st.d ? icon('deaf', 'mini off') : st.m ? icon('micOff', 'mini off') : '') + `<span>${esc(o.user.name)}${o.self ? ' (you)' : ''}</span>`;
+      el.classList.toggle('screen', t.screen);
+      el.classList.toggle('self', t.self);
+      const st = t.st;
+      const label = t.screen ? `${esc(t.user.name)}${t.self ? ' (you)' : ''}'s screen` : `${esc(t.user.name)}${t.self ? ' (you)' : ''}`;
+      const name = (t.screen ? '<span class="live-tag">LIVE</span>' : (st.d ? icon('deaf', 'mini off') : st.m ? icon('micOff', 'mini off') : '')) + `<span>${label}</span>`;
       const nameEl = el.querySelector('.tile-name');
       if (nameEl.innerHTML !== name) nameEl.innerHTML = name;
       const tools = hasVid
-        ? (o.self ? '' : `<button class="tool-btn q-btn" data-q="${esc(uid)}" title="Stream quality">${esc(streamBr[o.vs] ? mbps(br) : 'Auto · ' + mbps(br))}</button>`) +
-          `<button class="tool-btn fs-btn" data-fs="${esc(uid)}" title="Fullscreen">${icon('expand')}</button>`
+        ? (t.self ? '' : `<button class="tool-btn q-btn" data-q="${esc(t.key)}" title="Stream quality">${esc(streamBr[t.vs] ? mbps(br) : 'Auto · ' + mbps(br))}</button>`) +
+          `<button class="tool-btn fs-btn" data-fs="${esc(t.key)}" title="Fullscreen">${icon('expand')}</button>`
         : '';
       const toolsEl = el.querySelector('.tile-tools');
       if (toolsEl.innerHTML !== tools) toolsEl.innerHTML = tools;
 
-      // a new screen share takes the stage once (you can click away from it)
-      const key = uid + ':' + o.vs;
-      if (st.s && !o.self && hasVid && !autoFocused.has(key)) { autoFocused.add(key); focusUid = uid; }
-      if (!st.s) autoFocused.delete(key);
+      // someone else's new screen share takes the stage once (click away any time)
+      if (t.screen && !t.self && !autoFocused.has(t.vs)) { autoFocused.add(t.vs); focusUid = t.key; }
     }
-    for (const [uid, el] of tileEls) if (!seen.has(uid)) { el.remove(); tileEls.delete(uid); }
+    for (const [key, el] of tileEls) if (!seen.has(key)) { el.remove(); tileEls.delete(key); }
     if (focusUid && !(tileEls.get(focusUid) && tileEls.get(focusUid).classList.contains('video'))) focusUid = null;
 
     // layout
@@ -889,9 +933,9 @@
       let i = 0;
       const others = n - 1;
       host.style.setProperty('--sn', others);
-      tileEls.forEach((el, uid) => {
-        el.classList.toggle('focused', uid === focusUid);
-        if (uid !== focusUid) el.style.setProperty('--i', i++);
+      tileEls.forEach((el, key) => {
+        el.classList.toggle('focused', key === focusUid);
+        if (key !== focusUid) el.style.setProperty('--i', i++);
       });
       host.classList.toggle('no-strip', others === 0);
     } else {
@@ -903,8 +947,8 @@
     paintSpeaking();
   }
 
-  function qualityMenu(uid, btn) {
-    const el = tileEls.get(uid);
+  function qualityMenu(key, btn) {
+    const el = tileEls.get(key);
     if (!el || !el.dataset.vs) return;
     const vs = el.dataset.vs;
     const cur = streamBr[vs] || 0;
@@ -1041,8 +1085,10 @@
     const cam = !!(voice && voice.cam), ss = !!(voice && voice.ss);
     setIcon($('cbCam'), cam ? 'camera' : 'cameraOff');
     $('cbCam').classList.toggle('on', cam); $('cbCam').title = cam ? 'Turn off camera' : 'Turn on camera';
-    $('cbShare').classList.toggle('on', ss); $('cbShare').title = ss ? 'Stop sharing' : 'Share your screen';
-    $('vsCam').classList.toggle('on', cam); $('vsShare').classList.toggle('on', ss);
+    const pending = !!(voice && voice.ssFrame && !voice.ss);
+    $('cbShare').classList.toggle('on', ss); $('cbShare').classList.toggle('pending', pending);
+    $('cbShare').title = ss ? 'Stop sharing' : pending ? 'Waiting for you to pick a screen… (click to cancel)' : 'Share your screen';
+    $('vsCam').classList.toggle('on', cam); $('vsShare').classList.toggle('on', ss); $('vsShare').classList.toggle('pending', pending);
   }
 
   // ---------------------------------------------------------------- modals
@@ -1126,9 +1172,11 @@
           <div><label>Resolution</label><select id="aSsQ">${opt('720', av.ssQ, '720p')}${opt('1080', av.ssQ, '1080p')}${opt('1440', av.ssQ, '1440p')}</select></div>
           <div><label>Frame rate</label><select id="aSsFps">${opt(5, av.ssFps, '5 fps (slides)')}${opt(15, av.ssFps, '15 fps')}${opt(30, av.ssFps, '30 fps')}${opt(60, av.ssFps, '60 fps (games)')}</select></div>
           <div><label>Bitrate</label><select id="aSsBr">${SS_BRS.map((k) => opt(k, av.ssBr, mbps(k))).join('')}</select></div>
+          <div style="grid-column: span 3"><label>Optimize screen share for</label><select id="aSsHint">${opt('detail', av.ssHint, 'Clarity: sharp text and detail (recommended)')}${opt('motion', av.ssHint, 'Smoothness: games and video, may soften under load')}</select></div>
         </div>
         <h3>Watching others</h3>
         <div class="grid3">
+          <div><label>Video codec</label><select id="aCodec">${opt('', av.codec, 'Auto')}${opt('vp9', av.codec, 'VP9 (sharper)')}${opt('av1', av.codec, 'AV1 (sharpest, more CPU)')}${opt('h264', av.codec, 'H.264 (hardware, low CPU)')}</select></div>
           <div style="grid-column: span 2"><label>Max download per stream</label><select id="aRecv">${opt(0, av.recvCap, 'No limit (use each sender\'s setting)')}${VIEW_BRS.map((k) => opt(k, av.recvCap, 'Up to ' + mbps(k))).join('')}</select></div>
         </div>
         <p class="hint">Bitrate is the biggest quality factor: higher = sharper, but every viewer pulls that much from your upload. You can also change any stream's quality from the button on its tile. ${voice ? 'Saving reconnects your call to apply camera/screen changes.' : ''}</p>
@@ -1152,9 +1200,13 @@
         store.set('me', me);
         const next = {
           camQ: $('aCamQ').value, camFps: +$('aCamFps').value, camBr: +$('aCamBr').value,
-          ssQ: $('aSsQ').value, ssFps: +$('aSsFps').value, ssBr: +$('aSsBr').value, recvCap: +$('aRecv').value,
+          ssQ: $('aSsQ').value, ssFps: +$('aSsFps').value, ssBr: +$('aSsBr').value, ssHint: $('aSsHint').value, recvCap: +$('aRecv').value, codec: $('aCodec').value,
         };
-        const sendKeys = ['camQ', 'camFps', 'camBr', 'ssQ', 'ssFps', 'ssBr'];
+        const sendKeys = ['camQ', 'camFps', 'camBr'];
+        const shareKeys = ['ssQ', 'ssFps', 'ssBr', 'ssHint'];
+        const viewKeys = ['codec'];
+        const shareChanged = shareKeys.some((k) => String(next[k]) !== String(av[k]));
+        const viewChanged = viewKeys.some((k) => String(next[k]) !== String(av[k]));
         const avChanged = sendKeys.some((k) => String(next[k]) !== String(av[k]));
         av = next;
         store.set('av', av);
@@ -1165,6 +1217,8 @@
           setTimeout(() => servers.forEach(connectMesh), 400);
         }
         if (voice && (avChanged || nameChanged)) joinVoice(voice.sid, voice.cid, voice.cam);
+        if (voice && shareChanged && voice.ssFrame) toast('New screen share settings apply the next time you share.');
+        if (viewChanged) { tileEls.forEach((el) => { el.dataset.vs = '__reload'; }); } // reconnect viewers with the new codec
         render();
         renderStage();
       };
@@ -1342,7 +1396,7 @@
     const fs = e.target.closest('[data-fs]');
     if (fs) { const el = tileEls.get(fs.dataset.fs); if (el && el.requestFullscreen) el.requestFullscreen(); return; }
     const t = e.target.closest('.tile.video');
-    if (t) { focusUid = focusUid === t.dataset.uid ? null : t.dataset.uid; renderStage(); }
+    if (t) { focusUid = focusUid === t.dataset.key ? null : t.dataset.key; renderStage(); }
   });
   document.addEventListener('click', (e) => { if (!e.target.closest('#qMenu')) $('qMenu').classList.add('hidden'); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && focusUid && $('modalBack').classList.contains('hidden')) { focusUid = null; renderStage(); } });

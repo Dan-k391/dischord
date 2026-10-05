@@ -403,3 +403,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 #modal h3 { margin: 18px 0 0; font-size: 14px; color: var(--text-strong); }
 .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0 12px; }
 @media (max-width: 640px) { .grid3 { grid-template-columns: 1fr; } }
+
+.call-btn.pending { background: #fff; color: var(--accent); animation: pulse 1.2s infinite; }
+@keyframes pulse { 50% { box-shadow: 0 0 0 6px rgba(88,101,242,.35); } }
+.pill-btn.pending { background: var(--accent); color: #fff; }
