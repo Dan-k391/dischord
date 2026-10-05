@@ -7,7 +7,7 @@ A Discord-style chat app built on [VDO.Ninja](https://vdo.ninja). No accounts, n
 - **Text chat** sent peer-to-peer: Markdown-ish formatting, edit/delete, typing indicators, unread badges, desktop notifications
 - **Replies**: reply from message actions or the right-click menu; click the quote to jump to the original message
 - **Files**: attach, paste or drag & drop up to four files with no app-imposed file size limit. Non-image contents transfer directly from the sender only after **Download**, with progress and cancellation
-- **Image previews**: images automatically display a raster preview in chat. Previews are cached in the browser and available through chat history. Images are shared as a high-quality preview (up to 4096 pixels on the longer side) with a download button that saves it
+- **Image previews**: images automatically display a high-quality preview (up to 4096 pixels on the longer side), cached for chat history. Download saves the original attachment; Save preview saves the cached image when the original sender is unavailable
 - **Reactions** on messages, plus floating emoji reactions in voice calls
 - **History sync**: when you come online, peers send you recent messages you missed
 - **Voice channels** with mute/deafen, **camera** and **screen share at the same time**, speaking indicators, focus view + fullscreen
@@ -15,6 +15,7 @@ A Discord-style chat app built on [VDO.Ninja](https://vdo.ninja). No accounts, n
 - **Right-click menus**: per-user volume, stream volume, local mute, hide video, per-stream quality; quick actions for yourself
 - **Quality controls**: resolution (up to 4K / native source), frame rate and bitrate (up to 40 Mbps) for camera and screen share; per-stream bitrate picker; live stats (resolution · fps · bitrate · codec) on every video
 - **Presence**: member list, online/offline, who's in which voice channel
+- **Device menus and resizable panels**: input/output device carets, channel/server context menus, expanded reactions, and draggable side panels
 
 ## Windows app
 Download the [portable Dischord.exe](https://github.com/ZJJ-2785/dischord/releases/latest/download/Dischord.exe), [Windows installer](https://github.com/ZJJ-2785/dischord/releases/latest/download/Dischord-Setup.exe), or [Windows ZIP](https://github.com/ZJJ-2785/dischord/releases/latest/download/Dischord-Windows.zip). The app requires **Windows 10/11, 64-bit** and includes its Chromium runtime. For the ZIP, extract the whole folder before running `Dischord.exe`.

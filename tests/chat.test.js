@@ -250,8 +250,8 @@ function receivedFile(app, size = 100 * 1024 * 1024) {
 
 function clickFile(app, message, action = 'download') {
   const selector = action === 'download' ? '[data-file-download]' : '[data-file-cancel]';
-  const button = { dataset: { [action === 'download' ? 'fileDownload' : 'fileCancel']: message.id } };
-  return app.node('messages').onclick({ target: { closest: (value) => value === selector ? button : null } });
+  const button = { dataset: { [action === 'download' ? 'fileDownload' : 'fileCancel']: message.id }, getAttribute() { return null; } };
+  return app.node('messages').onclick({ stopPropagation() {}, target: { closest: (value) => value.includes(selector) ? button : null } });
 }
 
 test('legacy text messages remain valid without a reply or attachment', () => {
@@ -437,7 +437,7 @@ test('image preview: older image history displays an inline preview and requests
   assert.strictEqual(app.objectUrls.length, 0);
 });
 
-test('images are saved from their preview while other files keep the download card', async () => {
+test('images download originals from preview controls while other files keep the download card', async () => {
   const app = createApp();
   const url = 'data:image/png;base64,' + Buffer.alloc(2000, 0x41).toString('base64');
   const image = previewMessage(app, url, { id: 'imagemsg' });
@@ -447,8 +447,8 @@ test('images are saved from their preview while other files keep the download ca
   await settle();
   const html = app.node('messages').innerHTML;
   assert(html.includes('data-image-open='), 'The image still shows its preview');
-  assert.strictEqual((html.match(/data-file-download=/g) || []).length, 1, 'Only the non-image file uses the transfer download');
-  assert(html.includes('data-image-save='), 'The image offers saving its preview');
+  assert(html.includes('data-image-download="imagemsg"'), 'The image keeps its original download inside the preview');
+  assert(html.includes('data-file-download="imagemsg"'), 'The preview can request the original file');
   assert(html.includes('class="msg-file"') && html.includes('recording.mp4'));
   assert(!html.includes('picture.png</div>'), 'No file card for the image');
   assert(!/data-legacy-download|Download original/.test(html));
@@ -806,8 +806,7 @@ test('the Download button requests a file only from its sender after a click', (
   app.api.peers.testserver = new Map([['bobuuid', { uid: 'bob', rx: 1000 }]]);
   app.api.renderMessages();
   assert.strictEqual(app.sent.length, 0);
-  const button = { dataset: { fileDownload: message.id } };
-  app.node('messages').onclick({ target: { closest: (selector) => selector === '[data-file-download]' ? button : null } });
+  clickFile(app, message, 'download');
   assert.strictEqual(app.sent.length, 1);
   assert.strictEqual(app.sent[0].packet.t, 'f-request');
   assert.strictEqual(app.sent[0].uuid, 'bobuuid');
@@ -840,8 +839,7 @@ test('an owner can download their selected file only after pressing Download', a
   app.api.sendMessage('');
   assert.strictEqual(app.downloads.length, 0);
   const message = app.sent[0].packet.m;
-  const button = { dataset: { fileDownload: message.id } };
-  app.node('messages').onclick({ target: { closest: (selector) => selector === '[data-file-download]' ? button : null } });
+  clickFile(app, message, 'download');
   assert.strictEqual(app.downloads.length, 1);
   assert.strictEqual(app.downloads[0].download, 'notes.txt');
   assert.strictEqual(app.objectUrls.length, 1);

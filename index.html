@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Dischord</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎧</text></svg>">
-  <link rel="stylesheet" href="style.css?v=20">
+  <link rel="stylesheet" href="style.css?v=21">
 </head>
 <body>
   <div id="app">
@@ -114,11 +114,12 @@
 
       <!-- The live VDO.Ninja call lives here and survives switching channels -->
       <div id="voiceStage" class="hidden">
-        <div id="tiles"></div>
+        <div id="tiles">
+          <button id="stripToggle" class="hidden" title="Hide members"><i data-icon="chevDown"></i><i data-icon="people"></i></button>
+        </div>
         <div id="pubHost"></div>
         <button class="btn primary hidden" id="devDone">Done choosing devices</button>
         <div id="qMenu" class="hidden"></div>
-        <button id="stripToggle" class="hidden" title="Hide members"><i data-icon="chevDown"></i><i data-icon="people"></i></button>
         <div id="callBar">
           <span class="call-pair"><button class="call-btn" id="cbMic" title="Mute"><i data-icon="mic"></i></button><button class="call-caret" id="cbMicCaret" title="Input options"><i data-icon="chevUp"></i></button></span>
           <button class="call-btn" id="cbCam" title="Turn on camera"><i data-icon="camera"></i></button>
@@ -150,6 +151,6 @@
 
   <script src="file-transfer.js?v=16"></script>
   <script src="image-preview.js?v=2"></script>
-  <script src="app.js?v=24"></script>
+  <script src="app.js?v=25"></script>
 </body>
 </html>
