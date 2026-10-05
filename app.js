@@ -1471,6 +1471,7 @@
   window.addEventListener('dischord-screen-share-cancelled', (e) => {
     if (voice && voice.ssFrame && !voice.ss && e.detail?.streamId === voice.ssVs) stopShare();
   });
+  window.addEventListener('dischord-android-call-stop', () => leaveVoice());
   function showVoice() { if (voice) { if (cur.sid !== voice.sid) selectServer(voice.sid); selectChannel(voice.cid); } }
 
   let audioCtx;
