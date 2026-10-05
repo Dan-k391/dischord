@@ -563,3 +563,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .att-size { font-size: 11px; }
 
 .ctx-note { padding: 8px; font-size: 13px; color: var(--text-muted); max-width: 240px; }
+
+.msg-img .img-save { position: absolute; right: 8px; bottom: 8px; width: 32px; height: 32px; border-radius: 6px; background: rgba(0,0,0,.65); color: #fff; display: grid; place-items: center; opacity: 0; transition: opacity .15s; }
+.msg-img:hover .img-save, .msg-img .img-save:focus-visible { opacity: 1; }
+.msg-img .img-save:hover { background: rgba(0,0,0,.85); }
+.msg-img .img-save .ico-svg { width: 18px; height: 18px; }

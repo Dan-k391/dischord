@@ -973,6 +973,20 @@
     bar.innerHTML = pending.map((att, i) => `<div class="att file">${icon('file')}<span class="att-name" title="${esc(att.meta.name)}">${esc(att.meta.name)}</span><span class="att-size">${esc(window.DischordFiles.formatSize(att.meta.size))}</span><button type="button" class="att-x" data-rm="${i}" title="Remove">${icon('x')}</button></div>`).join('') +
       (pending.length ? '<span class="attachment-note">Images show previews automatically.<br>Files are shared on Download. Keep this tab open.</span>' : '');
   }
+  // Images are shared as the preview itself (full quality, up to the preview cap): saving writes that data.
+  async function saveImage(sid, cid, mid) {
+    const m = (getMsgs(sid)[cid] || []).find((x) => x.id === mid && !x.del && x.img);
+    if (!m) return;
+    const url = await getImg(sid, m);
+    if (!url) { requestImg(sid, m.img.id, cid, mid, true); toast('Image is still loading. Try again in a moment.'); return; }
+    const ext = (url.match(/^data:image\/(\w+)/) || [, 'png'])[1].replace('jpeg', 'jpg');
+    const base = m.file ? m.file.name.replace(/\.[^.]*$/, '') : 'image';
+    try {
+      const bin = atob(url.slice(url.indexOf(',') + 1)), bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      saveFileDownload(new Blob([bytes], { type: 'image/' + ext }), (base || 'image') + '.' + ext);
+    } catch { toast('Could not save that image.'); }
+  }
   async function openImage(sid, cid, mid) {
     const m = (getMsgs(sid)[cid] || []).find((m) => m.id === mid && !m.del && m.img);
     if (!m) return;
@@ -980,7 +994,9 @@
     if (!imageStillLive(sid, m)) return;
     if (!url) { requestImg(sid, m.img.id, cid, mid, true); return; }
     modal(`<div class="lightbox"><img src="${esc(url)}" alt="${esc(m.file ? m.file.name : 'Shared image')}"></div>
-      <div class="actions"><button class="btn primary" data-close>Close</button></div>`, null, true, true);
+      <div class="actions"><button class="btn" id="saveOpenImage">Download</button><button class="btn primary" data-close>Close</button></div>`, () => {
+      $('saveOpenImage').onclick = () => saveImage(sid, cid, mid);
+    }, true, true);
     $('modal').classList.add('lb');
   }
 
@@ -1977,7 +1993,7 @@
     let h = `<div class="ctx-emojis">${REACTS.slice(0, 8).map((e) => `<button data-emo="${e}">${e}</button>`).join('')}</div>`;
     h += ctxItem('reply', 'reply', 'Reply');
     if (m.text) h += ctxItem('copy', 'copy', 'Copy text');
-    if (m.img) h += ctxItem('openimg', 'image', 'Open image');
+    if (m.img) h += ctxItem('openimg', 'image', 'Open image') + ctxItem('saveimg', 'download', 'Download image');
     if (!mine) h += ctxItem('mention', 'at', 'Mention ' + esc(m.a.name));
     if (mine && m.text) h += ctxItem('edit', 'edit', 'Edit message');
     if (mine) h += ctxItem('del', 'trash', 'Delete message', 'danger');
@@ -1992,6 +2008,7 @@
           case 'reply': return replyToMessage(mid);
           case 'copy': navigator.clipboard && navigator.clipboard.writeText(m.text); return toast('Copied');
           case 'openimg': return openImage(cur.sid, m.cid, m.id);
+          case 'saveimg': return saveImage(cur.sid, m.cid, m.id);
           case 'mention': { const inp = $('msgInput'); inp.value += '@' + m.a.name.replace(/\s+/g, '') + ' '; return inp.focus(); }
           case 'edit': return editMessage(mid);
           case 'del': return deleteMessage(mid);
@@ -2099,7 +2116,7 @@
       const imageStateKey = imageMessageKey(s.id, m.cid, m.id);
       const failedPreview = imageErrors.has(imageStateKey);
       const img = m.img ? `<button type="button" class="msg-img ${failedPreview ? '' : 'loading'}" style="aspect-ratio:${m.img.w}/${m.img.h};width:min(100%, ${Math.min(420, m.img.w)}px)" data-image-open="${esc(m.id)}" aria-label="Open image preview">
-        <img data-img="${esc(m.img.id)}" data-img-sid="${esc(s.id)}" data-img-cid="${esc(m.cid)}" data-img-mid="${esc(m.id)}" loading="lazy" decoding="async" alt="${esc(m.file ? m.file.name : 'Shared image')}"><span class="image-preview-status" role="status">${failedPreview ? 'Preview unavailable. Someone with it must be online.' : 'Loading image preview…'}</span></button>` : m.file && window.DischordImages.isImage(m.file)
+        <img data-img="${esc(m.img.id)}" data-img-sid="${esc(s.id)}" data-img-cid="${esc(m.cid)}" data-img-mid="${esc(m.id)}" loading="lazy" decoding="async" alt="${esc(m.file ? m.file.name : 'Shared image')}"><span class="image-preview-status" role="status">${failedPreview ? 'Preview unavailable. Someone with it must be online.' : 'Loading image preview…'}</span><span class="img-save" data-image-save="${esc(m.id)}" role="button" tabindex="0" title="Download image">${icon('download')}</span></button>` : m.file && window.DischordImages.isImage(m.file)
         ? `<div class="image-preview-placeholder" role="status">${icon('image')}<span>${imagePreparing.has(imageStateKey) && !failedPreview ? 'Preparing image preview…' : 'Image preview unavailable.'}</span></div>` : '';
       // images are preview-only; every other file is a card that transfers on Download
       const file = m.file && !window.DischordImages.isImage(m.file) ? `<div class="msg-file" data-file-card="${esc(m.id)}">${fileCardContent(s.id, m)}</div>` : '';
@@ -2514,6 +2531,8 @@
   };
 
   $('messages').onclick = (e) => {
+    const save = e.target.closest('[data-image-save]');
+    if (save) { e.stopPropagation(); return saveImage(cur.sid, cur.cid, save.dataset.imageSave); }
     const image = e.target.closest('[data-image-open]');
     if (image) return openImage(cur.sid, cur.cid, image.dataset.imageOpen);
     const rp = e.target.closest('[data-reply]');

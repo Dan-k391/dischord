@@ -426,7 +426,8 @@ test('image preview: older image history displays an inline preview and requests
   app.api.addMsg('testserver', message);
   app.api.renderMessages();
   await settle();
-  assert(!/download/i.test(app.node('messages').innerHTML), 'Images are preview-only: no download link');
+  assert(!/data-file-download|legacy-download/.test(app.node('messages').innerHTML), 'Images have no file-transfer download');
+  assert(app.node('messages').innerHTML.includes('data-image-save='), 'The preview can be saved');
   assert(app.node('messages').innerHTML.includes('data-img='));
   assert.deepStrictEqual(app.sent.map((item) => item.packet.t), ['imgreq']);
   assert.strictEqual(app.sent[0].packet.cid, 'general');
@@ -436,7 +437,7 @@ test('image preview: older image history displays an inline preview and requests
   assert.strictEqual(app.objectUrls.length, 0);
 });
 
-test('images are preview-only while other files keep the download card', async () => {
+test('images are saved from their preview while other files keep the download card', async () => {
   const app = createApp();
   const url = 'data:image/png;base64,' + Buffer.alloc(2000, 0x41).toString('base64');
   const image = previewMessage(app, url, { id: 'imagemsg' });
@@ -446,10 +447,11 @@ test('images are preview-only while other files keep the download card', async (
   await settle();
   const html = app.node('messages').innerHTML;
   assert(html.includes('data-image-open='), 'The image still shows its preview');
-  assert.strictEqual((html.match(/data-file-download=/g) || []).length, 1, 'Only the non-image file has a download control');
+  assert.strictEqual((html.match(/data-file-download=/g) || []).length, 1, 'Only the non-image file uses the transfer download');
+  assert(html.includes('data-image-save='), 'The image offers saving its preview');
   assert(html.includes('class="msg-file"') && html.includes('recording.mp4'));
   assert(!html.includes('picture.png</div>'), 'No file card for the image');
-  assert(!/data-legacy-download|Download original|Download image/.test(html));
+  assert(!/data-legacy-download|Download original/.test(html));
 });
 
 test('image preview: unsolicited legacy chunks cannot cache or save bytes', () => {
