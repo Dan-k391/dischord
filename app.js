@@ -26,7 +26,7 @@
   const STALE_LOOSE = 25000;      // peer with no live connection considered gone after this
   const COLORS = ['#7b61ff', '#5865f2', '#3ba55c', '#faa61a', '#ed4245', '#eb459e', '#00a8fc', '#1abc9c', '#e67e22', '#9b59b6'];
 
-  const AV_DEFAULTS = { camQ: '720', camFps: 30, camBr: 2500, ssQ: '1080', ssFps: 30, ssBr: 6000, ssHint: 'detail', recvCap: 0, codec: '' };
+  const AV_DEFAULTS = { camQ: '720', camFps: 30, camBr: 2500, ssQ: '1080', ssFps: 30, ssBr: 6000, ssHint: 'detail', recvCap: 0, codec: '', selfPreview: 'full' };
   const CAM_BRS = [300, 600, 1000, 1500, 2500, 4000, 6000, 8000];
   const SS_BRS = [1000, 2500, 4000, 6000, 8000, 12000, 16000, 20000];
   const VIEW_BRS = [300, 800, 1500, 2500, 4000, 6000, 8000, 12000, 20000];
@@ -845,7 +845,8 @@
   let focusUid = null;
 
   function wantedBr(t) {
-    if (t.self) return t.screen ? 1500 : 800; // own previews: keep them cheap
+    // own preview: by default exactly what others receive (your own send bitrate, full resolution)
+    if (t.self) return av.selfPreview === 'low' ? (t.screen ? 1500 : 800) : (t.screen ? av.ssBr : av.camBr);
     const pick = streamBr[t.vs];
     if (pick) return pick;
     const st = t.st || {};
@@ -859,8 +860,9 @@
     const out = [];
     for (const o of voiceOccupants(voice.sid, voice.cid)) {
       const st = o.st || {};
-      out.push({ key: o.user.id, uid: o.user.id, user: o.user, st, self: !!o.self, screen: false, vs: st.c && o.vs ? o.vs : '' });
-      if (st.s && o.vss) out.push({ key: o.user.id + ':s', uid: o.user.id, user: o.user, st, self: !!o.self, screen: true, vs: o.vss });
+      const hideSelf = o.self && av.selfPreview === 'off';
+      out.push({ key: o.user.id, uid: o.user.id, user: o.user, st, self: !!o.self, screen: false, vs: st.c && o.vs && !hideSelf ? o.vs : '' });
+      if (st.s && o.vss) out.push({ key: o.user.id + ':s', uid: o.user.id, user: o.user, st, self: !!o.self, screen: true, vs: hideSelf ? '' : o.vss });
     }
     return out;
   }
@@ -899,7 +901,8 @@
           f.src = viewUrl(t.vs, br);
           media.innerHTML = '';
           media.appendChild(f);
-        } else media.innerHTML = avatar(t.user, false, 'big');
+        } else if (t.screen) media.innerHTML = `<div class="share-ph">${icon('screen')}<span>You're sharing your screen</span></div>`;
+        else media.innerHTML = avatar(t.user, false, 'big');
       } else if (hasVid && +el.dataset.br !== br) {
         el.dataset.br = br; // live bitrate change, no reconnect
         const f = media.querySelector('iframe');
@@ -1177,7 +1180,8 @@
         <h3>Watching others</h3>
         <div class="grid3">
           <div><label>Video codec</label><select id="aCodec">${opt('', av.codec, 'Auto')}${opt('vp9', av.codec, 'VP9 (sharper)')}${opt('av1', av.codec, 'AV1 (sharpest, more CPU)')}${opt('h264', av.codec, 'H.264 (hardware, low CPU)')}</select></div>
-          <div style="grid-column: span 2"><label>Max download per stream</label><select id="aRecv">${opt(0, av.recvCap, 'No limit (use each sender\'s setting)')}${VIEW_BRS.map((k) => opt(k, av.recvCap, 'Up to ' + mbps(k))).join('')}</select></div>
+          <div><label>Your own preview</label><select id="aSelf">${opt('full', av.selfPreview, 'Full quality')}${opt('low', av.selfPreview, 'Low (saves CPU)')}${opt('off', av.selfPreview, 'Hidden')}</select></div>
+          <div style="grid-column: span 3"><label>Max download per stream</label><select id="aRecv">${opt(0, av.recvCap, 'No limit (use each sender\'s setting)')}${VIEW_BRS.map((k) => opt(k, av.recvCap, 'Up to ' + mbps(k))).join('')}</select></div>
         </div>
         <p class="hint">Bitrate is the biggest quality factor: higher = sharper, but every viewer pulls that much from your upload. You can also change any stream's quality from the button on its tile. ${voice ? 'Saving reconnects your call to apply camera/screen changes.' : ''}</p>
         ${voice ? '<button class="btn" id="aDevices">Choose microphone / camera…</button>' : '<p class="hint">Join a voice channel to pick your microphone and camera.</p>'}
@@ -1200,11 +1204,11 @@
         store.set('me', me);
         const next = {
           camQ: $('aCamQ').value, camFps: +$('aCamFps').value, camBr: +$('aCamBr').value,
-          ssQ: $('aSsQ').value, ssFps: +$('aSsFps').value, ssBr: +$('aSsBr').value, ssHint: $('aSsHint').value, recvCap: +$('aRecv').value, codec: $('aCodec').value,
+          ssQ: $('aSsQ').value, ssFps: +$('aSsFps').value, ssBr: +$('aSsBr').value, ssHint: $('aSsHint').value, recvCap: +$('aRecv').value, codec: $('aCodec').value, selfPreview: $('aSelf').value,
         };
         const sendKeys = ['camQ', 'camFps', 'camBr'];
         const shareKeys = ['ssQ', 'ssFps', 'ssBr', 'ssHint'];
-        const viewKeys = ['codec'];
+        const viewKeys = ['codec', 'selfPreview'];
         const shareChanged = shareKeys.some((k) => String(next[k]) !== String(av[k]));
         const viewChanged = viewKeys.some((k) => String(next[k]) !== String(av[k]));
         const avChanged = sendKeys.some((k) => String(next[k]) !== String(av[k]));
