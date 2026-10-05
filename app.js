@@ -1684,7 +1684,7 @@
       const mine = voice && voice.sid === s.id && voice.cid === c.id;
       h += `<div class="chan ${c.id === cur.cid ? 'active' : ''} ${mine ? 'connected' : ''}" data-cid="${esc(c.id)}" data-type="voice" draggable="true">
         <span class="ico">${icon('speaker')}</span><span class="name">${esc(c.name)}</span>
-        ${who.length && callStart(s.id, c.id) ? `<span class="chan-time" data-start="${callStart(s.id, c.id)}" title="Call running time (right-click the channel for the exact time)">${fmtShort(now() - callStart(s.id, c.id))}</span>` : ''}
+        ${who.length && callStart(s.id, c.id) ? `<span class="chan-time" data-start="${callStart(s.id, c.id)}" title="Call running for">${fmtDur(now() - callStart(s.id, c.id))}</span>` : ''}
         ${who.length ? `<span class="count">${who.length}</span>` : ''}
 </div>`;
       if (who.length) {
@@ -2779,16 +2779,9 @@
     const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, s = t % 60;
     return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s).padStart(2, '0');
   }
-  // compact form for the channel row: 42s, 6m, 1h 05m
-  function fmtShort(ms) {
-    const t = Math.max(0, Math.floor(ms / 1000));
-    if (t < 60) return t + 's';
-    const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60;
-    return h ? `${h}h ${String(m).padStart(2, '0')}m` : m + 'm';
-  }
-  // the running time of each active call: short in the channel list, exact in an open channel menu
+  // the running time of each active call, in the channel list and in an open channel menu
   function paintChannelTimes() {
-    document.querySelectorAll('#channelList .chan-time').forEach((el) => { el.textContent = fmtShort(now() - (+el.dataset.start || now())); });
+    document.querySelectorAll('#channelList .chan-time').forEach((el) => { el.textContent = fmtDur(now() - (+el.dataset.start || now())); });
     document.querySelectorAll('#ctxMenu .call-clock').forEach((el) => { el.textContent = fmtDur(now() - (+el.dataset.start || now())); });
   }
 
