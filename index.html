@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Dischord</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎧</text></svg>">
-  <link rel="stylesheet" href="style.css?v=24">
+  <link rel="icon" type="image/svg+xml" href="icon.svg">
+  <link rel="stylesheet" href="style.css?v=25">
 </head>
 <body>
   <div id="app">
     <!-- Server rail -->
     <nav id="rail">
-      <button class="rail-btn home" id="homeBtn" title="Home"><i data-icon="headphones"></i></button>
+      <button class="rail-btn home" id="homeBtn" title="Home"><img src="icon.svg" alt="" draggable="false"></button>
       <div class="rail-sep"></div>
       <div id="serverList"></div>
       <button class="rail-btn add" id="addServerBtn" title="Add a server"><i data-icon="plus"></i></button>
@@ -75,7 +75,7 @@
 
       <section id="welcome" class="view">
         <div class="welcome-card">
-          <div class="welcome-logo"><i data-icon="headphones"></i></div>
+          <div class="welcome-logo"><img src="icon.svg" alt="Dischord" draggable="false"></div>
           <h1>Welcome to Dischord</h1>
           <p>Servers, text channels and voice/video rooms. Fully peer-to-peer, powered by VDO.Ninja. No accounts, no backend.</p>
           <div class="row">
@@ -122,13 +122,16 @@
         <div id="qMenu" class="hidden"></div>
         <button id="stripToggle" class="hidden" title="Hide members"><i data-icon="chevDown"></i><i data-icon="people"></i></button>
         <div id="callBar">
-          <span class="call-pair"><button class="call-btn" id="cbMic" title="Mute"><i data-icon="mic"></i></button><button class="call-caret" id="cbMicCaret" title="Input options"><i data-icon="chevUp"></i></button></span>
-          <span class="call-pair"><button class="call-btn" id="cbCam" title="Turn on camera"><i data-icon="camera"></i></button><button class="call-caret" id="cbCamCaret" title="Camera options"><i data-icon="chevUp"></i></button></span>
-          <span class="call-pair"><button class="call-btn" id="cbShare" title="Share your screen"><i data-icon="screen"></i></button><button class="call-caret" id="cbShareCaret" title="Screen share options"><i data-icon="chevUp"></i></button></span>
-          <span class="call-pair"><button class="call-btn" id="cbDeaf" title="Deafen"><i data-icon="headphones"></i></button><button class="call-caret" id="cbDeafCaret" title="Output options"><i data-icon="chevUp"></i></button></span>
-          <span class="call-pair"><button class="call-btn" id="cbReact" title="Send a reaction"><i data-icon="smile"></i></button><button class="call-caret" id="cbReactCaret" title="More reactions"><i data-icon="chevUp"></i></button></span>
-          <div class="call-sep"></div>
-          <button class="call-btn" id="cbSettings" title="Voice & video settings"><i data-icon="gear"></i></button>
+          <div class="call-group">
+            <span class="call-pair"><button class="call-btn" id="cbMic" title="Mute"><i data-icon="mic"></i></button><button class="call-caret" id="cbMicCaret" title="Input options"><i data-icon="chevUp"></i></button></span>
+            <span class="call-pair"><button class="call-btn" id="cbCam" title="Turn on camera"><i data-icon="camera"></i></button><button class="call-caret" id="cbCamCaret" title="Camera options"><i data-icon="chevUp"></i></button></span>
+          </div>
+          <div class="call-group">
+            <span class="call-pair"><button class="call-btn" id="cbShare" title="Share your screen"><i data-icon="screen"></i></button><button class="call-caret" id="cbShareCaret" title="Screen share options"><i data-icon="chevUp"></i></button></span>
+            <span class="call-pair"><button class="call-btn" id="cbDeaf" title="Deafen"><i data-icon="headphones"></i></button><button class="call-caret" id="cbDeafCaret" title="Output options"><i data-icon="chevUp"></i></button></span>
+            <span class="call-pair"><button class="call-btn" id="cbReact" title="Send a reaction"><i data-icon="smile"></i></button><button class="call-caret" id="cbReactCaret" title="More reactions"><i data-icon="chevUp"></i></button></span>
+            <button class="call-btn" id="cbSettings" title="Voice & video settings"><i data-icon="gear"></i></button>
+          </div>
           <button class="call-btn danger" id="cbLeave" title="Disconnect"><i data-icon="hangup"></i></button>
         </div>
       </div>
@@ -152,6 +155,6 @@
 
   <script src="file-transfer.js?v=16"></script>
   <script src="image-preview.js?v=2"></script>
-  <script src="app.js?v=28"></script>
+  <script src="app.js?v=29"></script>
 </body>
 </html>

@@ -576,12 +576,6 @@ button { font: inherit; color: inherit; cursor: pointer; }
 /* ---------- v24: device carets, resizable side panels ---------- */
 #userPanel .icon-btn.caret { padding: 6px 1px; margin-left: -4px; color: var(--text-muted); }
 #userPanel .icon-btn.caret .ico-svg { width: 12px; height: 12px; stroke-width: 3; }
-.call-pair { display: flex; gap: 1px; }
-.call-pair .call-btn { border-radius: 26px 0 0 26px; width: 48px; }
-.call-caret { width: 26px; height: 52px; border: 0; border-radius: 0 26px 26px 0; background: #2b2d31; color: var(--text-strong); display: grid; place-items: center; padding: 0 4px 0 0; transition: background .15s; }
-.call-caret:hover { background: #404249; }
-.call-caret .ico-svg { width: 14px; height: 14px; stroke-width: 3; }
-@media (max-width: 640px) { .call-pair .call-btn { width: 40px; } .call-caret { height: 44px; width: 22px; } }
 .resizer { flex: none; width: 5px; margin: 0 -2px; z-index: 5; cursor: col-resize; background: transparent; transition: background .15s; touch-action: none; }
 .resizer:hover, .resizer.dragging { background: var(--accent); }
 .resizer:has(+ #members.collapsed) { display: none; }
@@ -591,7 +585,8 @@ body.resizing { cursor: col-resize; user-select: none; }
 body.resizing iframe { pointer-events: none !important; }
 
 /* ---------- v25: call preview while browsing elsewhere, emoji button, ping ---------- */
-#voiceStage.offstage.mini { visibility: visible; pointer-events: auto; top: auto; left: auto; right: var(--mini-r, 16px); bottom: var(--mini-b, 84px); touch-action: none; transition: transform .2s cubic-bezier(.34, 1.56, .64, 1); animation: miniIn .55s cubic-bezier(.3, 1.4, .5, 1); width: 320px; height: 180px; z-index: 30; border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.6); cursor: pointer; }
+#voiceStage.offstage.mini.morph { animation: none; }
+#voiceStage.offstage.mini { visibility: visible; pointer-events: auto; top: auto; left: auto; right: var(--mini-r, 16px); bottom: var(--mini-b, 84px); touch-action: none; transition: transform .2s cubic-bezier(.34, 1.56, .64, 1); animation: miniIn .55s cubic-bezier(.3, 1.4, .5, 1); width: var(--mini-w, 320px); height: calc(var(--mini-w, 320px) * 9 / 16); z-index: 30; border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.6); cursor: pointer; }
 #voiceStage.offstage.mini #tiles { inset: 0; padding: 0; display: block; visibility: visible !important; }
 #voiceStage.offstage.mini .tile.mini-main { display: grid !important; position: absolute; left: 0; right: 0; top: 0; bottom: 0; width: auto; height: auto; aspect-ratio: auto; border-radius: 0; box-shadow: none; }
 #voiceStage.offstage.mini .tile.mini-main, #voiceStage.offstage.mini .tile.mini-main .tile-media, #voiceStage.offstage.mini .tile.mini-main .tile-media *,
@@ -609,21 +604,6 @@ body.resizing iframe { pointer-events: none !important; }
 #voiceStage { container-type: inline-size; }
 #voiceStage.offstage.mini.dragging { cursor: grabbing; transition: transform .2s cubic-bezier(.34, 1.56, .64, 1); transform: scale(1.04); }
 #voiceStage.offstage.mini.dragging::after { opacity: 0; }
-@container (max-width: 640px) {
-  #callBar { gap: 6px; }
-  #callBar .call-btn { width: 44px; height: 44px; }
-  #callBar .call-pair .call-btn { width: 40px; }
-  #callBar .call-caret { width: 20px; height: 44px; padding-right: 2px; }
-  #callBar .call-btn .ico-svg { width: 20px; height: 20px; }
-}
-@container (max-width: 470px) {
-  #callBar { gap: 4px; }
-  #callBar .call-btn { width: 36px; height: 36px; }
-  #callBar .call-pair .call-btn { width: 32px; }
-  #callBar .call-caret { width: 16px; height: 36px; padding-right: 1px; }
-  #callBar .call-caret .ico-svg { width: 11px; height: 11px; }
-  #callBar .call-sep { display: none; }
-}
 .ctx-select { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 
 /* ---------- v27 ---------- */
@@ -633,7 +613,7 @@ body.resizing iframe { pointer-events: none !important; }
 #voiceStage, #voiceStage *, .avatar, .voice-user, .mem, #userPanel, #rail, .msg .gutter { user-select: none; -webkit-user-select: none; }
 #voiceStage img, .avatar, .msg-img img { -webkit-user-drag: none; }
 /* controls fade out while the mouse is still */
-#callBar, #stripToggle { transition: opacity .3s; }
+#callBar, #stripToggle { transition: opacity .18s; }
 #voiceStage.idle:not(.offstage) #callBar, #voiceStage.idle:not(.offstage) #stripToggle { opacity: 0; pointer-events: none; }
 #voiceStage.idle:not(.offstage) { cursor: none; }
 .share-ph .btn { margin-top: 4px; }
@@ -663,3 +643,50 @@ body.resizing iframe { pointer-events: none !important; }
 .hl-link { color: #00a8fc; }
 .hl-code { background: #1e1f22; color: #e3e5e8; border-radius: 3px; }
 .hl-mark { color: #f2f3f5; }
+
+/* ---------- v29: call bar as grouped panels (Discord-style), app icon ---------- */
+#callBar { gap: 10px; }
+.call-group { display: flex; align-items: center; gap: 4px; padding: 6px; background: rgba(17,18,20,.94); border: 1px solid rgba(255,255,255,.07); border-radius: 16px; box-shadow: 0 4px 14px rgba(0,0,0,.4); }
+#callBar .call-btn { width: 46px; height: 42px; border-radius: 10px; background: transparent; color: #dbdee1; }
+#callBar .call-btn:hover { background: rgba(255,255,255,.09); color: #fff; }
+#callBar .call-btn .ico-svg { width: 22px; height: 22px; }
+#callBar .call-pair { display: flex; gap: 0; border-radius: 10px; overflow: hidden; transition: background .15s; }
+#callBar .call-pair .call-btn { border-radius: 0; width: 44px; }
+#callBar .call-caret { position: relative; width: 24px; height: 42px; border: 0; border-radius: 0; padding: 0; background: transparent; color: #b5bac1; display: grid; place-items: center; transition: background .15s; }
+#callBar .call-caret::before { content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 1px; background: rgba(255,255,255,.09); }
+#callBar .call-caret:hover { background: rgba(255,255,255,.09); color: #fff; }
+#callBar .call-caret .ico-svg { width: 14px; height: 14px; stroke-width: 3; }
+/* muted or deafened: red panel. camera or screen share on: green panel. */
+#callBar .call-pair:has(.call-btn.off) { background: rgba(237,66,69,.2); }
+#callBar .call-btn.off, #callBar .call-pair:has(.call-btn.off) .call-caret { background: transparent; color: #f0555a; }
+#callBar .call-pair:has(.call-btn.on) { background: rgba(35,165,90,.22); }
+#callBar .call-btn.on, #callBar .call-pair:has(.call-btn.on) .call-caret { background: transparent; color: #43c478; }
+#callBar .call-pair:has(.call-btn.pending) { background: rgba(88,101,242,.25); }
+#callBar .call-btn.pending { background: transparent; color: #c9cdfb; }
+#callBar .call-btn.off:hover, #callBar .call-btn.on:hover { background: rgba(255,255,255,.07); }
+#callBar #cbLeave { width: 72px; height: 54px; border-radius: 16px; background: var(--red); color: #fff; box-shadow: 0 4px 14px rgba(0,0,0,.4); }
+#callBar #cbLeave:hover { background: var(--red-hover); }
+#callBar #cbLeave .ico-svg { width: 28px; height: 28px; }
+@container (max-width: 560px) {
+  #callBar { gap: 6px; }
+  .call-group { padding: 4px; gap: 2px; border-radius: 12px; }
+  #callBar .call-btn { width: 38px; height: 36px; border-radius: 8px; }
+  #callBar .call-pair { border-radius: 8px; }
+  #callBar .call-pair .call-btn { width: 36px; }
+  #callBar .call-caret { width: 18px; height: 36px; }
+  #callBar .call-btn .ico-svg { width: 19px; height: 19px; }
+  #callBar #cbLeave { width: 52px; height: 44px; border-radius: 12px; }
+}
+@container (max-width: 430px) {
+  #callBar { gap: 4px; }
+  #callBar .call-btn { width: 32px; height: 32px; }
+  #callBar .call-pair .call-btn { width: 30px; }
+  #callBar .call-caret { width: 14px; height: 32px; }
+  #callBar .call-caret .ico-svg { width: 10px; height: 10px; }
+  #callBar .call-btn .ico-svg { width: 17px; height: 17px; }
+  #callBar #cbLeave { width: 44px; height: 40px; }
+}
+.rail-btn.home { padding: 0; overflow: hidden; background: none; }
+.rail-btn.home img { width: 100%; height: 100%; display: block; }
+.welcome-logo img { width: 100%; height: 100%; display: block; border-radius: 22%; }
+#userPanel .avatar, #userPanel .me-info { cursor: pointer; }

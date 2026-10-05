@@ -1675,9 +1675,11 @@
     $('textView').classList.toggle('hidden', !c || c.type !== 'text');
     $('voiceView').classList.toggle('hidden', !c || c.type !== 'voice');
     const inThisVoice = !!(voice && c && voice.sid === cur.sid && voice.cid === c.id);
+    const stageWas = stageShape();
     $('voiceStage').classList.toggle('offstage', !inThisVoice);
-    updateMini();
     $('voiceStage').classList.toggle('hidden', !voice);
+    updateMini();
+    morphStage(stageWas);
     $('mainHeader').classList.toggle('hidden', !c);
     $('voiceView').classList.toggle('behind', inThisVoice);
 
@@ -1736,6 +1738,31 @@
     return out;
   }
 
+  // Going between the full call view and the small preview animates from one box to the other, so the
+  // call visibly grows out of (or shrinks into) wherever the preview sits.
+  function stageShape() {
+    const stage = $('voiceStage');
+    const shown = !stage.classList.contains('hidden');
+    return {
+      mini: shown && stage.classList.contains('mini'),
+      full: shown && !stage.classList.contains('offstage'),
+      rect: typeof stage.getBoundingClientRect === 'function' ? stage.getBoundingClientRect() : null,
+    };
+  }
+  function morphStage(was) {
+    const stage = $('voiceStage');
+    if (!was.rect || typeof stage.animate !== 'function') return;
+    const now = stageShape();
+    if (!((was.mini && now.full) || (was.full && now.mini)) || !now.rect.width || !now.rect.height || !was.rect.width) return;
+    if (morphStage.running) morphStage.running.cancel(); // never stack two
+    stage.classList.add('morph'); // replaces the slide-in from the edge
+    const from = `translate(${was.rect.left - now.rect.left}px, ${was.rect.top - now.rect.top}px) scale(${was.rect.width / now.rect.width}, ${was.rect.height / now.rect.height})`;
+    const a = stage.animate([{ transformOrigin: '0 0', transform: from }, { transformOrigin: '0 0', transform: 'none' }],
+      { duration: 380, easing: 'cubic-bezier(.2, .85, .25, 1.06)' });
+    morphStage.running = a;
+    a.onfinish = a.oncancel = () => { if (morphStage.running === a) { morphStage.running = null; stage.classList.remove('morph'); } };
+  }
+
   // While I'm in a call but looking elsewhere, keep one stream visible as a small click-to-return preview.
   function updateMini() {
     const stage = $('voiceStage');
@@ -1749,7 +1776,7 @@
     if (key && !stage.classList.contains('mini')) {
       // appearing: come in from the edge it is docked to
       const pos = store.get('miniPos', null), main = $('main');
-      const left = !!(pos && main && main.clientWidth && pos.r > (main.clientWidth - 320) / 2);
+      const left = !!(pos && main && main.clientWidth && pos.r > (main.clientWidth - (+store.get('miniW', 320) || 320)) / 2);
       stage.style.setProperty('--mini-from', left ? '-130%' : '130%');
     }
     stage.classList.toggle('mini', !!key);
@@ -3025,7 +3052,7 @@
     const wake = () => {
       stage.classList.remove('idle');
       clearTimeout(timer);
-      timer = setTimeout(() => { if (overBar || menuOpen()) wake(); else stage.classList.add('idle'); }, 3000);
+      timer = setTimeout(() => { if (overBar || menuOpen()) wake(); else stage.classList.add('idle'); }, 1500);
     };
     stage.addEventListener('mousemove', wake);
     stage.addEventListener('mousedown', wake);
@@ -3043,6 +3070,23 @@
     const place = (r, b) => { at.r = r; at.b = b; stage.style.setProperty('--mini-r', r + 'px'); stage.style.setProperty('--mini-b', b + 'px'); };
     const saved = store.get('miniPos', null);
     if (saved && Number.isFinite(saved.r) && Number.isFinite(saved.b)) place(saved.r, saved.b);
+    let width = Math.max(200, Math.min(720, +store.get('miniW', 320) || 320));
+    stage.style.setProperty('--mini-w', width + 'px');
+    stage.addEventListener('wheel', (e) => {
+      if (!stage.classList.contains('mini')) return;
+      e.preventDefault();
+      const main = $('main').getBoundingClientRect();
+      const next = Math.max(200, Math.min(720, main.width - 32, Math.round(width * (e.deltaY < 0 ? 1.1 : 1 / 1.1))));
+      if (next === width) return;
+      // keep it docked to the same corner while it grows or shrinks
+      const maxR = main.width - width, maxB = main.height - width * 9 / 16;
+      const leftSide = at.r > maxR / 2, topSide = at.b > maxB / 2;
+      width = next;
+      stage.style.setProperty('--mini-w', width + 'px');
+      store.set('miniW', width);
+      place(leftSide ? Math.max(16, main.width - width - 16) : 16, topSide ? Math.max(84, main.height - width * 9 / 16 - 64) : 84);
+      store.set('miniPos', { r: at.r, b: at.b });
+    }, { passive: false });
     let spring = 0;
     stage.addEventListener('pointerdown', (e) => {
       if (!stage.classList.contains('mini') || e.button) return;
@@ -3131,6 +3175,7 @@
     caret(id, (el) => deviceMenu(el, kind));
   }
   caret('cbShareCaret', shareMenu);
+  $('userPanel').addEventListener('click', (e) => { if (!e.target.closest('button')) settingsModal('profile'); });
   $('micBtn').onclick = toggleMic;
   $('cbMic').onclick = toggleMic;
   $('deafBtn').onclick = toggleDeaf;
