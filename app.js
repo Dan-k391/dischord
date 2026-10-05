@@ -1078,7 +1078,7 @@
     u += `&audiogain=${audioPercent(av.micGain)}`;
     if (store.get('micLabel', '')) u += '&audiodevice=' + encodeURIComponent(store.get('micLabel', '')); // remembered microphone; falls back to default if unplugged
     if (store.get('outLabel', '')) u += '&outputdevice=' + encodeURIComponent(store.get('outLabel', '')); // remembered speakers / headphones
-    u += withCam ? `&quality=${CAM_Q[av.camQ] ?? 1}&maxframerate=${av.camFps}` : '&videodevice=0';
+    u += withCam ? `&quality=${CAM_Q[av.camQ] ?? 1}&maxframerate=${av.camFps}` + (store.get('camLabel', '') ? '&videodevice=' + encodeURIComponent(store.get('camLabel', '')) : '') : '&videodevice=0';
     u += `&screensharequality=${SS_Q[av.ssQ] ?? 0}&screensharefps=${av.ssFps}`;
     u += `&maxvideobitrate=${av.camBr}&exclude=${ssVs}`; // preserve exclusion when camera reconnects during a share
     if (!micOn || deaf) u += '&mute';
@@ -1911,20 +1911,38 @@
     m.style.top = Math.max(6, Math.min(y, window.innerHeight - h - 6)) + 'px';
     if (wire) wire(m);
   }
-  const closeCtx = () => $('ctxMenu').classList.add('hidden');
+  let ctxAnchor = null, ctxToggled = null; // the button a menu hangs from; and the one whose click just closed it
+  const closeCtx = () => { $('ctxMenu').classList.add('hidden'); ctxAnchor = null; };
+  // open a menu above (or below) a button; clicking the same button again closes it
+  function openAnchored(anchor, html, wire) {
+    const rect = anchor.getBoundingClientRect();
+    openCtx(rect.left, rect.top, html, (menu) => {
+      menu.style.top = (rect.top > window.innerHeight / 2 ? Math.max(6, rect.top - menu.offsetHeight - 8) : Math.min(window.innerHeight - menu.offsetHeight - 6, rect.bottom + 8)) + 'px';
+      if (wire) wire(menu);
+    });
+    ctxAnchor = anchor;
+  }
   const ctxItem = (act, ico, label, extra = '') => `<button class="ctx-item ${extra}" data-act="${act}">${ico ? icon(ico) : ''}<span>${label}</span></button>`;
   const ctxCheck = (act, label, on) => `<button class="ctx-item check ${on ? 'on' : ''}" data-act="${act}"><span>${label}</span><i class="box">${on ? icon('check') : ''}</i></button>`;
   const ctxSlider = (act, label, val) => `<div class="ctx-slider"><div class="cs-head"><span>${label}</span><b data-out="${act}">${audioPercent(val)}%</b></div><input type="range" min="0" max="200" step="1" value="${audioPercent(val)}" data-slide="${act}" aria-label="${esc(label)}"></div>`;
   const ctxSelect = (act, label, val, opts) => `<div class="ctx-select"><span>${label}</span><select data-sel="${act}">${opts.map(([v, l]) => `<option value="${v}" ${String(v) === String(val) ? 'selected' : ''}>${l}</option>`).join('')}</select></div>`;
   const qOpts = (auto) => [[0, 'Auto' + (auto ? ' · ' + mbps(auto) : '')], ...VIEW_BRS.map((k) => [k, mbps(k)])];
 
-  // ---- device menus (the caret beside, or a right-click on, the mic and headphones buttons); all inside Dischord
+  // ---- device menus (the arrow beside, or a right-click on, the call buttons); all inside Dischord
   let devWait = null;
   const sameLabel = (a, b) => !!a && !!b && String(a).replace(/\W+/g, '_').toLowerCase() === String(b).replace(/\W+/g, '_').toLowerCase();
-  function deviceMenu(anchor, kind) { // kind: 'audioinput' | 'audiooutput'
+  const DEV = {
+    audioinput: { key: 'micLabel', head: 'Input device', none: 'No microphone found.' },
+    audiooutput: { key: 'outLabel', head: 'Output device', none: 'This browser does not list output devices.' },
+    videoinput: { key: 'camLabel', head: 'Camera', none: 'No camera found.' },
+  };
+  const CAM_RES = [['360', '360p'], ['720', '720p'], ['1080', '1080p'], ['1440', '1440p'], ['2160', '4K']];
+  const SS_RES = [['source', 'Source (native)'], ['2160', '4K'], ['1440', '1440p'], ['1080', '1080p'], ['720', '720p']];
+  const fpsOpts = (list) => list.map((f) => [f, f + ' fps']);
+  function saveAv(patch) { av = { ...av, ...patch }; store.set('av', av); broadcastState(); }
+  function deviceMenu(anchor, kind) { // kind: 'audioinput' | 'audiooutput' | 'videoinput'
     closeCtx();
-    const input = kind === 'audioinput', key = input ? 'micLabel' : 'outLabel';
-    const rect = anchor.getBoundingClientRect();
+    const info = DEV[kind];
     const token = {};
     clearTimeout(devWait && devWait.timer);
     const show = (list) => {
@@ -1932,24 +1950,33 @@
       clearTimeout(devWait.timer); devWait = null;
       const devs = (list || []).filter((d) => d.kind === kind && d.deviceId !== 'communications');
       const named = devs.some((d) => d.label);
-      const saved = store.get(key, '');
-      let h = `<div class="ctx-head"><span>${input ? 'Input device' : 'Output device'}</span></div>`;
-      if (!devs.length) h += `<div class="ctx-note">${input ? 'No microphone found.' : 'This browser does not list output devices.'}</div>`;
-      else if (!named) h += '<div class="ctx-note">Join a voice channel and allow microphone access to see device names.</div>';
+      const saved = store.get(info.key, '');
+      let h = `<div class="ctx-head"><span>${info.head}</span></div>`;
+      if (!devs.length) h += `<div class="ctx-note">${info.none}</div>`;
+      else if (!named) h += `<div class="ctx-note">Join a voice channel and allow ${kind === 'videoinput' ? 'camera' : 'microphone'} access to see device names.</div>`;
       else h += devs.map((d, i) => {
-        const on = saved ? sameLabel(saved, d.label) : d.deviceId === 'default';
+        const on = saved ? sameLabel(saved, d.label) : (d.deviceId === 'default' || (kind === 'videoinput' && i === 0));
         return `<button class="ctx-item check ${on ? 'on' : ''}" data-act="dev" data-i="${i}"><span>${esc(d.label)}</span><i class="box">${on ? icon('check') : ''}</i></button>`;
       }).join('');
       h += '<div class="ctx-sep"></div>';
-      h += input ? ctxSlider('micgain', 'Input volume', av.micGain) + ctxCheck('mic', 'Mute', !micOn || deaf) : ctxCheck('deaf', 'Deafen', deaf);
+      if (kind === 'audioinput') h += ctxSlider('micgain', 'Input volume', av.micGain) + ctxCheck('mic', 'Mute', !micOn || deaf);
+      else if (kind === 'audiooutput') h += ctxCheck('deaf', 'Deafen', deaf);
+      else {
+        h += ctxSelect('camQ', 'Resolution', av.camQ, CAM_RES) + ctxSelect('camFps', 'Frame rate', av.camFps, fpsOpts([15, 30, 60]));
+        if (voice) h += ctxCheck('cam', 'Camera on', !!voice.cam);
+      }
       h += ctxItem('avset', 'gear', 'Voice & video settings');
-      openCtx(rect.left, rect.top, h, (menu) => {
-        // open upwards from bottom-of-screen buttons
-        if (rect.top > window.innerHeight / 2) menu.style.top = Math.max(6, rect.top - menu.offsetHeight - 8) + 'px';
+      openAnchored(anchor, h, (menu) => {
         menu.querySelectorAll('[data-slide]').forEach((r) => {
           r.oninput = () => {
             menu.querySelector(`[data-out="${r.dataset.slide}"]`).textContent = audioPercent(r.value) + '%';
             setMicGain(r.value);
+          };
+        });
+        menu.querySelectorAll('[data-sel]').forEach((sel) => {
+          sel.onchange = () => {
+            saveAv({ [sel.dataset.sel]: sel.dataset.sel === 'camFps' ? +sel.value : sel.value });
+            if (voice && voice.cam) { closeCtx(); joinVoice(voice.sid, voice.cid, true); } // camera settings apply on reconnect
           };
         });
         menu.onclick = (e) => {
@@ -1960,6 +1987,7 @@
             case 'dev': return pickDevice(kind, devs[+b.dataset.i]);
             case 'mic': return toggleMic();
             case 'deaf': return toggleDeaf();
+            case 'cam': return toggleCam();
             case 'avset': return settingsModal('av');
           }
         };
@@ -1975,16 +2003,48 @@
   }
   function pickDevice(kind, d) {
     if (!d) return;
-    const input = kind === 'audioinput';
-    store.set(input ? 'micLabel' : 'outLabel', d.label || '');
+    store.set(DEV[kind].key, d.label || '');
     if (voice) {
       // device ids are per-origin, so they come from the call frame's own list and are applied inside it
-      if (input) voicePost({ function: 'eval', value: `if (typeof changeAudioDeviceById === 'function') changeAudioDeviceById(${JSON.stringify(String(d.deviceId))});` });
-      else voicePost({ changeAudioOutputDevice: String(d.deviceId) });
+      const id = JSON.stringify(String(d.deviceId));
+      if (kind === 'audioinput') voicePost({ function: 'eval', value: `if (typeof changeAudioDeviceById === 'function') changeAudioDeviceById(${id});` });
+      else if (kind === 'audiooutput') voicePost({ changeAudioOutputDevice: String(d.deviceId) });
+      else if (voice.cam) voicePost({ function: 'eval', value: `if (typeof changeVideoDeviceById === 'function') changeVideoDeviceById(${id});` });
       const call = voice;
       scheduleVoice(call, () => syncVoiceState(call), 1500); // re-apply mute / gain after the device swap
     }
-    toast((input ? 'Microphone: ' : 'Output: ') + (d.label || 'selected'));
+    toast(({ audioinput: 'Microphone: ', audiooutput: 'Output: ', videoinput: 'Camera: ' })[kind] + (d.label || 'selected'));
+  }
+  function shareMenu(anchor) {
+    closeCtx();
+    const sharing = !!(voice && voice.ssFrame);
+    let h = '<div class="ctx-head"><span>Screen share</span></div>';
+    if (voice) h += ctxItem('share', 'screen', sharing ? 'Stop sharing' : 'Share your screen', sharing ? 'danger' : '');
+    else h += '<div class="ctx-note">Join a voice channel to share your screen.</div>';
+    h += '<div class="ctx-sep"></div>' + ctxSelect('ssQ', 'Resolution', av.ssQ, SS_RES) + ctxSelect('ssFps', 'Frame rate', av.ssFps, fpsOpts([5, 15, 30, 60])) +
+      ctxSelect('ssHint', 'Optimize for', av.ssHint, [['motion', 'Smoothness'], ['detail', 'Clarity']]);
+    if (sharing) h += '<div class="ctx-note">Changes apply the next time you share.</div>';
+    h += ctxItem('avset', 'gear', 'Voice & video settings');
+    openAnchored(anchor, h, (menu) => {
+      menu.querySelectorAll('[data-sel]').forEach((sel) => {
+        sel.onchange = () => saveAv({ [sel.dataset.sel]: sel.dataset.sel === 'ssFps' ? +sel.value : sel.value });
+      });
+      menu.onclick = (e) => {
+        const b = e.target.closest('[data-act]');
+        if (!b) return;
+        closeCtx();
+        if (b.dataset.act === 'share') return toggleShare();
+        if (b.dataset.act === 'avset') return settingsModal('av');
+      };
+    });
+  }
+  // an arrow button: first click opens its menu, the next click closes it
+  function caret(id, open) {
+    $(id).onclick = (e) => {
+      e.stopPropagation();
+      if (ctxToggled === $(id)) { ctxToggled = null; return; }
+      open($(id));
+    };
   }
 
   // ---- channel list menus
@@ -2760,7 +2820,42 @@
   $('vsShare').onclick = toggleShare;
   $('cbShare').onclick = toggleShare;
   $('voiceWhere').onclick = showVoice;
-  $('voiceStage').addEventListener('click', () => { if ($('voiceStage').classList.contains('mini')) showVoice(); });
+  // the call preview: drag it anywhere inside the chat area; a plain click returns to the call
+  (function miniPreview() {
+    const stage = $('voiceStage');
+    let drag = null, moved = false;
+    const place = (r, b) => { stage.style.setProperty('--mini-r', r + 'px'); stage.style.setProperty('--mini-b', b + 'px'); };
+    const saved = store.get('miniPos', null);
+    if (saved && Number.isFinite(saved.r) && Number.isFinite(saved.b)) place(saved.r, saved.b);
+    stage.addEventListener('pointerdown', (e) => {
+      if (!stage.classList.contains('mini') || e.button) return;
+      const box = stage.getBoundingClientRect(), main = $('main').getBoundingClientRect();
+      drag = { x: e.clientX, y: e.clientY, r: main.right - box.right, b: main.bottom - box.bottom, maxR: main.width - box.width, maxB: main.height - box.height };
+      moved = false;
+      try { stage.setPointerCapture(e.pointerId); } catch { }
+    });
+    stage.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      if (!moved && Math.hypot(dx, dy) < 5) return;
+      moved = true;
+      stage.classList.add('dragging');
+      drag.pos = { r: Math.max(0, Math.min(drag.maxR, Math.round(drag.r - dx))), b: Math.max(0, Math.min(drag.maxB, Math.round(drag.b - dy))) };
+      place(drag.pos.r, drag.pos.b);
+    });
+    const end = () => {
+      if (drag && drag.pos) store.set('miniPos', drag.pos);
+      drag = null;
+      stage.classList.remove('dragging');
+    };
+    stage.addEventListener('pointerup', end);
+    stage.addEventListener('pointercancel', end);
+    stage.addEventListener('click', () => {
+      if (!stage.classList.contains('mini')) return;
+      if (moved) { moved = false; return; } // that was a drag, not a click
+      showVoice();
+    });
+  })();
   $('tiles').addEventListener('click', (e) => {
     if ($('voiceStage').classList.contains('mini')) return; // the preview only jumps back to the call
     const q = e.target.closest('[data-q]');
@@ -2779,9 +2874,10 @@
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && focusUid && $('modalBack').classList.contains('hidden')) { focusUid = null; renderStage(); } });
   $('devDone').onclick = () => { if (!voice) return; voice.devices = false; voicePost({ toggleSettings: false }); renderStage(); };
-  for (const [id, kind] of [['micCaret', 'audioinput'], ['cbMicCaret', 'audioinput'], ['deafCaret', 'audiooutput'], ['cbDeafCaret', 'audiooutput']]) {
-    $(id).onclick = (e) => { e.stopPropagation(); deviceMenu($(id), kind); };
+  for (const [id, kind] of [['micCaret', 'audioinput'], ['cbMicCaret', 'audioinput'], ['deafCaret', 'audiooutput'], ['cbDeafCaret', 'audiooutput'], ['cbCamCaret', 'videoinput']]) {
+    caret(id, (el) => deviceMenu(el, kind));
   }
+  caret('cbShareCaret', shareMenu);
   $('micBtn').onclick = toggleMic;
   $('cbMic').onclick = toggleMic;
   $('deafBtn').onclick = toggleDeaf;
@@ -2796,6 +2892,10 @@
     if (mic) { e.preventDefault(); return deviceMenu(mic, 'audioinput'); }
     const out = e.target.closest('#cbDeaf, #deafBtn, #deafCaret, #cbDeafCaret');
     if (out) { e.preventDefault(); return deviceMenu(out, 'audiooutput'); }
+    const cam = e.target.closest('#cbCam, #vsCam, #cbCamCaret');
+    if (cam) { e.preventDefault(); return deviceMenu(cam, 'videoinput'); }
+    const shr = e.target.closest('#cbShare, #vsShare, #cbShareCaret');
+    if (shr) { e.preventDefault(); return shareMenu(shr); }
     const u = e.target.closest('#channelList .voice-user[data-uid], #members .mem[data-uid], #tiles .tile[data-key], [data-ctx="user"][data-uid], #userPanel');
     const msg = !u && e.target.closest('#messages .msg[data-mid]');
     // never show the browser's own menu, except in text fields where it provides paste / spellcheck
@@ -2814,8 +2914,10 @@
     if (uid) userMenu(uid, e.clientX, e.clientY);
   });
   document.addEventListener('mousedown', (e) => {
+    // pressing the button that owns the open menu closes it; remember that so its click does not reopen it
+    ctxToggled = ctxAnchor && ctxAnchor.contains(e.target) ? ctxAnchor : null;
     if (!e.target.closest('#ctxMenu')) closeCtx();
-    if (!e.target.closest('#emojiMenu') && !e.target.closest('[data-react]') && !e.target.closest('#cbReact') && !e.target.closest('#emojiBtn')) $('emojiMenu').classList.add('hidden');
+    if (!e.target.closest('#emojiMenu') && !e.target.closest('[data-react]') && !e.target.closest('#cbReact') && !e.target.closest('#cbReactCaret') && !e.target.closest('#emojiBtn')) $('emojiMenu').classList.add('hidden');
   });
   window.addEventListener('blur', closeCtx);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeCtx(); $('emojiMenu').classList.add('hidden'); if (winFs) { winFs = null; renderStage(); } } });
@@ -2883,7 +2985,17 @@
 
   // in-call reactions
   $('stripToggle').onclick = () => { hideStrip = !hideStrip; store.set('hideStrip', hideStrip); renderStage(); };
-  $('cbReact').onclick = (e) => { e.stopPropagation(); emojiPicker($('cbReact'), sendCallReaction); };
+  let emojiOwner = null;
+  for (const [id, list] of [['cbReact', REACTS], ['cbReactCaret', EMOJIS]]) {
+    $(id).onclick = (e) => {
+      e.stopPropagation();
+      const open = !$('emojiMenu').classList.contains('hidden');
+      $('emojiMenu').classList.add('hidden');
+      if (open && emojiOwner === id) { emojiOwner = null; return; }
+      emojiOwner = id;
+      emojiPicker($(id), sendCallReaction, list);
+    };
+  }
 
   window.addEventListener('hashchange', checkInviteHash);
   document.addEventListener('visibilitychange', () => {

@@ -587,7 +587,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 body.resizing iframe { pointer-events: none !important; }
 
 /* ---------- v25: call preview while browsing elsewhere, emoji button, ping ---------- */
-#voiceStage.offstage.mini { visibility: visible; pointer-events: auto; top: auto; left: auto; right: 16px; bottom: 84px; width: 320px; height: 180px; z-index: 30; border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.6); cursor: pointer; }
+#voiceStage.offstage.mini { visibility: visible; pointer-events: auto; top: auto; left: auto; right: var(--mini-r, 16px); bottom: var(--mini-b, 84px); touch-action: none; width: 320px; height: 180px; z-index: 30; border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.6); cursor: pointer; }
 #voiceStage.offstage.mini #tiles { inset: 0; padding: 0; display: block; visibility: visible !important; }
 #voiceStage.offstage.mini .tile.mini-main { display: grid !important; position: absolute; left: 0; right: 0; top: 0; bottom: 0; width: auto; height: auto; aspect-ratio: auto; border-radius: 0; box-shadow: none; }
 #voiceStage.offstage.mini .tile.mini-main, #voiceStage.offstage.mini .tile.mini-main .tile-media, #voiceStage.offstage.mini .tile.mini-main .tile-media *,
@@ -600,3 +600,24 @@ body.resizing iframe { pointer-events: none !important; }
 .vu-ping.good { color: var(--green); }
 .vu-ping.ok { color: #faa61a; }
 .vu-ping.bad { color: var(--red); }
+
+/* ---------- v26: carets on every call button; the bar tightens when the stage is narrow ---------- */
+#voiceStage { container-type: inline-size; }
+#voiceStage.offstage.mini.dragging { cursor: grabbing; }
+#voiceStage.offstage.mini.dragging::after { opacity: 0; }
+@container (max-width: 640px) {
+  #callBar { gap: 6px; }
+  #callBar .call-btn { width: 44px; height: 44px; }
+  #callBar .call-pair .call-btn { width: 40px; }
+  #callBar .call-caret { width: 20px; height: 44px; padding-right: 2px; }
+  #callBar .call-btn .ico-svg { width: 20px; height: 20px; }
+}
+@container (max-width: 470px) {
+  #callBar { gap: 4px; }
+  #callBar .call-btn { width: 36px; height: 36px; }
+  #callBar .call-pair .call-btn { width: 32px; }
+  #callBar .call-caret { width: 16px; height: 36px; padding-right: 1px; }
+  #callBar .call-caret .ico-svg { width: 11px; height: 11px; }
+  #callBar .call-sep { display: none; }
+}
+.ctx-select { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
