@@ -2,16 +2,25 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#2b2d31">
   <title>Dischord</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎧</text></svg>">
-  <link rel="stylesheet" href="style.css?v=22">
+  <link rel="icon" type="image/svg+xml" href="icon.svg?v=3">
+  <link rel="stylesheet" href="style.css?v=40">
 </head>
 <body>
+  <div id="desktopTitlebar" aria-hidden="true"><img src="icon.svg?v=3" alt=""><span>Dischord</span></div>
+  <header id="mobileNav">
+    <button id="mobileChannels" class="mobile-nav-btn" aria-label="Open servers and channels" aria-controls="rail sidebar" aria-expanded="false"><span aria-hidden="true">☰</span><span id="mobileChannelsLabel">Channels</span></button>
+    <span id="mobileServerName">Dischord</span>
+    <button id="mobileCall" class="mobile-nav-btn hidden" title="Back to call" aria-label="Back to call"><i data-icon="speaker"></i></button>
+    <button id="mobileSettings" class="mobile-nav-btn" title="User settings" aria-label="User settings"><i data-icon="gear"></i></button>
+  </header>
   <div id="app">
+    <button id="mobileBackdrop" class="hidden" aria-label="Close navigation"></button>
     <!-- Server rail -->
     <nav id="rail">
-      <button class="rail-btn home" id="homeBtn" title="Home"><i data-icon="headphones"></i></button>
+      <button class="rail-btn home" id="homeBtn" title="Home"><img src="icon.svg?v=3" alt="" draggable="false"></button>
       <div class="rail-sep"></div>
       <div id="serverList"></div>
       <button class="rail-btn add" id="addServerBtn" title="Add a server"><i data-icon="plus"></i></button>
@@ -35,7 +44,7 @@
       <div id="voiceStatus" class="hidden">
         <div class="vs-row">
           <div class="vs-info">
-            <div class="vs-title"><i data-icon="signal"></i><span id="vsState">Voice Connected</span></div>
+            <div class="vs-title"><i data-icon="signal"></i><span id="vsState">Voice Connected</span><span id="vsTime" title="Time in this call"></span></div>
             <div class="vs-where" id="voiceWhere"></div>
           </div>
           <button class="icon-btn" id="vsLeave" title="Disconnect"><i data-icon="hangup"></i></button>
@@ -75,7 +84,7 @@
 
       <section id="welcome" class="view">
         <div class="welcome-card">
-          <div class="welcome-logo"><i data-icon="headphones"></i></div>
+          <div class="welcome-logo"><img src="icon.svg?v=3" alt="Dischord" draggable="false"></div>
           <h1>Welcome to Dischord</h1>
           <p>Servers, text channels and voice/video rooms. Fully peer-to-peer, powered by VDO.Ninja. No accounts, no backend.</p>
           <div class="row">
@@ -91,9 +100,12 @@
         <form id="composer" autocomplete="off">
           <div id="replyBar" class="hidden" aria-live="polite"></div>
           <div id="attachBar" class="hidden"></div>
+          <div id="mentionMenu" class="hidden" role="listbox" aria-label="Mention someone"></div>
           <div class="composer-row">
             <button type="button" class="icon-btn" id="attachBtn" title="Attach files (sent only when downloaded)"><i data-icon="plusCircle"></i></button>
-            <textarea id="msgInput" rows="1" placeholder="Message"></textarea>
+            <div class="input-wrap"><div id="msgMirror" aria-hidden="true"></div><textarea id="msgInput" rows="1" placeholder="Message"></textarea></div>
+            <button type="button" class="icon-btn" id="emojiBtn" title="Emoji"><i data-icon="smile"></i></button>
+            <button type="submit" class="icon-btn" id="sendBtn" title="Send message" aria-label="Send message"><i data-icon="chevron"></i></button>
           </div>
           <input type="file" id="fileInput" multiple hidden>
         </form>
@@ -114,20 +126,22 @@
 
       <!-- The live VDO.Ninja call lives here and survives switching channels -->
       <div id="voiceStage" class="hidden">
-        <div id="tiles">
-          <button id="stripToggle" class="hidden" title="Hide members"><i data-icon="chevDown"></i><i data-icon="people"></i></button>
-        </div>
+        <div id="tiles"><button id="stripToggle" class="hidden" title="Hide members"><i data-icon="chevDown"></i><i data-icon="people"></i></button></div>
         <div id="pubHost"></div>
         <button class="btn primary hidden" id="devDone">Done choosing devices</button>
         <div id="qMenu" class="hidden"></div>
+        <div class="mini-grip" data-c="tl"></div><div class="mini-grip" data-c="tr"></div><div class="mini-grip" data-c="bl"></div><div class="mini-grip" data-c="br"></div>
         <div id="callBar">
-          <span class="call-pair"><button class="call-btn" id="cbMic" title="Mute"><i data-icon="mic"></i></button><button class="call-caret" id="cbMicCaret" title="Input options"><i data-icon="chevUp"></i></button></span>
-          <button class="call-btn" id="cbCam" title="Turn on camera"><i data-icon="camera"></i></button>
-          <button class="call-btn" id="cbShare" title="Share your screen"><i data-icon="screen"></i></button>
-          <span class="call-pair"><button class="call-btn" id="cbDeaf" title="Deafen"><i data-icon="headphones"></i></button><button class="call-caret" id="cbDeafCaret" title="Output options"><i data-icon="chevUp"></i></button></span>
-          <button class="call-btn" id="cbReact" title="Send a reaction"><i data-icon="smile"></i></button>
-          <div class="call-sep"></div>
-          <button class="call-btn" id="cbSettings" title="Voice & video settings"><i data-icon="gear"></i></button>
+          <div class="call-group">
+            <span class="call-pair"><button class="call-btn" id="cbMic" title="Mute"><i data-icon="mic"></i></button><button class="call-caret" id="cbMicCaret" title="Input options"><i data-icon="chevUp"></i></button></span>
+            <span class="call-pair"><button class="call-btn" id="cbCam" title="Turn on camera"><i data-icon="camera"></i></button><button class="call-caret" id="cbCamCaret" title="Camera options"><i data-icon="chevUp"></i></button></span>
+          </div>
+          <div class="call-group">
+            <span class="call-pair"><button class="call-btn" id="cbShare" title="Share your screen"><i data-icon="screen"></i></button><button class="call-caret" id="cbShareCaret" title="Screen share options"><i data-icon="chevUp"></i></button></span>
+            <span class="call-pair"><button class="call-btn" id="cbDeaf" title="Deafen"><i data-icon="headphones"></i></button><button class="call-caret" id="cbDeafCaret" title="Output options"><i data-icon="chevUp"></i></button></span>
+            <span class="call-pair"><button class="call-btn" id="cbReact" title="Send a reaction"><i data-icon="smile"></i></button><button class="call-caret" id="cbReactCaret" title="More reactions"><i data-icon="chevUp"></i></button></span>
+            <button class="call-btn" id="cbSettings" title="Voice & video settings"><i data-icon="gear"></i></button>
+          </div>
           <button class="call-btn danger" id="cbLeave" title="Disconnect"><i data-icon="hangup"></i></button>
         </div>
       </div>
@@ -151,6 +165,6 @@
 
   <script src="file-transfer.js?v=16"></script>
   <script src="image-preview.js?v=2"></script>
-  <script src="app.js?v=25"></script>
+  <script src="app.js?v=40"></script>
 </body>
 </html>

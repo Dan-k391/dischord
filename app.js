@@ -20,6 +20,10 @@
   // Point this at a self-hosted VDO.Ninja if you like (see README).
   const VDO = (window.DISCHORD_CONFIG && window.DISCHORD_CONFIG.vdoUrl) || 'https://vdo.ninja/';
   const PROTO = 2;
+  // The release this page is running, read from the ?v= on its own script tag. Everyone reports theirs,
+  // so the app can say when someone is too out of date for a feature, or when a newer release exists.
+  const APP_VER = +(((typeof document !== 'undefined' && document.currentScript && document.currentScript.src) || '').match(/[?&]v=(\d+)/) || [0, 0])[1];
+  const KICK_VER = 36, MOVE_VER = 35; // first releases that obey these requests
   const MAX_MSGS = 500;
   const HIST_SEND = 80;           // messages per channel sent during history sync
   const PING_MS = 8000;           // presence heartbeat
@@ -29,6 +33,12 @@
   const PEER_GRACE = 20000;       // a dropped mesh connection may just be reconnecting: wait this long for the next ping
   const COLORS = ['#5865f2', '#7b61ff', '#9b59b6', '#eb459e', '#ed4245', '#f47b67', '#e67e22', '#faa61a',
     '#f1c40f', '#57f287', '#3ba55c', '#1abc9c', '#00a8fc', '#3498db', '#607d8b', '#99aab5'];
+  const EMOJIS = ['😀', '😁', '😂', '🤣', '😊', '😇', '🙂', '😉', '😍', '🥰', '😘', '😋', '😛', '😜', '🤪', '🤨',
+    '😎', '🤩', '🥳', '😏', '😒', '😞', '😔', '😟', '😕', '🙁', '😣', '😫', '😩', '🥺', '😢', '😭',
+    '😤', '😠', '😡', '🤬', '🤯', '😳', '🥵', '🥶', '😱', '😨', '😰', '😥', '🤗', '🤔', '🤭', '🤫',
+    '😶', '😐', '😑', '😬', '🙄', '😯', '😮', '😲', '🥱', '😴', '🤤', '😵', '🤐', '🥴', '🤢', '🤮',
+    '👍', '👎', '👌', '✌️', '🤞', '🤟', '🤙', '👋', '👏', '🙌', '🙏', '💪', '👀', '🧠', '💀', '👻',
+    '❤️', '🧡', '💛', '💚', '💙', '💜', '🖤', '💔', '💯', '🔥', '✨', '🎉', '🎮', '🎧', '✅', '❌'];
   const REACTS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '🎉', '👀', '💯', '😎', '🙏', '🤔', '👏', '😡', '✅', '❌'];
   const IMG_CHUNK = 14000;        // chars per image chunk over the data channel
   const IMG_MAX = 4500000;        // max data-URL length (~3.3 MB image)
@@ -118,6 +128,38 @@
     const svg = btn.querySelector('svg');
     if (svg) svg.innerHTML = P[name] || '';
   }
+
+  // Timers that keep their pace in a background tab. Browsers slow page timers there (to once a second,
+  // later once a minute), which stalled image transfers and presence pings from anyone who had switched
+  // to another window. A worker's timers are not slowed. Falls back to page timers without workers.
+  const bgTimer = (() => {
+    let worker = null, seq = 0;
+    const waits = new Map(), loops = [];
+    const fail = () => {
+      if (!worker) return;
+      try { worker.terminate(); } catch { }
+      worker = null;
+      waits.forEach((done) => done()); waits.clear();
+      loops.forEach(([ms, fn]) => setInterval(fn, ms));
+    };
+    try {
+      if (typeof Worker !== 'function') throw new Error('no workers');
+      const src = 'onmessage=function(e){var d=e.data;if(d.every)setInterval(function(){postMessage({every:d.every})},d.every);else setTimeout(function(){postMessage({id:d.id})},d.ms)}';
+      const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+      worker = new Worker(url);
+      URL.revokeObjectURL(url);
+      worker.onmessage = (e) => {
+        const d = e.data || {};
+        if (d.every) loops.forEach(([ms, fn]) => { if (ms === d.every) fn(); });
+        else { const done = waits.get(d.id); waits.delete(d.id); if (done) done(); }
+      };
+      worker.onerror = fail;
+    } catch { worker = null; }
+    return {
+      sleep: (ms) => new Promise((done) => { if (!worker) return setTimeout(done, ms); const id = ++seq; waits.set(id, done); worker.postMessage({ id, ms }); }),
+      every(ms, fn) { loops.push([ms, fn]); if (worker) worker.postMessage({ every: ms }); else setInterval(fn, ms); },
+    };
+  })();
 
   // ---------------------------------------------------------------- state
   let me = store.get('me', null);
@@ -262,18 +304,29 @@
   const myVoiceIn = (sid) => (voice && voice.sid === sid ? voice.cid : null);
   const myState = () => ({ m: !micOn || deaf, d: deaf, c: !!(voice && voice.cam), s: !!(voice && voice.ss), cb: av.camBr, sb: voice && voice.ssSettings ? voice.ssSettings.ssBr : av.ssBr });
 
+  // When the call in a voice channel started. Nobody owns that fact, so everyone in the call keeps
+  // repeating how long it has been running as far as they know, and each client keeps the longest.
+  // Ages (not clock times) are exchanged, so computers with different clocks still agree.
+  const callStarts = {}; // 'sid/cid' -> local timestamp
+  const callStart = (sid, cid) => callStarts[sid + '/' + cid] || null;
+  function noteCallStart(sid, cid, at) {
+    const k = sid + '/' + cid;
+    if (!callStarts[k] || at < callStarts[k] - 1500) callStarts[k] = at; // ignore network jitter
+  }
+
   // Every payload carries who I am and my voice state, so presence is never stale.
   function send(sid, payload, uuid) {
     const m = meshes[sid];
     if (!m || !m.iframe.contentWindow) return false;
     const inV = myVoiceIn(sid);
-    const body = { v: PROTO, u: me, vc: inV, vs: inV ? voice.vs : null, vss: inV && voice.ss ? voice.ssVs : null, st: myState(), ...payload };
+    const started = inV ? callStart(sid, inV) : null;
+    const body = { v: PROTO, u: me, vc: inV, vs: inV ? voice.vs : null, vss: inV && voice.ss ? voice.ssVs : null, vt: started ? now() - started : null, ver: APP_VER, st: myState(), ...payload };
     const o = { sendData: { dischord: body } };
     if (uuid) o.UUID = uuid;
     m.iframe.contentWindow.postMessage(o, '*');
     return true;
   }
-  const broadcastState = () => { for (const sid in meshes) send(sid, { t: 'ping' }); };
+  const broadcastState = () => { for (const sid in meshes) send(sid, { t: 'ping', pt: now() }); };
 
   function hello(sid, uuid, want) {
     const s = server(sid);
@@ -302,8 +355,10 @@
     const m = p && p.uid && members[sid] && members[sid][p.uid];
     if (m) {
       m.uuids.delete(uuid);
-      // Not offline at once: the connection may be reconnecting. The next ping revives them; silence expires them.
-      if (!m.uuids.size) m.seen = Math.min(m.seen, now() - (m.vc ? STALE_VOICE : STALE_LOOSE) + PEER_GRACE);
+      // Not offline at once: the connection may be reconnecting. The next ping revives it; silence expires it.
+      const c = m.conns && m.conns.get(uuid);
+      if (c) c.seen = Math.min(c.seen, now() - (c.vc ? STALE_VOICE : STALE_LOOSE) + PEER_GRACE);
+      else if (!m.conns && !m.uuids.size) m.seen = Math.min(m.seen, now() - (m.vc ? STALE_VOICE : STALE_LOOSE) + PEER_GRACE);
     }
     if (sid === cur.sid) renderPresence();
   }
@@ -316,8 +371,27 @@
     }
   }
 
+  // A person can have several connections at once (two tabs, or the desktop window plus a browser tab).
+  // Each reports its own state, so one idle tab must never overwrite or end the presence of the tab that
+  // is in a call: keep state per connection and show the one that is in voice (else the most recent).
+  function settle(m) {
+    if (!m || !m.conns) return;
+    const t = now();
+    let best = null, seen = 0;
+    for (const [key, c] of m.conns) {
+      const limit = m.uuids.has(key) ? STALE_CONNECTED : c.vc ? STALE_VOICE : STALE_LOOSE;
+      if (t - c.seen >= limit) { m.conns.delete(key); continue; }
+      seen = Math.max(seen, c.seen);
+      if (!best || (!!c.vc !== !!best.vc ? !!c.vc : c.seen > best.seen)) best = c;
+    }
+    m.seen = seen;
+    if (best) { m.vc = best.vc; m.vs = best.vs; m.vss = best.vss; m.st = best.st; }
+    else { m.vc = m.vs = m.vss = null; }
+  }
   function isOnline(m) {
-    if (!m || !m.seen) return false;
+    if (!m) return false;
+    if (m.conns) { settle(m); return m.conns.size > 0; }
+    if (!m.seen) return false;
     return now() - m.seen < (m.uuids && m.uuids.size ? STALE_CONNECTED : m.vc ? STALE_VOICE : STALE_LOOSE);
   }
 
@@ -329,12 +403,17 @@
     const wasOnline = isOnline(prev);
     const m = prev || { uuids: new Set() };
     m.user = user;
-    m.vc = isId(body.vc) ? body.vc : null;
-    m.vs = m.vc && isId(body.vs) ? body.vs : null;
-    m.vss = m.vc && isId(body.vss) ? body.vss : null;
-    m.st = cleanState(body.st);
-    m.seen = now();
+    m.ver = Number.isInteger(body.ver) && body.ver > 0 ? body.ver : 0; // 0 = a release from before versions were reported
+    if (APP_VER && m.ver > APP_VER && !touch.toldNewer) {
+      touch.toldNewer = true;
+      toast('A newer version of Dischord is available. Reload the page to update.', 10000);
+    }
+    const vc = isId(body.vc) ? body.vc : null;
+    if (vc) noteCallStart(sid, vc, Number.isFinite(body.vt) && body.vt >= 0 && body.vt < 30 * 864e5 ? now() - body.vt : now());
+    if (!m.conns) m.conns = new Map();
+    m.conns.set(uuid || '_', { vc, vs: vc && isId(body.vs) ? body.vs : null, vss: vc && isId(body.vss) ? body.vss : null, st: cleanState(body.st), seen: now() });
     if (uuid) m.uuids.add(uuid);
+    settle(m);
     ms[user.id] = m;
     const k = getKnown(sid);
     if (!k[user.id] || k[user.id].name !== user.name || k[user.id].color !== user.color) {
@@ -429,9 +508,29 @@
           renderTyping();
         }
         break;
+      case 'kick':
+        if (p.to === me.id && voice && voice.sid === sid) { leaveVoice(); toast(`${t.user.name} removed you from the call`, 6000); }
+        break;
+      case 'move': {
+        const dest = channel(s, p.cid);
+        if (p.to === me.id && dest && dest.type === 'voice' && voice && voice.sid === sid && voice.cid !== dest.id) {
+          toast(`${t.user.name} moved you to ${dest.name}`, 5000);
+          joinVoice(sid, dest.id, voice.cam);
+        }
+        break;
+      }
       case 'bye': {
         const m = members[sid][t.user.id];
-        if (m) { m.seen = 0; m.uuids.clear(); }
+        // only this connection is leaving; the same person may still be here in another tab
+        if (m) { if (m.conns) m.conns.delete(uuid || '_'); m.uuids.delete(uuid); settle(m); if (!m.conns || !m.conns.size) m.seen = 0; }
+        break;
+      }
+      case 'ping':
+        if (Number.isFinite(p.pt) && uuid) send(sid, { t: 'pong', pt: p.pt }, uuid);
+        break;
+      case 'pong': {
+        const m = members[sid][t.user.id], rtt = now() - p.pt;
+        if (m && Number.isFinite(rtt) && rtt >= 0 && rtt < 60000) { m.rtt = m.rtt ? m.rtt * 0.6 + rtt * 0.4 : rtt; m.rttAt = now(); }
         break;
       }
     }
@@ -588,6 +687,7 @@
     const d = composerDrafts.get(key);
     composerDrafts.delete(key); // the active composer owns these references until navigation
     $('msgInput').value = d ? d.text : '';
+    syncComposer(); closeMention();
     pending.splice(0, pending.length, ...(d ? d.pending : []));
     replyTarget = d ? d.replyTarget : null;
     renderReplyBar(); renderAttachBar();
@@ -854,7 +954,7 @@
     }
   }
 
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const sleep = (ms) => bgTimer.sleep(ms);
   const pushing = new Map();   // id/uuid -> ts (avoid duplicate sends)
   async function pushImage(sid, id, uuid, cid, mid) {
     if (!uuid) return;
@@ -889,7 +989,11 @@
     const b = (incoming[request.key] = incoming[request.key] || { n: p.n, parts: new Array(p.n), got: 0 });
     if (b.n !== p.n || b.parts[p.i] !== undefined) return;
     b.parts[p.i] = p.d; b.got++;
-    if (b.got < b.n) return;
+    armImageRequest(request, 20000); // data is flowing: only a stall ends the request, not the total time
+    if (b.got < b.n) {
+      if (b.got % 8 === 0) imageProgress(request, Math.round(b.got / b.n * 100));
+      return;
+    }
     const url = b.parts.join('');
     delete incoming[request.key];
     clearTimeout(request.timer); delete requested[request.key];
@@ -908,13 +1012,27 @@
     if (Object.keys(requested).length >= 4) return; // bound preview buffers and mesh traffic
     const messageKey = imageMessageKey(sid, m.cid, m.id);
     if (!force && (imageRetryAfter.get(messageKey) || 0) > now()) return;
-    requested[key] = { key, sid, id, cid: m.cid, mid: m.id, length: m.img.n, timer: setTimeout(() => {
-      delete requested[key]; delete incoming[key];
-      imageErrors.add(messageKey);
-      imageRetryAfter.set(messageKey, now() + 15000);
-      renderIfCurrent(sid, m.cid);
-    }, 30000) };
+    requested[key] = { key, sid, id, cid: m.cid, mid: m.id, length: m.img.n, messageKey, timer: null };
+    armImageRequest(requested[key], 10000); // nobody who has it is online: free the slot quickly for other images
     send(sid, { t: 'imgreq', id, cid: m.cid, mid: m.id });
+  }
+  function armImageRequest(request, ms) {
+    clearTimeout(request.timer);
+    request.timer = setTimeout(() => {
+      if (requested[request.key] !== request) return;
+      delete requested[request.key]; delete incoming[request.key];
+      imageErrors.add(request.messageKey);
+      imageRetryAfter.set(request.messageKey, now() + 15000);
+      renderIfCurrent(request.sid, request.cid);
+    }, ms);
+  }
+  function imageProgress(request, pct) {
+    if (request.sid !== cur.sid || request.cid !== cur.cid) return;
+    document.querySelectorAll('img[data-img]:not([src])').forEach((el) => {
+      if (el.dataset.imgMid !== request.mid) return;
+      const status = el.parentElement.querySelector('.image-preview-status');
+      if (status) status.textContent = `Loading image… ${pct}%`;
+    });
   }
   function cancelImageRequests(sid, cid, mid) {
     for (const [key, request] of Object.entries(requested)) {
@@ -928,7 +1046,8 @@
     for (const key of imageRetryAfter.keys()) if ((key + '/').startsWith(prefix)) imageRetryAfter.delete(key);
   }
   function paintImages() {
-    document.querySelectorAll('img[data-img]:not([src])').forEach(async (el) => {
+    // newest first: the picture someone just sent must not wait behind old ones nobody online still has
+    [...document.querySelectorAll('img[data-img]:not([src])')].reverse().forEach(async (el) => {
       const sid = el.dataset.imgSid, cid = el.dataset.imgCid, mid = el.dataset.imgMid;
       const m = findImageMessage(sid, el.dataset.img, cid, mid);
       if (!m) return;
@@ -952,9 +1071,11 @@
           imageErrors.add(imageMessageKey(sid, cid, mid));
           el.hidden = true;
           el.parentElement.classList.remove('loading');
-          if (status) { status.hidden = false; status.textContent = m.file ? 'Image preview unavailable. Download the original to open it.' : 'Image preview unavailable.'; }
+          if (status) { status.hidden = false; status.textContent = 'Image preview unavailable.'; }
         };
         el.src = url;
+        // the load event can be held back while the page is hidden; decoding is not
+        if (typeof el.decode === 'function') el.decode().then(() => { if (el.onload) el.onload(); }, () => {});
       } else requestImg(sid, m.img.id, cid, mid);
     });
   }
@@ -999,6 +1120,23 @@
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       saveFileDownload(new Blob([bytes], { type: 'image/' + type }), (base || 'image') + '.' + ext);
     } catch { toast('Could not save that image.'); }
+  }
+  async function copyImage(sid, cid, mid) {
+    const m = (getMsgs(sid)[cid] || []).find((x) => x.id === mid && !x.del && x.img);
+    const url = m && await getImg(sid, m);
+    if (!url) return toast('Image is still loading. Try again in a moment.');
+    try {
+      // the clipboard only takes PNG, so redraw the shared image
+      const im = new Image();
+      im.src = url;
+      await im.decode();
+      const c = document.createElement('canvas');
+      c.width = im.naturalWidth; c.height = im.naturalHeight;
+      c.getContext('2d').drawImage(im, 0, 0);
+      const blob = await new Promise((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error('encode'))), 'image/png'));
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+      toast('Image copied');
+    } catch { toast('Could not copy the image. Your browser may not allow it.'); }
   }
   async function openImage(sid, cid, mid) {
     const m = (getMsgs(sid)[cid] || []).find((m) => m.id === mid && !m.del && (m.img || m.file && window.DischordImages.isImage(m.file)));
@@ -1083,7 +1221,7 @@
     u += `&audiogain=${audioPercent(av.micGain)}`;
     if (store.get('micLabel', '')) u += '&audiodevice=' + encodeURIComponent(store.get('micLabel', '')); // remembered microphone; falls back to default if unplugged
     if (store.get('outLabel', '')) u += '&outputdevice=' + encodeURIComponent(store.get('outLabel', '')); // remembered speakers / headphones
-    u += withCam ? `&quality=${CAM_Q[av.camQ] ?? 1}&maxframerate=${av.camFps}` : '&videodevice=0';
+    u += withCam ? `&quality=${CAM_Q[av.camQ] ?? 1}&maxframerate=${av.camFps}` + (store.get('camLabel', '') ? '&videodevice=' + encodeURIComponent(store.get('camLabel', '')) : '') : '&videodevice=0';
     u += `&screensharequality=${SS_Q[av.ssQ] ?? 0}&screensharefps=${av.ssFps}`;
     u += `&maxvideobitrate=${av.camBr}&exclude=${ssVs}`; // preserve exclusion when camera reconnects during a share
     if (!micOn || deaf) u += '&mute';
@@ -1122,7 +1260,9 @@
     const f = document.createElement('iframe');
     f.allow = 'autoplay; camera; microphone; display-capture; fullscreen; picture-in-picture; clipboard-write';
     f.title = 'Voice connection';
-    const call = { sid, cid, iframe: f, cam: !!withCam, ss: false, vs, ssFrame: null, ssVs: vs + 's', timers: new Set(), ...(keepShare || {}) };
+    if (!rejoin && !voiceOccupants(sid, cid).length) delete callStarts[sid + '/' + cid]; // nobody here: a new call begins now
+    noteCallStart(sid, cid, now());
+    const call = { sid, cid, iframe: f, cam: !!withCam, ss: false, vs, ssFrame: null, ssVs: vs + 's', timers: new Set(), since: rejoin && voice.since ? voice.since : now(), ...(keepShare || {}) };
     voice = call;
     for (const k in sentVol) delete sentVol[k];
     f.addEventListener('load', () => {
@@ -1303,6 +1443,10 @@
   function toggleShare() {
     if (!voice) return;
     if (voice.ssFrame) return stopShare();
+    if (mobileLayout() && (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function')) {
+      toast('Screen sharing is unavailable in this browser. You can still watch shared screens and use your camera.', 7000);
+      return;
+    }
     const ssVs = voice.ssVs;
     const f = document.createElement('iframe');
     f.allow = 'autoplay; display-capture; fullscreen';
@@ -1423,6 +1567,49 @@
   });
 
   // ---------------------------------------------------------------- navigation
+  const mobileMedia = typeof window.matchMedia === 'function' ? window.matchMedia('(max-width: 760px), (max-width: 1024px) and (pointer: coarse)') : null;
+  const mobileLayout = () => !!(mobileMedia && mobileMedia.matches);
+  let mobilePane = null;
+  let mobileViewportBaseline = window.innerHeight;
+  function renderMobileNavigation() {
+    const narrow = mobileLayout();
+    if (!narrow) mobilePane = null;
+    document.body.classList.toggle('channels-open', narrow && mobilePane === 'channels');
+    document.body.classList.toggle('members-open', narrow && mobilePane === 'members');
+    $('mobileBackdrop').classList.toggle('hidden', !narrow || !mobilePane);
+    $('mobileChannels').setAttribute('aria-expanded', String(narrow && !!mobilePane));
+    $('mobileChannels').setAttribute('aria-label', mobilePane ? 'Close navigation' : 'Open servers and channels');
+    $('mobileChannelsLabel').textContent = mobilePane ? 'Close' : 'Channels';
+    $('mobileServerName').textContent = (server(cur.sid) || {}).name || 'Dischord';
+    $('mobileCall').classList.toggle('hidden', !voice);
+    // Drawers do not take focus or taps while they are offscreen; media keeps running.
+    for (const id of ['rail', 'sidebar']) {
+      $(id).inert = narrow && mobilePane !== 'channels';
+      $(id).setAttribute('aria-hidden', String(narrow && mobilePane !== 'channels'));
+    }
+    $('members').inert = narrow && mobilePane !== 'members';
+    $('members').setAttribute('aria-hidden', String(narrow && mobilePane !== 'members'));
+    $('main').inert = narrow && !!mobilePane;
+  }
+  function setMobilePane(pane) {
+    mobilePane = mobileLayout() ? pane : null;
+    renderMobileNavigation();
+  }
+  function updateMobileViewport() {
+    const viewport = window.visualViewport;
+    const height = viewport ? viewport.height : window.innerHeight;
+    const top = viewport ? viewport.offsetTop : 0;
+    const style = document.documentElement && document.documentElement.style;
+    if (style) {
+      style.setProperty('--app-height', Math.round(height) + 'px');
+      style.setProperty('--app-top', Math.round(top) + 'px');
+      style.setProperty('--visual-bottom', Math.max(0, Math.round(window.innerHeight - height - top)) + 'px');
+    }
+    const editing = document.activeElement && document.activeElement.matches && document.activeElement.matches('input, textarea, [contenteditable="true"]');
+    if (!editing) mobileViewportBaseline = height;
+    document.body.classList.toggle('keyboard-open', mobileLayout() && !!editing && height < mobileViewportBaseline - 120);
+    renderMobileNavigation();
+  }
   function selectServer(sid) {
     saveComposerDraft();
     cur.sid = sid;
@@ -1438,6 +1625,7 @@
     if (cur.cid) afterChannelSelect();
   }
   function selectChannel(cid) {
+    setMobilePane(null);
     saveComposerDraft();
     cur.cid = cid;
     restoreComposerDraft();
@@ -1555,12 +1743,19 @@
     const out = [];
     if (voice && voice.sid === sid && voice.cid === cid) out.push({ user: me, st: myState(), vs: voice.vs, vss: voice.ss ? voice.ssVs : null, self: true });
     const ms = members[sid] || {};
-    for (const id in ms) if (isOnline(ms[id]) && ms[id].vc === cid) out.push({ user: ms[id].user, st: ms[id].st, vs: ms[id].vs, vss: ms[id].vss });
+    for (const id in ms) if (isOnline(ms[id]) && ms[id].vc === cid) out.push({ user: ms[id].user, st: ms[id].st, vs: ms[id].vs, vss: ms[id].vss, rtt: now() - (ms[id].rttAt || 0) < 30000 ? Math.round(ms[id].rtt) : null });
     return out;
   }
 
+  // round-trip time of my chat connection to that person (answered pings); blank for me and for old versions
+  function pingTag(o) {
+    if (o.self) return '';
+    if (o.rtt == null) return `<span class="vu-ping" title="No ping reply from ${esc(o.user.name)} yet">···</span>`;
+    return `<span class="vu-ping ${o.rtt < 120 ? 'good' : o.rtt < 300 ? 'ok' : 'bad'}" title="Ping to ${esc(o.user.name)}: ${o.rtt} ms">${o.rtt}ms</span>`;
+  }
+
   function renderChannels() {
-    if (!me) return;
+    if (!me || listDrag) return; // rebuilding the list would drop whatever is being dragged
     const s = server(cur.sid);
     const el = $('channelList');
     if (!s) {
@@ -1574,21 +1769,23 @@
     let h = `<div class="cat"><span>Text channels</span><button class="icon-btn" data-add="text" title="Create channel">${icon('plus')}</button></div>`;
     for (const c of text) {
       const n = c.id === cur.cid ? 0 : unreadCount(s.id, c.id);
-      h += `<div class="chan ${c.id === cur.cid ? 'active' : ''} ${n ? 'unread' : ''}" data-cid="${esc(c.id)}">
+      h += `<div class="chan ${c.id === cur.cid ? 'active' : ''} ${n ? 'unread' : ''}" data-cid="${esc(c.id)}" data-type="text" draggable="true">
         <span class="ico">${icon('hash')}</span><span class="name">${esc(c.name)}</span>
         ${n ? `<span class="badge">${n > 99 ? '99+' : n}</span>` : ''}
-        <button class="icon-btn del" data-delc="${esc(c.id)}" title="Delete channel">${icon('trash')}</button></div>`;
+</div>`;
     }
     h += `<div class="cat"><span>Voice channels</span><button class="icon-btn" data-add="voice" title="Create channel">${icon('plus')}</button></div>`;
     for (const c of vc) {
       const who = voiceOccupants(s.id, c.id);
+      if (!who.length) delete callStarts[s.id + '/' + c.id]; // the call ended when the last person left
       const mine = voice && voice.sid === s.id && voice.cid === c.id;
-      h += `<div class="chan ${c.id === cur.cid ? 'active' : ''} ${mine ? 'connected' : ''}" data-cid="${esc(c.id)}">
+      h += `<div class="chan ${c.id === cur.cid ? 'active' : ''} ${mine ? 'connected' : ''}" data-cid="${esc(c.id)}" data-type="voice" draggable="true">
         <span class="ico">${icon('speaker')}</span><span class="name">${esc(c.name)}</span>
+        ${who.length && callStart(s.id, c.id) ? `<span class="chan-time" data-start="${callStart(s.id, c.id)}" title="Call running for">${fmtDur(now() - callStart(s.id, c.id))}</span>` : ''}
         ${who.length ? `<span class="count">${who.length}</span>` : ''}
-        <button class="icon-btn del" data-delc="${esc(c.id)}" title="Delete channel">${icon('trash')}</button></div>`;
+</div>`;
       if (who.length) {
-        h += `<div class="voice-users">${who.map((o) => `<div class="voice-user" data-uid="${esc(o.self ? me.id : o.user.id)}">${avatar(o.user)}<span class="vu-name">${esc(o.user.name)}</span><span class="vu-icons">${stateIcons(o.st)}</span></div>`).join('')}</div>`;
+        h += `<div class="voice-users" data-vc="${esc(c.id)}">${who.map((o) => `<div class="voice-user" data-uid="${esc(o.self ? me.id : o.user.id)}" draggable="true">${avatar(o.user)}<span class="vu-name">${esc(o.user.name)}</span>${pingTag(o)}<span class="vu-icons">${stateIcons(o.st)}</span></div>`).join('')}</div>`;
       }
     }
     el.innerHTML = h;
@@ -1602,10 +1799,14 @@
     $('textView').classList.toggle('hidden', !c || c.type !== 'text');
     $('voiceView').classList.toggle('hidden', !c || c.type !== 'voice');
     const inThisVoice = !!(voice && c && voice.sid === cur.sid && voice.cid === c.id);
+    const stageWas = stageShape();
     $('voiceStage').classList.toggle('offstage', !inThisVoice);
     $('voiceStage').classList.toggle('hidden', !voice);
+    updateMini();
+    morphStage(stageWas);
     $('mainHeader').classList.toggle('hidden', !c);
     $('voiceView').classList.toggle('behind', inThisVoice);
+    renderMobileNavigation();
 
     if (!c) return;
     $('chanIcon').innerHTML = icon(c.type === 'text' ? 'hash' : 'speaker');
@@ -1621,9 +1822,16 @@
   // ---------------------------------------------------------------- call stage
   // One tile per person. Tiles are never moved in the DOM (moving an iframe reloads it);
   // focus / strip layout is pure CSS driven by classes and custom properties.
+  let listDrag = null;         // a channel or person being dragged in the channel list
   const tileEls = new Map();   // uid -> tile element
   const streamBr = {};         // vs -> chosen kbps (0 = auto)
   const autoFocused = new Set();
+  const unwatched = new Set();  // screen share stream ids I chose not to watch (no video is received for them)
+  function setWatching(vss, on) {
+    if (!vss) return;
+    if (on) unwatched.delete(vss); else unwatched.add(vss);
+    renderStage();
+  }
   let focusUid = null;
   let winFs = null;            // tile key filling the whole app window, or null
   let hideStrip = store.get('hideStrip', false); // focus mode: hide the row of other people under the big tile
@@ -1650,9 +1858,82 @@
       const hideSelf = o.self && av.selfPreview === 'off';
       const hideCam = !o.self && hiddenVid[o.user.id];
       out.push({ key: o.user.id, uid: o.user.id, user: o.user, st, self: !!o.self, screen: false, vs: st.c && o.vs && !hideSelf && !hideCam ? o.vs : '' });
-      if (st.s && o.vss) out.push({ key: o.user.id + ':s', uid: o.user.id, user: o.user, st, self: !!o.self, screen: true, vs: hideSelf ? '' : o.vss });
+      const off = !o.self && unwatched.has(o.vss);
+      if (st.s && o.vss) out.push({ key: o.user.id + ':s', uid: o.user.id, user: o.user, st, self: !!o.self, screen: true, vs: hideSelf || off ? '' : o.vss, vss: o.vss, unwatched: off });
     }
     return out;
+  }
+
+  // Going between the full call view and the small preview animates from one box to the other, so the
+  // call visibly grows out of (or shrinks into) wherever the preview sits.
+  function stageShape() {
+    const stage = $('voiceStage');
+    const shown = !stage.classList.contains('hidden');
+    return {
+      mini: shown && stage.classList.contains('mini'),
+      full: shown && !stage.classList.contains('offstage'),
+      rect: typeof stage.getBoundingClientRect === 'function' ? stage.getBoundingClientRect() : null,
+    };
+  }
+  function morphStage(was) {
+    const stage = $('voiceStage');
+    if (!was.rect || typeof stage.animate !== 'function') return;
+    const now = stageShape();
+    if (!((was.mini && now.full) || (was.full && now.mini)) || !now.rect.width || !now.rect.height || !was.rect.width) return;
+    if (morphStage.running) morphStage.running.cancel(); // never stack two
+    stage.classList.remove('slide'); // shrinking out of the call replaces the slide-in from the edge
+    const from = `translate(${was.rect.left - now.rect.left}px, ${was.rect.top - now.rect.top}px) scale(${was.rect.width / now.rect.width}, ${was.rect.height / now.rect.height})`;
+    const a = stage.animate([{ transformOrigin: '0 0', transform: from }, { transformOrigin: '0 0', transform: 'none' }],
+      { duration: 380, easing: 'cubic-bezier(.2, .85, .25, 1.06)' });
+    morphStage.running = a;
+    a.onfinish = a.oncancel = () => { if (morphStage.running === a) morphStage.running = null; };
+  }
+
+  // ---- zoom into a stream: scroll to zoom at the cursor, drag to move, double-click to reset.
+  // State is in fractions of the picture (s = scale, u/v = top-left of the visible part), so it survives
+  // layout changes; the little map shows which part is on screen.
+  const zooms = new Map(); // tile key -> { s, u, v }
+  function paintZoom(key) {
+    const el = tileEls.get(key);
+    if (!el) return;
+    const z = zooms.get(key), media = el.querySelector('.tile-media'), map = el.querySelector('.tile-zoom');
+    el.classList.toggle('zoomed', !!z);
+    if (media) media.style.transform = z ? `translate(${-z.u * z.s * 100}%, ${-z.v * z.s * 100}%) scale(${z.s})` : '';
+    if (!map) return;
+    map.classList.toggle('hidden', !z);
+    if (!z) return;
+    const box = map.querySelector('i');
+    box.style.left = z.u * 100 + '%'; box.style.top = z.v * 100 + '%';
+    box.style.width = 100 / z.s + '%'; box.style.height = 100 / z.s + '%';
+    map.querySelector('b').textContent = z.s.toFixed(1) + '×';
+  }
+  function setZoom(key, s, u, v) {
+    s = Math.max(1, Math.min(8, s));
+    if (s <= 1.01) zooms.delete(key);
+    else zooms.set(key, { s, u: Math.max(0, Math.min(1 - 1 / s, u)), v: Math.max(0, Math.min(1 - 1 / s, v)) });
+    paintZoom(key);
+  }
+
+  // While I'm in a call but looking elsewhere, keep one stream visible as a small click-to-return preview.
+  function updateMini() {
+    const stage = $('voiceStage');
+    let key = null;
+    if (voice && stage.classList.contains('offstage')) {
+      const vids = [...tileEls].filter(([, el]) => el.classList.contains('video'));
+      const pick = vids.find(([k]) => k === focusUid) || vids.find(([, el]) => el.classList.contains('screen') && !el.classList.contains('self')) ||
+        vids.find(([, el]) => !el.classList.contains('self')) || vids[0];
+      if (pick) key = pick[0];
+    }
+    if (key && !stage.classList.contains('mini')) {
+      // appearing: come in from the edge it is docked to
+      const pos = store.get('miniPos', null), main = $('main');
+      const left = !!(pos && main && main.clientWidth && pos.r > (main.clientWidth - (+store.get('miniW', 320) || 320)) / 2);
+      stage.style.setProperty('--mini-from', left ? '-130%' : '130%');
+      stage.classList.add('slide'); // only a preview that appears on its own slides in; see morphStage
+    }
+    if (!key) stage.classList.remove('slide');
+    stage.classList.toggle('mini', !!key);
+    tileEls.forEach((el, k) => el.classList.toggle('mini-main', k === key));
   }
 
   function renderStage() {
@@ -1663,6 +1944,10 @@
     }
     $('devDone').classList.toggle('hidden', !voice.devices);
     $('pubHost').classList.toggle('devices', !!voice.devices);
+    // where every tile is drawn right now, so a layout change can animate from there
+    const before = new Map();
+    const animating = !$('voiceStage').classList.contains('offstage') && !document.hidden;
+    if (animating) tileEls.forEach((el, key) => { if (typeof el.getBoundingClientRect === 'function') before.set(key, el.getBoundingClientRect()); });
     const seen = new Set();
     for (const t of stageSpecs()) {
       seen.add(t.key);
@@ -1673,15 +1958,16 @@
         el.className = 'tile';
         el.dataset.key = t.key;
         if (!t.screen) el.dataset.uid = t.uid; // speaking ring is for people, not screens
-        el.innerHTML = '<div class="tile-media"></div><div class="tile-name"></div><div class="tile-tools"></div><div class="tile-stats"></div><div class="tile-fx"></div>';
+        el.innerHTML = '<div class="tile-media"></div><div class="tile-name"></div><div class="tile-tools"></div><div class="tile-stats"></div><div class="tile-zoom hidden"><i></i><b></b></div><div class="tile-fx"></div>';
         host.appendChild(el);
         tileEls.set(t.key, el);
       }
       el.style.setProperty('--c', t.user.color);
       const media = el.querySelector('.tile-media');
       const br = hasVid ? wantedBr(t) : 0;
-      if (el.dataset.vs !== t.vs) {
-        el.dataset.vs = t.vs;
+      const vsKey = t.vs || (t.unwatched ? 'unwatched' : '');
+      if (el.dataset.vs !== vsKey) {
+        el.dataset.vs = vsKey;
         el.dataset.br = br;
         if (hasVid) {
           const f = document.createElement('iframe');
@@ -1689,7 +1975,8 @@
           f.src = viewUrl(t.vs, br, t.self && av.selfPreview === 'low' ? 35 : 100);
           media.innerHTML = '';
           media.appendChild(f);
-        } else if (t.screen) media.innerHTML = `<div class="share-ph">${icon('screen')}<span>You're sharing your screen</span></div>`;
+        } else if (t.unwatched) media.innerHTML = `<div class="share-ph">${icon('eyeOff')}<span>${esc(t.user.name)} is sharing their screen</span><button type="button" class="btn primary" data-watch="${esc(t.vss)}">Watch stream</button></div>`;
+        else if (t.screen) media.innerHTML = `<div class="share-ph">${icon('screen')}<span>You're sharing your screen</span></div>`;
         else media.innerHTML = avatar(t.user, false, 'big');
       } else if (hasVid && +el.dataset.br !== br) {
         el.dataset.br = br; // live bitrate change, no reconnect
@@ -1706,7 +1993,8 @@
       const nameEl = el.querySelector('.tile-name');
       if (nameEl.innerHTML !== name) nameEl.innerHTML = name;
       const tools = hasVid
-        ? (t.self ? '' : `<button class="tool-btn q-btn" data-q="${esc(t.key)}" title="Stream quality">${esc(streamBr[t.vs] ? mbps(br) : 'Auto · ' + mbps(br))}</button>`) +
+        ? (t.screen && !t.self ? `<button class="tool-btn" data-unwatch="${esc(t.vss)}" title="Stop watching">${icon('eyeOff')}</button>` : '') +
+          (t.self ? '' : `<button class="tool-btn q-btn" data-q="${esc(t.key)}" title="Stream quality">${esc(streamBr[t.vs] ? mbps(br) : 'Auto · ' + mbps(br))}</button>`) +
           `<button class="tool-btn" data-wfs="${esc(t.key)}" title="${winFs === t.key ? 'Exit window fullscreen' : 'Fill the window'}">${icon(winFs === t.key ? 'collapse' : 'winfs')}</button>` +
           `<button class="tool-btn fs-btn" data-fs="${esc(t.key)}" title="${document.fullscreenElement === el ? 'Exit fullscreen' : 'Fullscreen'}">${icon(document.fullscreenElement === el ? 'collapse' : 'expand')}</button>`
         : '';
@@ -1714,9 +2002,10 @@
       if (toolsEl.innerHTML !== tools) toolsEl.innerHTML = tools;
 
       // someone else's new screen share takes the stage once (click away any time)
-      if (t.screen && !t.self && !autoFocused.has(t.vs)) { autoFocused.add(t.vs); focusUid = t.key; }
+      if (t.screen && !t.self && hasVid && !autoFocused.has(t.vs)) { autoFocused.add(t.vs); focusUid = t.key; }
     }
-    for (const [key, el] of tileEls) if (!seen.has(key)) { el.remove(); tileEls.delete(key); }
+    for (const [key, el] of tileEls) if (!seen.has(key)) { el.remove(); tileEls.delete(key); zooms.delete(key); }
+    tileEls.forEach((el, key) => { if (zooms.has(key) && !el.classList.contains('video')) { zooms.delete(key); paintZoom(key); } });
     if (focusUid && !(tileEls.get(focusUid) && tileEls.get(focusUid).classList.contains('video'))) focusUid = null;
     if (winFs && !(tileEls.get(winFs) && tileEls.get(winFs).classList.contains('video'))) winFs = null;
     $('voiceStage').classList.toggle('winfs', !!winFs);
@@ -1749,6 +2038,39 @@
     $('tiles').classList.toggle('show-stats', !!av.showStats);
     paintSpeaking();
     applyVolumes();
+    if (animating) glideTiles(before);
+    updateMini();
+  }
+
+  // Tiles move between layouts (grid, focused, strip, fill-window) by gliding from where they were to
+  // where they now belong, instead of jumping. A tile that just appeared fades in.
+  function glideTiles(before) {
+    const host = $('tiles');
+    if (document.fullscreenElement || typeof host.getBoundingClientRect !== 'function') return;
+    const origin = host.getBoundingClientRect();
+    const ox = origin.left + (host.clientLeft || 0), oy = origin.top + (host.clientTop || 0);
+    const near = (a, b) => Math.abs(a - b) < 1;
+    tileEls.forEach((el, key) => {
+      if (typeof el.animate !== 'function') return;
+      // the destination comes from layout offsets, which a running animation does not disturb
+      const to = { x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight };
+      if (!to.w || !to.h) return;
+      const same = el._glideTo && near(el._glideTo.x, to.x) && near(el._glideTo.y, to.y) && near(el._glideTo.w, to.w) && near(el._glideTo.h, to.h);
+      if (el._glide && same) return; // already on its way there
+      const was = before.get(key);
+      let frames;
+      if (!was || !was.width || !was.height) frames = [{ opacity: 0, transform: 'scale(.92)' }, { opacity: 1, transform: 'none' }];
+      else {
+        const from = { x: was.left - ox, y: was.top - oy, w: was.width, h: was.height }; // where it is drawn now
+        el._glideTo = to;
+        if (near(from.x, to.x) && near(from.y, to.y) && near(from.w, to.w) && near(from.h, to.h)) return;
+        frames = [{ transformOrigin: '0 0', transform: `translate(${from.x - to.x}px, ${from.y - to.y}px) scale(${from.w / to.w}, ${from.h / to.h})` }, { transformOrigin: '0 0', transform: 'none' }];
+      }
+      el._glideTo = to;
+      if (el._glide) el._glide.cancel();
+      const a = el._glide = el.animate(frames, { duration: 340, easing: 'cubic-bezier(.2, .85, .25, 1.04)' });
+      a.onfinish = a.oncancel = () => { if (el._glide === a) el._glide = null; };
+    });
   }
 
   // ---- per-user volume / mute (applied inside the publisher, which plays everyone's audio)
@@ -1893,20 +2215,38 @@
     m.style.top = Math.max(6, Math.min(y, window.innerHeight - h - 6)) + 'px';
     if (wire) wire(m);
   }
-  const closeCtx = () => $('ctxMenu').classList.add('hidden');
+  let ctxAnchor = null, ctxToggled = null; // the button a menu hangs from; and the one whose click just closed it
+  const closeCtx = () => { $('ctxMenu').classList.add('hidden'); ctxAnchor = null; };
+  // open a menu above (or below) a button; clicking the same button again closes it
+  function openAnchored(anchor, html, wire) {
+    const rect = anchor.getBoundingClientRect();
+    openCtx(rect.left, rect.top, html, (menu) => {
+      menu.style.top = (rect.top > window.innerHeight / 2 ? Math.max(6, rect.top - menu.offsetHeight - 8) : Math.min(window.innerHeight - menu.offsetHeight - 6, rect.bottom + 8)) + 'px';
+      if (wire) wire(menu);
+    });
+    ctxAnchor = anchor;
+  }
   const ctxItem = (act, ico, label, extra = '') => `<button class="ctx-item ${extra}" data-act="${act}">${ico ? icon(ico) : ''}<span>${label}</span></button>`;
   const ctxCheck = (act, label, on) => `<button class="ctx-item check ${on ? 'on' : ''}" data-act="${act}"><span>${label}</span><i class="box">${on ? icon('check') : ''}</i></button>`;
   const ctxSlider = (act, label, val) => `<div class="ctx-slider"><div class="cs-head"><span>${label}</span><b data-out="${act}">${audioPercent(val)}%</b></div><input type="range" min="0" max="200" step="1" value="${audioPercent(val)}" data-slide="${act}" aria-label="${esc(label)}"></div>`;
   const ctxSelect = (act, label, val, opts) => `<div class="ctx-select"><span>${label}</span><select data-sel="${act}">${opts.map(([v, l]) => `<option value="${v}" ${String(v) === String(val) ? 'selected' : ''}>${l}</option>`).join('')}</select></div>`;
   const qOpts = (auto) => [[0, 'Auto' + (auto ? ' · ' + mbps(auto) : '')], ...VIEW_BRS.map((k) => [k, mbps(k)])];
 
-  // ---- device menus (the caret beside, or a right-click on, the mic and headphones buttons); all inside Dischord
+  // ---- device menus (the arrow beside, or a right-click on, the call buttons); all inside Dischord
   let devWait = null;
   const sameLabel = (a, b) => !!a && !!b && String(a).replace(/\W+/g, '_').toLowerCase() === String(b).replace(/\W+/g, '_').toLowerCase();
-  function deviceMenu(anchor, kind) { // kind: 'audioinput' | 'audiooutput'
+  const DEV = {
+    audioinput: { key: 'micLabel', head: 'Input device', none: 'No microphone found.' },
+    audiooutput: { key: 'outLabel', head: 'Output device', none: 'This browser does not list output devices.' },
+    videoinput: { key: 'camLabel', head: 'Camera', none: 'No camera found.' },
+  };
+  const CAM_RES = [['360', '360p'], ['720', '720p'], ['1080', '1080p'], ['1440', '1440p'], ['2160', '4K']];
+  const SS_RES = [['source', 'Source (native)'], ['2160', '4K'], ['1440', '1440p'], ['1080', '1080p'], ['720', '720p']];
+  const fpsOpts = (list) => list.map((f) => [f, f + ' fps']);
+  function saveAv(patch) { av = { ...av, ...patch }; store.set('av', av); broadcastState(); }
+  function deviceMenu(anchor, kind) { // kind: 'audioinput' | 'audiooutput' | 'videoinput'
     closeCtx();
-    const input = kind === 'audioinput', key = input ? 'micLabel' : 'outLabel';
-    const rect = anchor.getBoundingClientRect();
+    const info = DEV[kind];
     const token = {};
     clearTimeout(devWait && devWait.timer);
     const show = (list, fromCallFrame = true) => {
@@ -1914,24 +2254,33 @@
       clearTimeout(devWait.timer); devWait = null;
       const devs = (list || []).filter((d) => d.kind === kind && d.deviceId !== 'communications');
       const named = devs.some((d) => d.label);
-      const saved = store.get(key, '');
-      let h = `<div class="ctx-head"><span>${input ? 'Input device' : 'Output device'}</span></div>`;
-      if (!devs.length) h += `<div class="ctx-note">${input ? 'No microphone found.' : 'This browser does not list output devices.'}</div>`;
-      else if (!named) h += '<div class="ctx-note">Join a voice channel and allow microphone access to see device names.</div>';
+      const saved = store.get(info.key, '');
+      let h = `<div class="ctx-head"><span>${info.head}</span></div>`;
+      if (!devs.length) h += `<div class="ctx-note">${info.none}</div>`;
+      else if (!named) h += `<div class="ctx-note">Join a voice channel and allow ${kind === 'videoinput' ? 'camera' : 'microphone'} access to see device names.</div>`;
       else h += devs.map((d, i) => {
-        const on = saved ? sameLabel(saved, d.label) : d.deviceId === 'default';
+        const on = saved ? sameLabel(saved, d.label) : (d.deviceId === 'default' || (kind === 'videoinput' && i === 0));
         return `<button class="ctx-item check ${on ? 'on' : ''}" data-act="dev" data-i="${i}"><span>${esc(d.label)}</span><i class="box">${on ? icon('check') : ''}</i></button>`;
       }).join('');
       h += '<div class="ctx-sep"></div>';
-      h += input ? ctxSlider('micgain', 'Input volume', av.micGain) + ctxCheck('mic', 'Mute', !micOn || deaf) : ctxCheck('deaf', 'Deafen', deaf);
+      if (kind === 'audioinput') h += ctxSlider('micgain', 'Input volume', av.micGain) + ctxCheck('mic', 'Mute', !micOn || deaf);
+      else if (kind === 'audiooutput') h += ctxCheck('deaf', 'Deafen', deaf);
+      else {
+        h += ctxSelect('camQ', 'Resolution', av.camQ, CAM_RES) + ctxSelect('camFps', 'Frame rate', av.camFps, fpsOpts([15, 30, 60]));
+        if (voice) h += ctxCheck('cam', 'Camera on', !!voice.cam);
+      }
       h += ctxItem('avset', 'gear', 'Voice & video settings');
-      openCtx(rect.left, rect.top, h, (menu) => {
-        // open upwards from bottom-of-screen buttons
-        if (rect.top > window.innerHeight / 2) menu.style.top = Math.max(6, rect.top - menu.offsetHeight - 8) + 'px';
+      openAnchored(anchor, h, (menu) => {
         menu.querySelectorAll('[data-slide]').forEach((r) => {
           r.oninput = () => {
             menu.querySelector(`[data-out="${r.dataset.slide}"]`).textContent = audioPercent(r.value) + '%';
             setMicGain(r.value);
+          };
+        });
+        menu.querySelectorAll('[data-sel]').forEach((sel) => {
+          sel.onchange = () => {
+            saveAv({ [sel.dataset.sel]: sel.dataset.sel === 'camFps' ? +sel.value : sel.value });
+            if (voice && voice.cam) { closeCtx(); joinVoice(voice.sid, voice.cid, true); } // camera settings apply on reconnect
           };
         });
         menu.onclick = (e) => {
@@ -1942,6 +2291,7 @@
             case 'dev': return pickDevice(kind, devs[+b.dataset.i], fromCallFrame);
             case 'mic': return toggleMic();
             case 'deaf': return toggleDeaf();
+            case 'cam': return toggleCam();
             case 'avset': return settingsModal('av');
           }
         };
@@ -1957,8 +2307,7 @@
   }
   function pickDevice(kind, d, fromCallFrame) {
     if (!d) return;
-    const input = kind === 'audioinput';
-    store.set(input ? 'micLabel' : 'outLabel', d.label || '');
+    store.set(DEV[kind].key, d.label || '');
     if (voice) {
       const call = voice;
       if (!fromCallFrame) {
@@ -1966,12 +2315,46 @@
         // saved label; joinVoice preserves the separate screen-share stream.
         joinVoice(call.sid, call.cid, call.cam);
       } else {
-        if (input) voicePost({ function: 'eval', value: `if (typeof changeAudioDeviceById === 'function') changeAudioDeviceById(${JSON.stringify(String(d.deviceId))});` });
-        else voicePost({ changeAudioOutputDevice: String(d.deviceId) });
+        // Live device IDs are only valid inside the VDO frame that listed them.
+        const id = JSON.stringify(String(d.deviceId));
+        if (kind === 'audioinput') voicePost({ function: 'eval', value: `if (typeof changeAudioDeviceById === 'function') changeAudioDeviceById(${id});` });
+        else if (kind === 'audiooutput') voicePost({ changeAudioOutputDevice: String(d.deviceId) });
+        else if (call.cam) voicePost({ function: 'eval', value: `if (typeof changeVideoDeviceById === 'function') changeVideoDeviceById(${id});` });
         scheduleVoice(call, () => syncVoiceState(call), 1500); // re-apply mute / gain after the device swap
       }
     }
-    toast((input ? 'Microphone: ' : 'Output: ') + (d.label || 'selected'));
+    toast(({ audioinput: 'Microphone: ', audiooutput: 'Output: ', videoinput: 'Camera: ' })[kind] + (d.label || 'selected'));
+  }
+  function shareMenu(anchor) {
+    closeCtx();
+    const sharing = !!(voice && voice.ssFrame);
+    let h = '<div class="ctx-head"><span>Screen share</span></div>';
+    if (voice) h += ctxItem('share', 'screen', sharing ? 'Stop sharing' : 'Share your screen', sharing ? 'danger' : '');
+    else h += '<div class="ctx-note">Join a voice channel to share your screen.</div>';
+    h += '<div class="ctx-sep"></div>' + ctxSelect('ssQ', 'Resolution', av.ssQ, SS_RES) + ctxSelect('ssFps', 'Frame rate', av.ssFps, fpsOpts([5, 15, 30, 60])) +
+      ctxSelect('ssHint', 'Optimize for', av.ssHint, [['motion', 'Smoothness'], ['detail', 'Clarity']]);
+    if (sharing) h += '<div class="ctx-note">Changes apply the next time you share.</div>';
+    h += ctxItem('avset', 'gear', 'Voice & video settings');
+    openAnchored(anchor, h, (menu) => {
+      menu.querySelectorAll('[data-sel]').forEach((sel) => {
+        sel.onchange = () => saveAv({ [sel.dataset.sel]: sel.dataset.sel === 'ssFps' ? +sel.value : sel.value });
+      });
+      menu.onclick = (e) => {
+        const b = e.target.closest('[data-act]');
+        if (!b) return;
+        closeCtx();
+        if (b.dataset.act === 'share') return toggleShare();
+        if (b.dataset.act === 'avset') return settingsModal('av');
+      };
+    });
+  }
+  // an arrow button: first click opens its menu, the next click closes it
+  function caret(id, open) {
+    $(id).onclick = (e) => {
+      e.stopPropagation();
+      if (ctxToggled === $(id)) { ctxToggled = null; return; }
+      open($(id));
+    };
   }
 
   // ---- channel list menus
@@ -2020,6 +2403,8 @@
     if (!c) return;
     const inIt = !!(voice && voice.sid === s.id && voice.cid === c.id);
     let h = `<div class="ctx-head"><span>${c.type === 'text' ? '# ' : ''}${esc(c.name)}</span></div>`;
+    const started = c.type === 'voice' && voiceOccupants(s.id, c.id).length ? callStart(s.id, c.id) : null;
+    if (started) h += `<div class="ctx-note">Call running for <b class="call-clock" data-start="${started}">${fmtDur(now() - started)}</b></div>`;
     if (c.type === 'text') h += ctxItem('read', 'check', 'Mark as read');
     else h += inIt ? ctxItem('leave', 'hangup', 'Disconnect', 'danger') : ctxItem('join', 'speaker', 'Join voice') + ctxItem('joincam', 'camera', 'Join with camera');
     h += ctxItem('invite', 'userPlus', 'Invite people') + '<div class="ctx-sep"></div>';
@@ -2086,6 +2471,21 @@
     });
   }
 
+  // Kick and move are requests the other person's app carries out. Say so plainly when it can't
+  // (their page is an older release) or when it didn't (no change after a few seconds).
+  function askPeer(sid, uid, payload, minVer, doing, done, what) {
+    const m = (members[sid] || {})[uid];
+    if (!m) return;
+    const name = m.user.name;
+    if (APP_VER && (m.ver || 0) < minVer) return toast(`${name} is on an older version of Dischord and can't ${what} until they reload the page.`, 8000);
+    send(sid, payload);
+    toast(doing);
+    setTimeout(() => {
+      const now = (members[sid] || {})[uid];
+      if (now && isOnline(now) && !done(now)) toast(`${name}'s app did not respond. They may need to reload the page.`, 8000);
+    }, 4000);
+  }
+
   function userMenu(uid, x, y) {
     const self = uid === me.id;
     const sid = cur.sid;
@@ -2112,13 +2512,15 @@
         if (st.c) h += ctxCheck('hidevid', 'Hide video', !!hiddenVid[uid]);
         if (st.c && occ.vs && !hiddenVid[uid]) h += ctxSelect('qcam', 'Video quality', streamBr[occ.vs] || 0, qOpts(st.cb));
         if (st.s && occ.vss) h += ctxSelect('qss', 'Stream quality', streamBr[occ.vss] || 0, qOpts(st.sb));
-        if (st.s && occ.vss) h += ctxItem('watch', 'expand', 'Focus stream') + ctxItem('fs', 'expand', 'Fullscreen stream');
+        if (st.s && occ.vss) h += ctxCheck('watching', 'Watch stream', !unwatched.has(occ.vss));
+        if (st.s && occ.vss && !unwatched.has(occ.vss)) h += ctxItem('watch', 'expand', 'Focus stream') + ctxItem('fs', 'expand', 'Fullscreen stream');
         h += ctxCheck('stats', 'Show stream stats', !!av.showStats);
         h += '<div class="ctx-sep"></div>';
       } else if (c.m || (c.v ?? 100) !== 100) {
         h += ctxSlider('vol', 'User volume', c.v ?? 100) + ctxCheck('mute', 'Mute', !!c.m) + '<div class="ctx-sep"></div>';
       }
       h += ctxItem('mention', 'at', 'Mention') + ctxItem('copyname', 'copy', 'Copy username');
+      if (ms && isOnline(ms) && ms.vc) h += '<div class="ctx-sep"></div>' + ctxItem('kick', 'hangup', 'Kick from voice', 'danger');
     }
     openCtx(x, y, h, (m) => {
       m.querySelectorAll('[data-slide]').forEach((r) => {
@@ -2152,15 +2554,17 @@
           case 'profile': closeCtx(); return settingsModal('profile');
           case 'mute': setVol(uid, { m: !(userVol[uid] || {}).m }); return reopen();
           case 'hidevid': hiddenVid[uid] = !hiddenVid[uid]; if (!hiddenVid[uid]) delete hiddenVid[uid]; store.set('hidevid', hiddenVid); renderStage(); return reopen();
+          case 'watching': { const o = voice && voiceOccupants(voice.sid, voice.cid).find((x) => x.user.id === uid); if (o && o.vss) setWatching(o.vss, unwatched.has(o.vss)); return reopen(); }
           case 'watch': closeCtx(); showVoice(); focusUid = uid + ':s'; return renderStage();
           case 'fs': { closeCtx(); showVoice(); const el = tileEls.get(uid + ':s'); if (el && el.requestFullscreen) el.requestFullscreen(); return; }
           case 'mention': {
             closeCtx();
             const inp = $('msgInput');
-            if (!$('textView').classList.contains('hidden')) { inp.value += (inp.value && !/\s$/.test(inp.value) ? ' ' : '') + '@' + user.name.replace(/\s+/g, '') + ' '; inp.focus(); }
+            if (!$('textView').classList.contains('hidden')) { inp.value += (inp.value && !/\s$/.test(inp.value) ? ' ' : '') + '@' + mentionTag(user.name) + ' '; inp.focus(); syncComposer(); }
             else toast('Open a text channel to mention someone.');
             return;
           }
+          case 'kick': closeCtx(); return askPeer(sid, uid, { t: 'kick', to: uid }, KICK_VER, `Removing ${user.name} from the call`, (m) => !m.vc, 'be kicked');
           case 'copyname': closeCtx(); navigator.clipboard && navigator.clipboard.writeText(user.name); return toast('Copied');
         }
       };
@@ -2175,7 +2579,9 @@
     h += ctxItem('react', 'smile', 'Add reaction') + ctxItem('reply', 'reply', 'Reply');
     if (m.text) h += ctxItem('copy', 'copy', 'Copy text');
     if (m.img || m.file && window.DischordImages.isImage(m.file)) {
-      h += ctxItem('openimg', 'image', 'Open image') + ctxItem('saveimg', 'download', 'Download image');
+      h += ctxItem('openimg', 'image', 'Open image');
+      if (m.img) h += ctxItem('copyimg', 'copy', 'Copy image');
+      h += ctxItem('saveimg', 'download', 'Download image');
       if (m.file && m.img) h += ctxItem('savepreview', 'download', 'Save preview');
     }
     if (!mine) h += ctxItem('mention', 'at', 'Mention ' + esc(m.a.name));
@@ -2193,9 +2599,10 @@
           case 'reply': return replyToMessage(mid);
           case 'copy': navigator.clipboard && navigator.clipboard.writeText(m.text); return toast('Copied');
           case 'openimg': return openImage(cur.sid, m.cid, m.id);
+          case 'copyimg': return copyImage(cur.sid, m.cid, m.id);
           case 'saveimg': return downloadImage(cur.sid, m.cid, m.id);
           case 'savepreview': return saveImagePreview(cur.sid, m.cid, m.id);
-          case 'mention': { const inp = $('msgInput'); inp.value += '@' + m.a.name.replace(/\s+/g, '') + ' '; return inp.focus(); }
+          case 'mention': { const inp = $('msgInput'); inp.value += (inp.value && !/\s$/.test(inp.value) ? ' ' : '') + '@' + mentionTag(liveUser(m.a).name) + ' '; syncComposer(); return inp.focus(); }
           case 'edit': return editMessage(mid);
           case 'del': return deleteMessage(mid);
         }
@@ -2245,6 +2652,27 @@
     return d.toLocaleDateString() + ' ' + fmtTime(ts);
   }
 
+  // a mention is "@" + the name without spaces or punctuation; resolve it back to a person in this server
+  const mentionTag = (name) => String(name || '').replace(/[^\p{L}\p{N}_.-]+/gu, '').slice(0, 32);
+  function serverPeople(sid) {
+    const k = getKnown(sid), ms = members[sid] || {};
+    const out = [];
+    for (const id of new Set([...Object.keys(k), ...Object.keys(ms)])) {
+      if (id === me.id) continue;
+      const user = (ms[id] && ms[id].user) || k[id];
+      if (user && user.name) out.push({ user, on: isOnline(ms[id]) });
+    }
+    return out;
+  }
+  function mentionTarget(tag) {
+    const want = tag.replace(/^@/, '').toLowerCase();
+    if (!want) return null;
+    if (mentionTag(me.name).toLowerCase() === want) return me;
+    const hit = serverPeople(cur.sid).find((p) => mentionTag(p.user.name).toLowerCase() === want);
+    return hit ? hit.user : null;
+  }
+  const mentionsMe = (text) => !!text && (text.match(/(^|\s)@[\p{L}\p{N}_.-]{1,32}/gu) || []).some((t) => { const u = mentionTarget(t.trim()); return u && u.id === me.id; });
+
   function formatText(raw) {
     const blocks = [];
     let t = esc(raw).replace(/```(?:[a-z0-9]+\n)?([\s\S]*?)```/gi, (_, code) => { blocks.push(`<pre>${code}</pre>`); return `\u0000${blocks.length - 1}\u0000`; });
@@ -2255,7 +2683,10 @@
       .replace(/__([^_\n]+)__/g, '<u>$1</u>')
       .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>')
       .replace(/~~([^~\n]+)~~/g, '<s>$1</s>')
-      .replace(/(^|\s)(@[\p{L}\p{N}_.-]{1,32})/gu, '$1<span class="mention">$2</span>');
+      .replace(/(^|\s)(@[\p{L}\p{N}_.-]{1,32})/gu, (all, pre, tag) => {
+        const u = mentionTarget(tag);
+        return pre + (u ? `<span class="mention ${u.id === me.id ? 'me' : ''}" data-mention="${esc(u.id)}">@${esc(u.name)}</span>` : `<span class="mention">${tag}</span>`);
+      });
     return t.replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[+i]);
   }
 
@@ -2301,12 +2732,13 @@
       const acts = `<div class="actions"><button class="icon-btn" data-reply="${esc(m.id)}" title="Reply">${icon('reply')}</button><button class="icon-btn" data-react="${esc(m.id)}" title="Add reaction">${icon('smile')}</button>` +
         (mine ? `${m.text ? `<button class="icon-btn" data-edit="${esc(m.id)}" title="Edit">${icon('edit')}</button>` : ''}<button class="icon-btn danger" data-del="${esc(m.id)}" title="Delete">${icon('trash')}</button>` : '') + '</div>';
       const edited = m.ed ? ' <span class="time">(edited)</span>' : '';
+      const more = `<button type="button" class="icon-btn message-more" data-message-menu="${esc(m.id)}" title="Message actions" aria-label="Message actions">⋯</button>`;
       const imageStateKey = imageMessageKey(s.id, m.cid, m.id);
       const failedPreview = imageErrors.has(imageStateKey);
       const imgW = m.img ? Math.max(48, Math.round(m.img.w * Math.min(1, 550 / m.img.w, 350 / m.img.h))) : 0;
       const imageAction = m.file ? `<span data-image-download="${esc(m.id)}" data-image-sid="${esc(s.id)}" data-image-cid="${esc(m.cid)}" data-image-compact="overlay">${imageDownloadContent(s.id, m, 'overlay')}</span>` : `<span class="img-save" data-image-save="${esc(m.id)}" role="button" tabindex="0" title="Download image" aria-label="Download image">${icon('download')}</span>`;
       const img = m.img ? `<button type="button" class="msg-img ${failedPreview ? '' : 'loading'}" style="aspect-ratio:${m.img.w}/${m.img.h};width:min(100%, ${imgW}px)" data-image-open="${esc(m.id)}" aria-label="Open image preview">
-        <img data-img="${esc(m.img.id)}" data-img-sid="${esc(s.id)}" data-img-cid="${esc(m.cid)}" data-img-mid="${esc(m.id)}" loading="lazy" decoding="async" alt="${esc(m.file ? m.file.name : 'Shared image')}"><span class="image-preview-status" role="status">${failedPreview ? 'Preview unavailable. Someone with it must be online.' : 'Loading image preview…'}</span>${imageAction}</button>` : m.file && window.DischordImages.isImage(m.file)
+        <img data-img="${esc(m.img.id)}" data-img-sid="${esc(s.id)}" data-img-cid="${esc(m.cid)}" data-img-mid="${esc(m.id)}" decoding="async" alt="${esc(m.file ? m.file.name : 'Shared image')}"><span class="image-preview-status" role="status">${failedPreview ? 'Preview unavailable. Someone with it must be online.' : 'Loading image preview…'}</span>${imageAction}</button>` : m.file && window.DischordImages.isImage(m.file)
         ? `<div class="image-preview-placeholder" data-image-open="${esc(m.id)}">${icon('image')}<span role="status">${imagePreparing.has(imageStateKey) && !failedPreview ? 'Preparing image preview…' : 'Image preview unavailable.'}</span><span data-image-download="${esc(m.id)}" data-image-sid="${esc(s.id)}" data-image-cid="${esc(m.cid)}" data-image-compact="icon">${imageDownloadContent(s.id, m, 'icon')}</span></div>` : '';
       // Image originals download from their preview controls, without a duplicate file card.
       const file = m.file && !window.DischordImages.isImage(m.file) ? `<div class="msg-file" data-file-card="${esc(m.id)}">${fileCardContent(s.id, m)}</div>` : '';
@@ -2314,11 +2746,11 @@
       const text = m.text ? `<div class="text">${formatText(m.text)}${edited}</div>` : '';
       const re = renderRe(m);
       if (head) {
-        h += `<div class="msg head" data-mid="${esc(m.id)}"><div class="gutter" data-uid="${esc(m.a.id)}" data-ctx="user">${avatar(a)}</div><div class="body">
+        h += `<div class="msg head ${mentionsMe(m.text) ? 'mentions-me' : ''}" data-mid="${esc(m.id)}"><div class="gutter" data-uid="${esc(m.a.id)}" data-ctx="user">${avatar(a)}</div><div class="body">${more}
           <div class="meta"><span class="author" data-uid="${esc(m.a.id)}" data-ctx="user" style="color:${esc(a.color)}">${esc(a.name)}</span><span class="time" title="${esc(new Date(m.ts).toLocaleString())}">${esc(fmtStamp(m.ts))}</span></div>
           ${reply}${text}${file}${img}${re}</div>${acts}</div>`;
       } else {
-        h += `<div class="msg" data-mid="${esc(m.id)}"><div class="gutter time-side">${esc(fmtTime(m.ts))}</div><div class="body">${reply}${text}${file}${img}${re}</div>${acts}</div>`;
+        h += `<div class="msg ${mentionsMe(m.text) ? 'mentions-me' : ''}" data-mid="${esc(m.id)}"><div class="gutter time-side">${esc(fmtTime(m.ts))}</div><div class="body">${more}${reply}${text}${file}${img}${re}</div>${acts}</div>`;
       }
       prev = m;
     }
@@ -2342,15 +2774,77 @@
   }
 
   // tiny emoji picker anchored to an element
-  function emojiPicker(anchor, onPick) {
+  function emojiPicker(anchor, onPick, list = REACTS) {
     const m = $('emojiMenu');
-    m.innerHTML = REACTS.map((e) => `<button data-emo="${e}">${e}</button>`).join('');
+    m.innerHTML = list.map((e) => `<button data-emo="${e}">${e}</button>`).join('');
     const r = anchor.getBoundingClientRect();
     m.classList.remove('hidden');
     const mw = m.offsetWidth, mh = m.offsetHeight;
     m.style.left = Math.max(8, r.left + mw <= window.innerWidth - 8 ? r.left : r.right - mw) + 'px';
     m.style.top = Math.max(8, Math.min(window.innerHeight - mh - 8, r.top - mh - 6 > 8 ? r.top - mh - 6 : r.bottom + 6)) + 'px';
     m.onclick = (e) => { const b = e.target.closest('[data-emo]'); if (!b) return; m.classList.add('hidden'); onPick(b.dataset.emo); };
+  }
+
+  // show a person: open the member list at them, flash their row, and open their menu
+  function jumpToPerson(uid, x, y) {
+    if (!membersOpen) { membersOpen = true; store.set('membersOpen', true); }
+    renderMembers();
+    if (mobileLayout()) setMobilePane('members');
+    const row = [...document.querySelectorAll('#members .mem')].find((el) => el.dataset.uid === uid);
+    if (row) {
+      row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      row.classList.remove('flash'); void row.offsetWidth; row.classList.add('flash');
+    }
+    userMenu(uid, x, y);
+  }
+
+  // ---- message box: coloured copy of the text under the (transparent) textarea, and the @ picker
+  function composerHtml(text) {
+    let t = esc(text)
+      .replace(/`[^`\n]+`/g, (m) => `<span class="hl-code">${m}</span>`)
+      .replace(/\bhttps?:\/\/[^\s<]+/g, (m) => `<span class="hl-link">${m}</span>`)
+      .replace(/\*\*[^*\n]+\*\*|~~[^~\n]+~~|__[^_\n]+__/g, (m) => `<span class="hl-mark">${m}</span>`)
+      .replace(/(^|\s)(@[\p{L}\p{N}_.-]{1,32})/gu, (all, pre, tag) => pre + `<span class="${mentionTarget(tag) ? 'hl-mention' : 'hl-at'}">${tag}</span>`);
+    return t + (text.endsWith('\n') ? ' ' : ''); // a trailing newline needs something on its line to take height
+  }
+  function syncComposer() {
+    const inp = $('msgInput'), mirror = $('msgMirror');
+    if (!inp || !mirror) return;
+    const html = composerHtml(inp.value || '');
+    if (mirror.innerHTML !== html) mirror.innerHTML = html;
+    mirror.scrollTop = inp.scrollTop;
+  }
+  let mention = null; // { start, items, sel } while the @ picker is open
+  function closeMention() { mention = null; $('mentionMenu').classList.add('hidden'); }
+  function updateMention() {
+    const inp = $('msgInput');
+    const caret = inp.selectionStart ?? (inp.value || '').length;
+    const m = /(^|\s)@([\p{L}\p{N}_.-]{0,32})$/u.exec((inp.value || '').slice(0, caret));
+    if (!m || !server(cur.sid)) return closeMention();
+    const q = m[2].toLowerCase();
+    const items = serverPeople(cur.sid).map((p) => ({ ...p, tag: mentionTag(p.user.name) }))
+      .filter((p) => p.tag && p.tag.toLowerCase().includes(q))
+      .sort((a, b) => (b.tag.toLowerCase().startsWith(q) - a.tag.toLowerCase().startsWith(q)) || (b.on - a.on) || a.user.name.localeCompare(b.user.name))
+      .slice(0, 8);
+    if (!items.length) return closeMention();
+    mention = { start: caret - m[2].length - 1, items, sel: mention && mention.sel < items.length ? mention.sel : 0 };
+    paintMention();
+  }
+  function paintMention() {
+    const el = $('mentionMenu');
+    el.innerHTML = '<div class="mm-head">Members</div>' + mention.items.map((p, i) =>
+      `<button type="button" class="mm-item ${i === mention.sel ? 'sel' : ''}" data-i="${i}" role="option">${avatar(p.user)}<span class="mm-name" style="color:${esc(p.user.color)}">${esc(p.user.name)}</span><span class="mm-sub">${p.on ? 'online' : 'offline'}</span></button>`).join('');
+    el.classList.remove('hidden');
+  }
+  function acceptMention(i) {
+    const inp = $('msgInput'), p = mention && mention.items[i];
+    if (!p) return closeMention();
+    const caret = inp.selectionStart ?? inp.value.length, ins = '@' + p.tag + ' ';
+    inp.value = inp.value.slice(0, mention.start) + ins + inp.value.slice(caret);
+    inp.selectionStart = inp.selectionEnd = mention.start + ins.length;
+    closeMention();
+    inp.focus();
+    inp.dispatchEvent(new Event('input'));
   }
 
   function renderIfCurrent(sid, cid) { if (sid === cur.sid && cid === cur.cid) renderMessages(); }
@@ -2399,7 +2893,26 @@
     if (voice) {
       const s = server(voice.sid), c = channel(s, voice.cid);
       $('voiceWhere').textContent = c ? `${c.name} / ${s.name}` : '';
+      paintCallTime();
     }
+  }
+
+  // how long I have been in this call (survives camera on/off, which reconnects)
+  function paintCallTime() {
+    const el = $('vsTime');
+    if (!el) return;
+    if (!voice || !voice.since) { el.textContent = ''; return; }
+    el.textContent = fmtDur(now() - voice.since);
+  }
+  function fmtDur(ms) {
+    const t = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, s = t % 60;
+    return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s).padStart(2, '0');
+  }
+  // the running time of each active call, in the channel list and in an open channel menu
+  function paintChannelTimes() {
+    document.querySelectorAll('#channelList .chan-time').forEach((el) => { el.textContent = fmtDur(now() - (+el.dataset.start || now())); });
+    document.querySelectorAll('#ctxMenu .call-clock').forEach((el) => { el.textContent = fmtDur(now() - (+el.dataset.start || now())); });
   }
 
   function renderControls() {
@@ -2417,6 +2930,7 @@
 
   // ---------------------------------------------------------------- modals
   function modal(html, mount, dismissable = true, wide = false) {
+    setMobilePane(null);
     $('modal').innerHTML = html;
     $('modal').classList.toggle('wide', wide);
     $('modalBack').classList.remove('hidden');
@@ -2694,11 +3208,73 @@
     }
   };
 
+  // drag a channel to reorder it (within text or within voice); drag a person onto a voice channel to
+  // move them there (yourself directly; someone else by asking their app to switch)
+  (function listDragging() {
+    const list = $('channelList');
+    const clearMarks = () => list.querySelectorAll('.drop-before, .drop-after, .drop-into').forEach((el) => el.classList.remove('drop-before', 'drop-after', 'drop-into'));
+    const voiceRowFor = (target) => {
+      const row = target.closest('.chan[data-type="voice"]');
+      if (row) return row;
+      const box = target.closest('.voice-users');
+      return box ? [...list.querySelectorAll('.chan[data-type="voice"]')].find((r) => r.dataset.cid === box.dataset.vc) : null;
+    };
+    list.addEventListener('dragstart', (e) => {
+      const person = e.target.closest('.voice-user[data-uid]'), row = !person && e.target.closest('.chan[data-cid]');
+      if (!person && !row) return;
+      listDrag = person ? { kind: 'user', id: person.dataset.uid } : { kind: 'chan', id: row.dataset.cid, type: row.dataset.type };
+      (person || row).classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', listDrag.id);
+    });
+    list.addEventListener('dragover', (e) => {
+      if (!listDrag) return;
+      clearMarks();
+      if (listDrag.kind === 'user') {
+        const row = voiceRowFor(e.target);
+        if (!row) return;
+        e.preventDefault();
+        row.classList.add('drop-into');
+        return;
+      }
+      const row = e.target.closest('.chan[data-cid]');
+      if (!row || row.dataset.type !== listDrag.type || row.dataset.cid === listDrag.id) return;
+      e.preventDefault();
+      const r = row.getBoundingClientRect();
+      row.classList.add(e.clientY < r.top + r.height / 2 ? 'drop-before' : 'drop-after');
+    });
+    list.addEventListener('drop', (e) => {
+      const d = listDrag, s = server(cur.sid);
+      if (!d || !s) return;
+      e.preventDefault();
+      if (d.kind === 'user') {
+        const row = voiceRowFor(e.target), dest = row && channel(s, row.dataset.cid);
+        if (!dest) return;
+        if (d.id === me.id) {
+          if (!(voice && voice.sid === s.id && voice.cid === dest.id)) joinVoice(s.id, dest.id, !!(voice && voice.sid === s.id && voice.cam));
+        } else {
+          const m = (members[s.id] || {})[d.id];
+          if (m && m.vc !== dest.id) askPeer(s.id, d.id, { t: 'move', to: d.id, cid: dest.id }, MOVE_VER, `Moving ${m.user.name} to ${dest.name}`, (x) => x.vc === dest.id, 'be moved');
+        }
+        return;
+      }
+      const row = e.target.closest('.chan[data-cid]');
+      if (!row || row.dataset.type !== d.type || row.dataset.cid === d.id) return;
+      const r = row.getBoundingClientRect(), after = e.clientY >= r.top + r.height / 2;
+      const moving = channel(s, d.id);
+      if (!moving) return;
+      s.channels = s.channels.filter((c) => c.id !== d.id);
+      const at = s.channels.findIndex((c) => c.id === row.dataset.cid);
+      s.channels.splice(at + (after ? 1 : 0), 0, moving);
+      listDrag = null; // let the list redraw
+      bumpServer(s);
+    });
+    list.addEventListener('dragend', () => { listDrag = null; clearMarks(); renderChannels(); });
+  })();
+
   $('channelList').onclick = (e) => {
     const add = e.target.closest('[data-add]');
     if (add) return channelModal(add.dataset.add);
-    const del = e.target.closest('[data-delc]');
-    if (del) { e.stopPropagation(); return deleteChannelConfirm(del.dataset.delc); }
     const sv = e.target.closest('[data-sid]');
     if (sv) return selectServer(sv.dataset.sid);
     const ch = e.target.closest('[data-cid]');
@@ -2711,6 +3287,8 @@
   };
 
   $('messages').onclick = (e) => {
+    const more = e.target.closest('[data-message-menu]');
+    if (more) { e.stopPropagation(); return messageMenu(more.dataset.messageMenu, e.clientX, e.clientY); }
     const action = e.target.closest('[data-file-download], [data-file-cancel]');
     if (action) {
       e.stopPropagation();
@@ -2720,6 +3298,8 @@
     }
     const save = e.target.closest('[data-image-save]');
     if (save) { e.stopPropagation(); return downloadImage(cur.sid, cur.cid, save.dataset.imageSave); }
+    const at = e.target.closest('[data-mention]');
+    if (at) { e.stopPropagation(); return jumpToPerson(at.dataset.mention, e.clientX, e.clientY); }
     const image = e.target.closest('[data-image-open]');
     if (image) return openImage(cur.sid, cur.cid, image.dataset.imageOpen);
     const rp = e.target.closest('[data-reply]');
@@ -2743,16 +3323,40 @@
   });
 
   const input = $('msgInput');
-  const autosize = () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, window.innerHeight * 0.4) + 'px'; };
-  input.addEventListener('input', () => { autosize(); if (input.value.trim()) sendTyping(); });
+  const autosize = () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, window.innerHeight * 0.4) + 'px'; syncComposer(); };
+  input.addEventListener('input', () => { autosize(); updateMention(); if (input.value.trim()) sendTyping(); });
+  input.addEventListener('scroll', () => { $('msgMirror').scrollTop = input.scrollTop; });
+  input.addEventListener('click', updateMention);
+  input.addEventListener('blur', () => setTimeout(closeMention, 150)); // let a click on the list land first
+  // while the @ picker is open the arrow keys, Enter, Tab and Escape belong to it
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    if (!mention) return;
+    const n = mention.items.length;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { mention.sel = (mention.sel + (e.key === 'ArrowDown' ? 1 : n - 1)) % n; paintMention(); }
+    else if ((e.key === 'Enter' && !e.isComposing) || e.key === 'Tab') acceptMention(mention.sel);
+    else if (e.key === 'Escape') closeMention();
+    else return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  });
+  $('mentionMenu').addEventListener('mousedown', (e) => {
+    const b = e.target.closest('[data-i]');
+    if (!b) return;
+    e.preventDefault(); // keep the caret in the message box
+    acceptMention(+b.dataset.i);
+  });
+  input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !mobileLayout()) {
       e.preventDefault();
       if (sendMessage(input.value)) input.value = '';
       autosize();
     }
   });
-  $('composer').onsubmit = (e) => e.preventDefault();
+  $('composer').onsubmit = (e) => {
+    e.preventDefault();
+    if (sendMessage(input.value)) input.value = '';
+    autosize();
+  };
 
   $('joinVoiceBtn').onclick = () => joinVoice(cur.sid, cur.cid, false);
   $('joinVideoBtn').onclick = () => joinVoice(cur.sid, cur.cid, true);
@@ -2763,16 +3367,210 @@
   $('vsShare').onclick = toggleShare;
   $('cbShare').onclick = toggleShare;
   $('voiceWhere').onclick = showVoice;
+  // the call bar and the member-strip pill fade out after a few seconds without mouse movement
+  (function idleControls() {
+    const stage = $('voiceStage');
+    let timer = null, overBar = false;
+    const menuOpen = () => ['ctxMenu', 'emojiMenu', 'qMenu'].some((id) => !$(id).classList.contains('hidden'));
+    const wake = () => {
+      stage.classList.remove('idle');
+      clearTimeout(timer);
+      if (mobileLayout()) return;
+      timer = setTimeout(() => { if (overBar || menuOpen()) wake(); else stage.classList.add('idle'); }, 1500);
+    };
+    stage.addEventListener('mousemove', wake);
+    stage.addEventListener('mousedown', wake);
+    stage.addEventListener('pointerdown', wake);
+    document.addEventListener('keydown', wake);
+    $('callBar').addEventListener('mouseenter', () => { overBar = true; wake(); });
+    $('callBar').addEventListener('mouseleave', () => { overBar = false; wake(); });
+    wake();
+  })();
+
+  // the call preview: drag it anywhere inside the chat area; a plain click returns to the call
+  (function miniPreview() {
+    const stage = $('voiceStage');
+    let drag = null, moved = false;
+    const at = { r: 16, b: 84 }; // where the preview is, as offsets from the right / bottom of the chat area
+    const place = (r, b) => { at.r = r; at.b = b; stage.style.setProperty('--mini-r', r + 'px'); stage.style.setProperty('--mini-b', b + 'px'); };
+    const saved = store.get('miniPos', null);
+    if (saved && Number.isFinite(saved.r) && Number.isFinite(saved.b)) place(saved.r, saved.b);
+    let width = Math.max(200, Math.min(720, +store.get('miniW', 320) || 320));
+    stage.style.setProperty('--mini-w', width + 'px');
+    const clampPreview = () => {
+      if (!mobileLayout()) return;
+      const main = $('main').getBoundingClientRect();
+      if (!main.width || !main.height) return;
+      width = Math.max(64, Math.min(width, 320, main.width - 24, (main.height - 24) * 16 / 9));
+      stage.style.setProperty('--mini-w', width + 'px');
+      place(Math.max(12, Math.min(at.r, main.width - width - 12)), Math.max(12, Math.min(at.b, main.height - width * 9 / 16 - 12)));
+    };
+    window.addEventListener('resize', clampPreview);
+    if (window.visualViewport) window.visualViewport.addEventListener('resize', clampPreview);
+    if (typeof ResizeObserver === 'function') new ResizeObserver(clampPreview).observe($('main'));
+    clampPreview();
+    stage.addEventListener('wheel', (e) => {
+      if (!stage.classList.contains('mini')) return;
+      e.preventDefault();
+      const main = $('main').getBoundingClientRect();
+      const next = Math.max(200, Math.min(720, main.width - 32, Math.round(width * (e.deltaY < 0 ? 1.1 : 1 / 1.1))));
+      if (next === width) return;
+      // keep it docked to the same corner while it grows or shrinks
+      const maxR = main.width - width, maxB = main.height - width * 9 / 16;
+      const leftSide = at.r > maxR / 2, topSide = at.b > maxB / 2;
+      width = next;
+      stage.style.setProperty('--mini-w', width + 'px');
+      store.set('miniW', width);
+      place(leftSide ? Math.max(16, main.width - width - 16) : 16, topSide ? Math.max(84, main.height - width * 9 / 16 - 64) : 84);
+      store.set('miniPos', { r: at.r, b: at.b });
+    }, { passive: false });
+    let spring = 0;
+    // drag any corner to resize: the opposite corner stays where it is and the 16:9 shape is kept
+    let sizing = null;
+    stage.addEventListener('pointerdown', (e) => {
+      const grip = e.target.closest && e.target.closest('.mini-grip');
+      if (!grip || !stage.classList.contains('mini') || e.button) return;
+      e.stopPropagation();
+      cancelAnimationFrame(spring);
+      const main = $('main').getBoundingClientRect(), c = grip.dataset.c;
+      sizing = { grip, x: e.clientX, y: e.clientY, w: width, r: at.r, b: at.b, left: c[1] === 'l', top: c[0] === 't', mw: main.width, mh: main.height };
+      stage.classList.add('resizing');
+      try { grip.setPointerCapture(e.pointerId); } catch { }
+    }, true);
+    stage.addEventListener('pointermove', (e) => {
+      if (!sizing) return;
+      const dx = (sizing.left ? -1 : 1) * (e.clientX - sizing.x), dy = (sizing.top ? -1 : 1) * (e.clientY - sizing.y) * 16 / 9;
+      let w = sizing.w + (Math.abs(dx) > Math.abs(dy) ? dx : dy);
+      // limits: sensible sizes, and the moving corner may not leave the chat area
+      const roomW = sizing.left ? sizing.mw - sizing.r : sizing.r + sizing.w;
+      const roomH = sizing.top ? sizing.mh - sizing.b : sizing.b + sizing.w * 9 / 16;
+      w = Math.round(Math.max(200, Math.min(720, roomW, roomH * 16 / 9, w)));
+      width = w;
+      stage.style.setProperty('--mini-w', w + 'px');
+      place(sizing.left ? sizing.r : sizing.r - (w - sizing.w), sizing.top ? sizing.b : sizing.b - (w - sizing.w) * 9 / 16);
+    });
+    const sized = () => {
+      if (!sizing) return;
+      sizing = null;
+      moved = true; // the click that ends a resize must not jump back to the call
+      stage.classList.remove('resizing');
+      store.set('miniW', width);
+      store.set('miniPos', { r: at.r, b: at.b });
+    };
+    stage.addEventListener('pointerup', sized);
+    stage.addEventListener('pointercancel', sized);
+    stage.addEventListener('pointerdown', (e) => {
+      if (!stage.classList.contains('mini') || e.button || sizing) return;
+      cancelAnimationFrame(spring); // catch it mid-flight
+      const main = $('main').getBoundingClientRect();
+      // start from the tracked position, not the drawn box: the box may be mid-animation or scaled
+      drag = { x: e.clientX, y: e.clientY, r: at.r, b: at.b, maxR: main.width - stage.offsetWidth, maxB: main.height - stage.offsetHeight, trail: [] };
+      moved = false;
+      try { stage.setPointerCapture(e.pointerId); } catch { }
+    });
+    stage.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      if (!moved && Math.hypot(dx, dy) < 5) return;
+      moved = true;
+      stage.classList.add('dragging');
+      drag.pos = { r: drag.r - dx, b: drag.b - dy };
+      drag.trail.push({ t: performance.now(), r: drag.pos.r, b: drag.pos.b });
+      if (drag.trail.length > 6) drag.trail.shift();
+      place(drag.pos.r, drag.pos.b);
+    });
+    // Released: keep the speed it was thrown with, aim for the corner it is heading to, and settle there
+    // on a slightly under-damped spring so it overshoots and bounces back.
+    const fling = (pos, v, maxR, maxB) => {
+      const rs = [16, Math.max(16, maxR - 16)], bs = [84, Math.max(84, maxB - 64)];
+      const near = (x, list) => list.reduce((a, c) => (Math.abs(c - x) < Math.abs(a - x) ? c : a));
+      const target = { r: near(pos.r + v.r * 0.3, rs), b: near(pos.b + v.b * 0.3, bs) }; // where it would coast to in ~1/3 s
+      store.set('miniPos', target);
+      if (document.hidden || typeof requestAnimationFrame !== 'function') return place(target.r, target.b);
+      const K = 150, C = 13; // stiffness and damping (critical damping would be ~24.5, so this bounces)
+      let last = performance.now();
+      const step = (now) => {
+        const dt = Math.min(0.032, (now - last) / 1000); last = now;
+        for (const k of ['r', 'b']) {
+          v[k] += (-K * (pos[k] - target[k]) - C * v[k]) * dt;
+          pos[k] += v[k] * dt;
+        }
+        if (Math.abs(pos.r - target.r) < 0.5 && Math.abs(pos.b - target.b) < 0.5 && Math.hypot(v.r, v.b) < 8) return place(target.r, target.b);
+        place(Math.round(pos.r * 10) / 10, Math.round(pos.b * 10) / 10);
+        spring = requestAnimationFrame(step);
+      };
+      spring = requestAnimationFrame(step);
+    };
+    const end = () => {
+      if (drag && drag.pos) {
+        const a = drag.trail[0], z = drag.trail[drag.trail.length - 1];
+        const dt = a && z && z.t > a.t && performance.now() - z.t < 120 ? (z.t - a.t) / 1000 : 0; // a pause before letting go means no throw
+        const cap = (x) => Math.max(-6000, Math.min(6000, x));
+        const v = dt ? { r: cap((z.r - a.r) / dt), b: cap((z.b - a.b) / dt) } : { r: 0, b: 0 };
+        fling({ ...drag.pos }, v, drag.maxR, drag.maxB);
+      }
+      drag = null;
+      stage.classList.remove('dragging');
+    };
+    stage.addEventListener('pointerup', end);
+    stage.addEventListener('pointercancel', end);
+    stage.addEventListener('click', () => {
+      if (!stage.classList.contains('mini')) return;
+      if (moved) { moved = false; return; } // that was a drag, not a click
+      showVoice();
+    });
+  })();
   $('tiles').addEventListener('click', (e) => {
+    if ($('voiceStage').classList.contains('mini')) return; // the preview only jumps back to the call
     const q = e.target.closest('[data-q]');
     if (q) { e.stopPropagation(); return qualityMenu(q.dataset.q, q); }
     const wf = e.target.closest('[data-wfs]');
     if (wf) { winFs = winFs === wf.dataset.wfs ? null : wf.dataset.wfs; if (document.fullscreenElement) document.exitFullscreen(); return renderStage(); }
-    if (winFs) return; // a click on the picture shouldn't change the layout underneath
     const fs = e.target.closest('[data-fs]');
     if (fs) { const el = tileEls.get(fs.dataset.fs); if (document.fullscreenElement) document.exitFullscreen(); else if (el && el.requestFullscreen) el.requestFullscreen(); return; }
+    const un = e.target.closest('[data-unwatch]');
+    if (un) { if (winFs) winFs = null; return setWatching(un.dataset.unwatch, false); }
+    const wa = e.target.closest('[data-watch]');
+    if (wa) return setWatching(wa.dataset.watch, true);
+    if (winFs) return; // a click on the picture shouldn't change the layout underneath
     const t = e.target.closest('.tile.video');
+    if (t && panned) { panned = false; return; } // that was a drag across a zoomed stream
     if (t) { focusUid = focusUid === t.dataset.key ? null : t.dataset.key; renderStage(); }
+  });
+  let pan = null, panned = false;
+  $('tiles').addEventListener('wheel', (e) => {
+    if ($('voiceStage').classList.contains('mini')) return; // the preview resizes itself instead
+    const t = e.target.closest('.tile.video');
+    if (!t || e.target.closest('.tile-tools')) return;
+    e.preventDefault();
+    const r = t.getBoundingClientRect(), key = t.dataset.key, z = zooms.get(key) || { s: 1, u: 0, v: 0 };
+    const px = (e.clientX - r.left) / r.width, py = (e.clientY - r.top) / r.height;
+    const s = Math.max(1, Math.min(8, z.s * Math.pow(1.0018, -e.deltaY)));
+    // keep the point under the cursor where it is
+    setZoom(key, s, z.u + px / z.s - px / s, z.v + py / z.s - py / s);
+  }, { passive: false });
+  $('tiles').addEventListener('pointerdown', (e) => {
+    const t = e.target.closest('.tile.zoomed');
+    panned = false;
+    if (!t || e.button || e.target.closest('.tile-tools') || $('voiceStage').classList.contains('mini')) return;
+    const z = zooms.get(t.dataset.key), r = t.getBoundingClientRect();
+    pan = { key: t.dataset.key, el: t, x: e.clientX, y: e.clientY, u: z.u, v: z.v, w: r.width, h: r.height };
+    try { t.setPointerCapture(e.pointerId); } catch { }
+  });
+  $('tiles').addEventListener('pointermove', (e) => {
+    if (!pan) return;
+    const z = zooms.get(pan.key);
+    if (!z) { pan = null; return; }
+    const dx = e.clientX - pan.x, dy = e.clientY - pan.y;
+    if (!panned && Math.hypot(dx, dy) < 4) return;
+    panned = true;
+    pan.el.classList.add('panning');
+    setZoom(pan.key, z.s, pan.u - dx / pan.w / z.s, pan.v - dy / pan.h / z.s);
+  });
+  for (const type of ['pointerup', 'pointercancel']) $('tiles').addEventListener(type, () => { if (pan) pan.el.classList.remove('panning'); pan = null; });
+  $('tiles').addEventListener('dblclick', (e) => {
+    const t = e.target.closest('.tile.zoomed');
+    if (t) { e.preventDefault(); setZoom(t.dataset.key, 1, 0, 0); }
   });
   document.addEventListener('click', (e) => { if (!e.target.closest('#qMenu')) $('qMenu').classList.add('hidden'); });
   document.addEventListener('fullscreenchange', () => {
@@ -2780,23 +3578,92 @@
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && focusUid && $('modalBack').classList.contains('hidden')) { focusUid = null; renderStage(); } });
   $('devDone').onclick = () => { if (!voice) return; voice.devices = false; voicePost({ toggleSettings: false }); renderStage(); };
-  for (const [id, kind] of [['micCaret', 'audioinput'], ['cbMicCaret', 'audioinput'], ['deafCaret', 'audiooutput'], ['cbDeafCaret', 'audiooutput']]) {
-    $(id).onclick = (e) => { e.stopPropagation(); deviceMenu($(id), kind); };
+  for (const [id, kind] of [['micCaret', 'audioinput'], ['cbMicCaret', 'audioinput'], ['deafCaret', 'audiooutput'], ['cbDeafCaret', 'audiooutput'], ['cbCamCaret', 'videoinput']]) {
+    caret(id, (el) => deviceMenu(el, kind));
   }
+  caret('cbShareCaret', shareMenu);
+  $('userPanel').addEventListener('click', (e) => { if (!e.target.closest('button')) settingsModal('profile'); });
   $('micBtn').onclick = toggleMic;
   $('cbMic').onclick = toggleMic;
   $('deafBtn').onclick = toggleDeaf;
   $('cbDeaf').onclick = toggleDeaf;
   $('settingsBtn').onclick = () => settingsModal('profile');
   $('cbSettings').onclick = () => settingsModal('av');
-  $('membersToggle').onclick = () => { membersOpen = !membersOpen; store.set('membersOpen', membersOpen); renderMembers(); };
+  $('membersToggle').onclick = () => {
+    if (mobileLayout()) {
+      if (!server(cur.sid)) return;
+      membersOpen = true;
+      renderMembers();
+      setMobilePane(mobilePane === 'members' ? null : 'members');
+      return;
+    }
+    membersOpen = !membersOpen;
+    store.set('membersOpen', membersOpen);
+    renderMembers();
+  };
+  $('mobileChannels').onclick = () => setMobilePane(mobilePane ? null : 'channels');
+  $('mobileBackdrop').onclick = () => setMobilePane(null);
+  $('mobileSettings').onclick = () => { if (me) settingsModal('profile'); };
+  $('mobileCall').onclick = () => { setMobilePane(null); showVoice(); };
+  window.addEventListener('resize', updateMobileViewport);
+  window.addEventListener('dischord-desktop-ready', updateMobileViewport);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', updateMobileViewport);
+    window.visualViewport.addEventListener('scroll', updateMobileViewport);
+  }
+  if (mobileMedia && mobileMedia.addEventListener) mobileMedia.addEventListener('change', updateMobileViewport);
+  document.addEventListener('focusin', updateMobileViewport);
+  document.addEventListener('focusout', updateMobileViewport);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && mobilePane) setMobilePane(null); });
+  updateMobileViewport();
+
+  // Touch users have the same person, channel and server menus as right-click users.
+  (function touchMenus() {
+    let press = null, suppress = null;
+    const clear = () => { if (press) clearTimeout(press.timer); press = null; };
+    document.addEventListener('pointerdown', (e) => {
+      clear();
+      if (!mobileLayout() || e.pointerType === 'mouse' || e.button || e.target.closest('input, textarea, a, select')) return;
+      const target = e.target.closest('#channelList .chan[data-cid], #serverList [data-sid], #channelList .voice-user[data-uid], #tiles .tile[data-key]');
+      if (!target) return;
+      const button = e.target.closest('button');
+      if (button && button !== target) return;
+      press = { target, x: e.clientX, y: e.clientY, timer: setTimeout(() => {
+        if (!press) return;
+        const p = press;
+        suppress = { target: p.target, until: now() + 1000 };
+        press = null;
+        if (p.target.dataset.cid) channelMenu(p.target.dataset.cid, p.x, p.y);
+        else if (p.target.dataset.sid) railMenu(p.target.dataset.sid, p.x, p.y);
+        else userMenu(p.target.dataset.uid || p.target.dataset.key.split(':')[0], p.x, p.y);
+      }, 550) };
+    }, true);
+    document.addEventListener('pointermove', (e) => { if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 10) clear(); }, { passive: true });
+    document.addEventListener('pointerup', clear, true);
+    document.addEventListener('pointercancel', clear, true);
+    document.addEventListener('contextmenu', (e) => {
+      if (suppress && suppress.until > now() && suppress.target.contains(e.target)) { e.preventDefault(); e.stopImmediatePropagation(); }
+    }, true);
+    document.addEventListener('click', (e) => {
+      if (suppress && suppress.until > now() && suppress.target.contains(e.target)) { suppress = null; e.preventDefault(); e.stopImmediatePropagation(); return; }
+      if (!mobileLayout() || e.target.closest('button, a, input, select, textarea')) return;
+      const person = e.target.closest('#channelList .voice-user[data-uid], #members .mem[data-uid], [data-ctx="user"][data-uid]');
+      if (person) { e.stopPropagation(); userMenu(person.dataset.uid, e.clientX, e.clientY); }
+    }, true);
+  })();
 
   // right-click menus
   document.addEventListener('contextmenu', (e) => {
+    const btn = e.target.closest('#cbMic, #micBtn, #micCaret, #cbMicCaret, #cbDeaf, #deafBtn, #deafCaret, #cbDeafCaret, #cbCam, #vsCam, #cbCamCaret, #cbShare, #vsShare, #cbShareCaret');
+    if (btn && ctxToggled === btn) { e.preventDefault(); ctxToggled = null; return; } // its menu was open: this right-click just closed it
     const mic = e.target.closest('#cbMic, #micBtn, #micCaret, #cbMicCaret');
     if (mic) { e.preventDefault(); return deviceMenu(mic, 'audioinput'); }
     const out = e.target.closest('#cbDeaf, #deafBtn, #deafCaret, #cbDeafCaret');
     if (out) { e.preventDefault(); return deviceMenu(out, 'audiooutput'); }
+    const cam = e.target.closest('#cbCam, #vsCam, #cbCamCaret');
+    if (cam) { e.preventDefault(); return deviceMenu(cam, 'videoinput'); }
+    const shr = e.target.closest('#cbShare, #vsShare, #cbShareCaret');
+    if (shr) { e.preventDefault(); return shareMenu(shr); }
     const u = e.target.closest('#channelList .voice-user[data-uid], #members .mem[data-uid], #tiles .tile[data-key], [data-ctx="user"][data-uid], #userPanel');
     const msg = !u && e.target.closest('#messages .msg[data-mid]');
     // never show the browser's own menu, except in text fields where it provides paste / spellcheck
@@ -2815,8 +3682,10 @@
     if (uid) userMenu(uid, e.clientX, e.clientY);
   });
   document.addEventListener('mousedown', (e) => {
+    // pressing the button that owns the open menu closes it; remember that so its click does not reopen it
+    ctxToggled = ctxAnchor && ctxAnchor.contains(e.target) ? ctxAnchor : null;
     if (!e.target.closest('#ctxMenu')) closeCtx();
-    if (!e.target.closest('#emojiMenu') && !e.target.closest('[data-react]') && !e.target.closest('#cbReact')) $('emojiMenu').classList.add('hidden');
+    if (!e.target.closest('#emojiMenu') && !e.target.closest('[data-react]') && !e.target.closest('#cbReact') && !e.target.closest('#cbReactCaret') && !e.target.closest('#emojiBtn')) $('emojiMenu').classList.add('hidden');
   });
   window.addEventListener('blur', closeCtx);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeCtx(); $('emojiMenu').classList.add('hidden'); if (winFs) { winFs = null; renderStage(); } } });
@@ -2825,6 +3694,17 @@
   input.addEventListener('keydown', (e) => { if (e.key === 'Escape' && replyTarget) cancelReply(); });
 
   // Files, including images: offer metadata via button, paste, or drag & drop.
+  $('emojiBtn').onclick = (e) => {
+    e.stopPropagation();
+    if (!$('emojiMenu').classList.contains('hidden')) return $('emojiMenu').classList.add('hidden');
+    emojiPicker($('emojiBtn'), (emo) => {
+      const at = input.selectionStart ?? input.value.length, to = input.selectionEnd ?? at;
+      input.value = input.value.slice(0, at) + emo + input.value.slice(to);
+      input.focus();
+      input.selectionStart = input.selectionEnd = at + emo.length;
+      input.dispatchEvent(new Event('input'));
+    }, EMOJIS);
+  };
   $('attachBtn').onclick = () => $('fileInput').click();
   $('fileInput').onchange = () => { addAttachments($('fileInput').files); $('fileInput').value = ''; };
   $('msgInput').addEventListener('paste', (e) => {
@@ -2873,7 +3753,17 @@
 
   // in-call reactions
   $('stripToggle').onclick = () => { hideStrip = !hideStrip; store.set('hideStrip', hideStrip); renderStage(); };
-  $('cbReact').onclick = (e) => { e.stopPropagation(); emojiPicker($('cbReact'), sendCallReaction); };
+  let emojiOwner = null;
+  for (const [id, list] of [['cbReact', REACTS], ['cbReactCaret', EMOJIS]]) {
+    $(id).onclick = (e) => {
+      e.stopPropagation();
+      const open = !$('emojiMenu').classList.contains('hidden');
+      $('emojiMenu').classList.add('hidden');
+      if (open && emojiOwner === id) { emojiOwner = null; return; }
+      emojiOwner = id;
+      emojiPicker($(id), sendCallReaction, list);
+    };
+  }
 
   window.addEventListener('hashchange', checkInviteHash);
   document.addEventListener('visibilitychange', () => {
@@ -2894,23 +3784,13 @@
   let pendingInvite = null;
 
   // ---------------------------------------------------------------- timers
-  // Heartbeat from a worker: browsers slow main-thread timers in background tabs (to once a minute),
-  // which made people who were presenting from another window look offline to everyone else.
-  (function startHeartbeat() {
-    try {
-      if (typeof Worker !== 'function') throw new Error('no workers');
-      const url = URL.createObjectURL(new Blob(['setInterval(function () { postMessage(0); }, ' + PING_MS + ');'], { type: 'text/javascript' }));
-      const worker = new Worker(url);
-      URL.revokeObjectURL(url);
-      worker.onmessage = broadcastState;
-      worker.onerror = () => { worker.terminate(); setInterval(broadcastState, PING_MS); };
-    } catch { setInterval(broadcastState, PING_MS); }
-  })();
+  bgTimer.every(PING_MS, broadcastState); // presence heartbeat, unaffected by background-tab throttling
   setInterval(() => {
     renderTyping();
     if (cur.sid) renderPresence();
   }, 3000);
   setInterval(paintSpeaking, 250);
+  setInterval(() => { paintCallTime(); paintChannelTimes(); }, 1000);
   setInterval(pollStats, 2000);
   setInterval(() => applyVolumes(true), 4000);
   setInterval(paintImages, 15000); // retry visible uncached previews when a provider returns

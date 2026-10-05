@@ -11,6 +11,7 @@
   const includeAudio = document.getElementById('include-audio');
   const share = document.getElementById('share');
   const cancel = document.getElementById('cancel');
+  const close = document.getElementById('close');
   const refresh = document.getElementById('refresh');
   const tabs = Array.from(document.querySelectorAll('[data-kind]'));
   let sources = [];
@@ -41,6 +42,7 @@
     tabs.forEach((tab) => { tab.disabled = submitting || cancelling; });
     grid.querySelectorAll('.source-card').forEach((card) => { card.disabled = busy; });
     cancel.disabled = cancelling;
+    close.disabled = cancelling;
     panel.setAttribute('aria-busy', String(loading));
   }
 
@@ -186,9 +188,11 @@
     try {
       await api.cancel();
     } catch {
-      // Closing the native picker can destroy its IPC sender before the reply.
-      // The main process also cancels capture when the picker window closes.
-      window.close();
+      // The main process removes this view as soon as cancellation is accepted.
+      // Keep a retry available if IPC failed before that cleanup happened.
+      cancelling = false;
+      showError('Could not cancel screen sharing. Try Cancel again.');
+      updateControls();
     }
   }
 
@@ -208,10 +212,18 @@
   });
   refresh.addEventListener('click', loadSources);
   cancel.addEventListener('click', cancelCapture);
+  close.addEventListener('click', cancelCapture);
+  document.body.addEventListener('click', (event) => { if (event.target === document.body) cancelCapture(); });
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
       event.preventDefault();
       cancelCapture();
+    } else if (event.key === 'Tab') {
+      const buttons = Array.from(document.querySelectorAll('button:not(:disabled), input:not(:disabled)'))
+        .filter((element) => element.getClientRects().length && element.tabIndex >= 0);
+      const first = buttons[0], last = buttons[buttons.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
     }
   });
   share.addEventListener('click', async () => {
@@ -229,7 +241,7 @@
         showError(result && typeof result.error === 'string' ? result.error : 'Could not start screen sharing. Choose a source and try again.');
       }
     } catch {
-      // Successful selection normally closes this window before IPC settles.
+      // Successful selection normally removes this view before IPC settles.
       if (!cancelling) showError('The source may no longer be available. Refresh and try again.');
     } finally {
       if (!accepted) submitting = false;
@@ -240,10 +252,10 @@
   if (!api || typeof api.list !== 'function' || typeof api.select !== 'function' || typeof api.cancel !== 'function') {
     loading = false;
     listStatus.textContent = 'The screen-sharing picker could not start.';
-    showError('Close this window and try screen sharing again.');
+    showError('Cancel this picker and try screen sharing again.');
     share.disabled = true;
     refresh.disabled = true;
   } else {
-    loadSources();
+    loadSources().finally(() => { if (!cancelling) tabs.find((tab) => tab.dataset.kind === kind)?.focus(); });
   }
 })();

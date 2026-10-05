@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, Menu, desktopCapturer, dialog, ipcMain, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, WebContentsView, desktopCapturer, dialog, ipcMain, nativeTheme, session, shell } = require('electron');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 
@@ -8,6 +8,7 @@ const SITE = new URL('https://zjj-2785.github.io/dischord/');
 const MEDIA_ORIGIN = 'https://vdo.ninja';
 const PICKER_URL = pathToFileURL(path.join(__dirname, 'capture-picker.html')).href;
 const OFFLINE_URL = pathToFileURL(path.join(__dirname, 'offline.html')).href;
+const TITLE_BAR_HEIGHT = 32;
 const pickers = new Map();
 const grants = new Set();
 const permissionDialogs = new Map();
@@ -17,6 +18,7 @@ let queuedInvite = null;
 
 app.setName('Dischord');
 app.setAppUserModelId('io.github.zjj2785.dischord');
+nativeTheme.themeSource = 'dark';
 
 function siteURL(value) {
   try {
@@ -67,7 +69,13 @@ function finishCapture(pending, source, includeAudio = false) {
     streams.audio = 'loopback';
   }
   try { pending.callback(streams); } catch { }
-  if (!pending.window.isDestroyed()) pending.window.close();
+  pending.owner.removeListener('resize', pending.layout);
+  if (!pending.owner.isDestroyed()) {
+    pending.owner.contentView.removeChildView(pending.view);
+    if (!pending.owner.webContents.isDestroyed()) pending.owner.webContents.focus();
+  }
+  // WebContentsView clears its webContents getter once the renderer is destroyed.
+  if (!pending.contents.isDestroyed()) pending.contents.close({ waitForBeforeUnload: false });
 }
 
 ipcMain.handle('dischord:capture-list', async (event) => {
@@ -83,10 +91,8 @@ ipcMain.handle('dischord:capture-list', async (event) => {
     finishCapture(pending);
     throw new Error('This sharing request has ended.');
   }
-  // The chooser itself is never a shareable source.
-  const chooserHandle = pending.window.getNativeWindowHandle();
-  const chooserId = chooserHandle.length >= 8 ? chooserHandle.readBigUInt64LE().toString() : chooserHandle.readUInt32LE().toString();
-  const available = sources.filter((source) => !source.id.startsWith('window:' + chooserId + ':'));
+  // The picker is a view inside Dischord, so it creates no separate window source.
+  const available = sources;
   pending.sources = new Map(available.map((source) => [source.id, source]));
   return {
     sources: available.map((source) => ({ id: source.id, name: source.name,
@@ -119,27 +125,41 @@ function chooseCapture(request, callback) {
       request.frame.top === mainWindow.webContents.mainFrame && trustedFrame(mainWindow.webContents, request.frame.url);
   } catch { }
   if (!frameIsOurs || !request.videoRequested || pickers.size) { callback({}); return; }
-  const picker = new BrowserWindow({
-    parent: mainWindow, modal: true, width: 780, height: 620, minWidth: 540, minHeight: 460,
-    title: 'Choose what to share — Dischord', backgroundColor: '#313338', show: false,
-    autoHideMenuBar: true,
+  const owner = mainWindow;
+  const pickerSession = session.fromPartition('capture-picker');
+  pickerSession.setPermissionCheckHandler(() => false);
+  pickerSession.setPermissionRequestHandler((_contents, _permission, done) => done(false));
+  const picker = new WebContentsView({
     webPreferences: {
-      preload: path.join(__dirname, 'capture-picker-preload.js'), partition: 'capture-picker',
+      preload: path.join(__dirname, 'capture-picker-preload.js'), session: pickerSession,
       contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true
     }
   });
-  picker.setMenu(null);
-  const pending = { id: picker.webContents.id, window: picker, request, callback, sources: new Map(), finished: false };
-  pickers.set(picker.webContents.id, pending);
+  picker.setBackgroundColor('#00000000');
+  picker.setVisible(false);
+  const pending = { id: picker.webContents.id, contents: picker.webContents, view: picker, owner,
+    request, callback, sources: new Map(), finished: false };
+  pending.layout = () => {
+    if (pending.finished || owner.isDestroyed()) return;
+    const [width, height] = owner.getContentSize();
+    picker.setBounds({ x: 0, y: TITLE_BAR_HEIGHT, width, height: Math.max(0, height - TITLE_BAR_HEIGHT) });
+  };
+  pickers.set(pending.id, pending);
+  owner.contentView.addChildView(picker);
+  owner.on('resize', pending.layout);
+  pending.layout();
   // VDO can cancel its request or remove its iframe while the chooser is open.
   pending.lifetimeTimer = setInterval(() => {
     if (!captureFrameLive(pending)) finishCapture(pending);
   }, 1000);
   picker.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   picker.webContents.on('will-navigate', (event) => event.preventDefault());
-  picker.once('ready-to-show', () => { if (!picker.isDestroyed()) picker.show(); });
-  picker.on('closed', () => { if (!pending.finished) finishCapture(pending); });
-  picker.loadFile(path.join(__dirname, 'capture-picker.html')).catch(() => finishCapture(pending));
+  picker.webContents.once('dom-ready', () => {
+    if (!pending.finished) { picker.setVisible(true); picker.webContents.focus(); }
+  });
+  picker.webContents.on('destroyed', () => { if (!pending.finished) finishCapture(pending); });
+  picker.webContents.on('render-process-gone', () => finishCapture(pending));
+  picker.webContents.loadFile(path.join(__dirname, 'capture-picker.html')).catch(() => finishCapture(pending));
 }
 
 function configurePermissions(ses) {
@@ -206,7 +226,13 @@ function createWindow(destination) {
   mainWindow = new BrowserWindow({
     width: 1280, height: 800, minWidth: 720, minHeight: 500,
     title: 'Dischord', backgroundColor: '#313338', show: false, autoHideMenuBar: true,
+    icon: path.join(__dirname, 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
+    titleBarStyle: 'hidden',
+    ...(process.platform === 'darwin' ? {} : {
+      titleBarOverlay: { color: '#2b2d31', symbolColor: '#dbdee1', height: TITLE_BAR_HEIGHT }
+    }),
     webPreferences: {
+      preload: path.join(__dirname, 'desktop-preload.js'),
       session: ses, contextIsolation: true, sandbox: true, nodeIntegration: false,
       webSecurity: true, allowRunningInsecureContent: false,
       backgroundThrottling: false, autoplayPolicy: 'no-user-gesture-required'

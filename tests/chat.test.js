@@ -199,7 +199,7 @@ function createApp(windowOverrides = {}) {
       cleanMsg, cleanReply, replyToMessage, cancelReply, sendMessage, addAttachments,
       getMsgs, addMsg, renderMessages, renderReplyBar, renderAttachBar,
       selectChannel, deleteMessage, pending, cur, peers, fileCardContent,
-      onImgChunk, imgCache, incoming, onPeerData, mergeServer, leaveServer, composerDrafts, fileProviders,
+      onImgChunk, imgCache, incoming, onPeerData, voiceOccupants, peerGone, members, mergeServer, deleteChannelConfirm, leaveServer, composerDrafts, fileProviders,
       requestImg, paintImages, prepareImagePreview, imageKey, requested, imagePreparing, imageErrors,
       get replyTarget() { return replyTarget; },
       get fileTransfers() { return fileTransfers; },
@@ -454,6 +454,36 @@ test('images download originals from preview controls while other files keep the
   assert(!/data-legacy-download|Download original/.test(html));
 });
 
+test('presence: an idle second tab of the same person never removes them from their call', () => {
+  const app = createApp();
+  const u = { id: 'bob', name: 'Bob', color: '#57f287' };
+  const inCall = () => app.api.voiceOccupants('testserver', 'lounge').map((o) => o.user.id).join();
+  app.api.onPeerData('testserver', { u, t: 'ping', vc: 'lounge', vs: 'dcbob1', st: {} }, 'tabA');
+  assert.strictEqual(inCall(), 'bob');
+  app.api.onPeerData('testserver', { u, t: 'ping', vc: null, st: {} }, 'tabB');
+  assert.strictEqual(inCall(), 'bob', 'A ping from an idle tab must not overwrite the tab that is in voice');
+  app.api.onPeerData('testserver', { u, t: 'bye', vc: null, st: {} }, 'tabB');
+  assert.strictEqual(inCall(), 'bob', 'Closing the idle tab must not take the person offline');
+  app.api.peerGone('testserver', 'tabB');
+  assert.strictEqual(inCall(), 'bob');
+  app.api.onPeerData('testserver', { u, t: 'ping', vc: null, st: {} }, 'tabA');
+  assert.strictEqual(inCall(), '', 'Leaving the call in the tab that was in it is still reflected');
+  app.api.onPeerData('testserver', { u, t: 'ping', vc: 'lounge', vs: 'dcbob2', st: {} }, 'tabA');
+  app.api.onPeerData('testserver', { u, t: 'bye', vc: 'lounge', st: {} }, 'tabA');
+  assert.strictEqual(inCall(), '', 'Closing the only connection removes them at once');
+});
+
+test('presence: answered pings measure the round trip to a person', () => {
+  const app = createApp();
+  const u = { id: 'bob', name: 'Bob', color: '#57f287' };
+  app.api.onPeerData('testserver', { u, t: 'ping', pt: 12345, vc: 'lounge', vs: 'dcbob1', st: {} }, 'tabA');
+  const pong = app.sent.find((item) => item.packet.t === 'pong');
+  assert(pong && pong.packet.pt === 12345 && pong.uuid === 'tabA', 'A ping is echoed back to its sender only');
+  app.advance(40);
+  app.api.onPeerData('testserver', { u, t: 'pong', pt: 1000, vc: 'lounge', vs: 'dcbob1', st: {} }, 'tabA');
+  assert.strictEqual(app.api.members.testserver.bob.rtt, 40, 'Round trip on the fixture clock, which starts at 1000');
+});
+
 test('image preview: unsolicited legacy chunks cannot cache or save bytes', () => {
   const app = createApp();
   app.api.onImgChunk('testserver', { id: 'oldimage', i: 0, n: 1,
@@ -639,11 +669,11 @@ test('image preview: automatic requests stay capped and refill after completion 
   await settle();
   assert.strictEqual(Object.keys(app.api.requested).length, 4);
   assert.strictEqual(app.sent.filter((item) => item.packet.t === 'imgreq').length, 4);
-  for (const chunk of imageChunks(messages[0], url)) app.api.onImgChunk('testserver', chunk, 'bobuuid');
+  for (const chunk of imageChunks(messages[6], url)) app.api.onImgChunk('testserver', chunk, 'bobuuid'); // newest is requested first
   await settle();
   assert.strictEqual(Object.keys(app.api.requested).length, 4, 'Completion refills one slot from visible history');
   assert.strictEqual(app.sent.filter((item) => item.packet.t === 'imgreq').length, 5);
-  const cancelled = messages[1], cancelledKey = app.api.imageKey('testserver', cancelled);
+  const cancelled = messages[5], cancelledKey = app.api.imageKey('testserver', cancelled);
   app.api.onImgChunk('testserver', imageChunks(cancelled, url)[0], 'bobuuid');
   assert(app.api.incoming[cancelledKey]);
   app.api.addMsg('testserver', { ...cancelled, del: true, text: '' });
@@ -1044,8 +1074,7 @@ test('local deletion of the selected channel clears its draft before selecting t
   app.api.replyToMessage('message1');
   await app.api.addAttachments([file]);
   app.node('msgInput').value = 'Private draft for General';
-  const button = { dataset: { delc: 'general' } };
-  app.node('channelList').onclick({ target: { closest: (selector) => selector === '[data-delc]' ? button : null }, stopPropagation() {} });
+  app.api.deleteChannelConfirm('general'); // the delete action now lives only in the channel's right-click menu
   assert.strictEqual(app.api.cur.cid, 'other');
   assert.strictEqual(app.node('msgInput').value, '');
   assert.strictEqual(app.api.pending.length, 0);
@@ -1071,8 +1100,7 @@ for (const mode of ['local', 'remote']) {
       app.api.mergeServer('testserver', { id: 'testserver', name: 'Test server', v: 2,
         channels: [{ id: 'other', name: 'Other', type: 'text' }] });
     } else {
-      const button = { dataset: { delc: 'general' } };
-      app.node('channelList').onclick({ target: { closest: (selector) => selector === '[data-delc]' ? button : null }, stopPropagation() {} });
+      app.api.deleteChannelConfirm('general');
     }
     assert.strictEqual(app.api.fileTransfers.hasLocal('testserver', 'general', 'offered0'), false);
     assert.strictEqual(app.api.fileTransfers.download('testserver', 'general', 'offered0'), false);

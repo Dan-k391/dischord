@@ -10,13 +10,14 @@
   <script src="capture-picker.js" defer></script>
 </head>
 <body>
-  <main class="picker" aria-labelledby="picker-title">
+  <main class="picker" role="dialog" aria-modal="true" aria-labelledby="picker-title">
     <header class="picker-header">
       <div>
         <p class="eyebrow">DISCHORD</p>
         <h1 id="picker-title">Share your screen</h1>
         <p class="description">Choose what to share. Stop sharing from Dischord’s Screen button.</p>
       </div>
+      <button id="close" class="close-button" type="button" aria-label="Cancel screen sharing">×</button>
     </header>
 
     <div class="source-toolbar">

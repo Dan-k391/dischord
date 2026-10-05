@@ -1,6 +1,6 @@
 {
   "name": "dischord-desktop",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "description": "Dischord desktop client for the hosted peer-to-peer chat app.",
   "author": "ZJJ-2785",
@@ -31,10 +31,12 @@
     "files": [
       "*.js",
       "*.html",
-      "*.css"
+      "*.css",
+      "assets/*"
     ],
     "artifactName": "Dischord-Windows.${ext}",
     "win": {
+      "icon": "assets/icon.ico",
       "target": [
         { "target": "portable", "arch": ["x64"] },
         { "target": "nsis", "arch": ["x64"] },
