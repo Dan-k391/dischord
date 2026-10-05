@@ -199,7 +199,7 @@ function createApp(windowOverrides = {}) {
       cleanMsg, cleanReply, replyToMessage, cancelReply, sendMessage, addAttachments,
       getMsgs, addMsg, renderMessages, renderReplyBar, renderAttachBar,
       selectChannel, deleteMessage, pending, cur, peers, fileCardContent,
-      onImgChunk, imgCache, incoming, onPeerData, voiceOccupants, peerGone, members, mergeServer, leaveServer, composerDrafts, fileProviders,
+      onImgChunk, imgCache, incoming, onPeerData, voiceOccupants, peerGone, members, mergeServer, deleteChannelConfirm, leaveServer, composerDrafts, fileProviders,
       requestImg, paintImages, prepareImagePreview, imageKey, requested, imagePreparing, imageErrors,
       get replyTarget() { return replyTarget; },
       get fileTransfers() { return fileTransfers; },
@@ -1076,8 +1076,7 @@ test('local deletion of the selected channel clears its draft before selecting t
   app.api.replyToMessage('message1');
   await app.api.addAttachments([file]);
   app.node('msgInput').value = 'Private draft for General';
-  const button = { dataset: { delc: 'general' } };
-  app.node('channelList').onclick({ target: { closest: (selector) => selector === '[data-delc]' ? button : null }, stopPropagation() {} });
+  app.api.deleteChannelConfirm('general'); // the delete action now lives only in the channel's right-click menu
   assert.strictEqual(app.api.cur.cid, 'other');
   assert.strictEqual(app.node('msgInput').value, '');
   assert.strictEqual(app.api.pending.length, 0);
@@ -1103,8 +1102,7 @@ for (const mode of ['local', 'remote']) {
       app.api.mergeServer('testserver', { id: 'testserver', name: 'Test server', v: 2,
         channels: [{ id: 'other', name: 'Other', type: 'text' }] });
     } else {
-      const button = { dataset: { delc: 'general' } };
-      app.node('channelList').onclick({ target: { closest: (selector) => selector === '[data-delc]' ? button : null }, stopPropagation() {} });
+      app.api.deleteChannelConfirm('general');
     }
     assert.strictEqual(app.api.fileTransfers.hasLocal('testserver', 'general', 'offered0'), false);
     assert.strictEqual(app.api.fileTransfers.download('testserver', 'general', 'offered0'), false);

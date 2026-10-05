@@ -499,6 +499,14 @@
           renderTyping();
         }
         break;
+      case 'move': {
+        const dest = channel(s, p.cid);
+        if (p.to === me.id && dest && dest.type === 'voice' && voice && voice.sid === sid && voice.cid !== dest.id) {
+          toast(`${t.user.name} moved you to ${dest.name}`, 5000);
+          joinVoice(sid, dest.id, voice.cam);
+        }
+        break;
+      }
       case 'bye': {
         const m = members[sid][t.user.id];
         // only this connection is leaving; the same person may still be here in another tab
@@ -1647,7 +1655,7 @@
   }
 
   function renderChannels() {
-    if (!me) return;
+    if (!me || listDrag) return; // rebuilding the list would drop whatever is being dragged
     const s = server(cur.sid);
     const el = $('channelList');
     if (!s) {
@@ -1661,23 +1669,23 @@
     let h = `<div class="cat"><span>Text channels</span><button class="icon-btn" data-add="text" title="Create channel">${icon('plus')}</button></div>`;
     for (const c of text) {
       const n = c.id === cur.cid ? 0 : unreadCount(s.id, c.id);
-      h += `<div class="chan ${c.id === cur.cid ? 'active' : ''} ${n ? 'unread' : ''}" data-cid="${esc(c.id)}">
+      h += `<div class="chan ${c.id === cur.cid ? 'active' : ''} ${n ? 'unread' : ''}" data-cid="${esc(c.id)}" data-type="text" draggable="true">
         <span class="ico">${icon('hash')}</span><span class="name">${esc(c.name)}</span>
         ${n ? `<span class="badge">${n > 99 ? '99+' : n}</span>` : ''}
-        <button class="icon-btn del" data-delc="${esc(c.id)}" title="Delete channel">${icon('trash')}</button></div>`;
+</div>`;
     }
     h += `<div class="cat"><span>Voice channels</span><button class="icon-btn" data-add="voice" title="Create channel">${icon('plus')}</button></div>`;
     for (const c of vc) {
       const who = voiceOccupants(s.id, c.id);
       if (!who.length) delete callStarts[s.id + '/' + c.id]; // the call ended when the last person left
       const mine = voice && voice.sid === s.id && voice.cid === c.id;
-      h += `<div class="chan ${c.id === cur.cid ? 'active' : ''} ${mine ? 'connected' : ''}" data-cid="${esc(c.id)}">
+      h += `<div class="chan ${c.id === cur.cid ? 'active' : ''} ${mine ? 'connected' : ''}" data-cid="${esc(c.id)}" data-type="voice" draggable="true">
         <span class="ico">${icon('speaker')}</span><span class="name">${esc(c.name)}</span>
         ${who.length && callStart(s.id, c.id) ? `<span class="chan-time" data-start="${callStart(s.id, c.id)}" title="Call running for">${fmtDur(now() - callStart(s.id, c.id))}</span>` : ''}
         ${who.length ? `<span class="count">${who.length}</span>` : ''}
-        <button class="icon-btn del" data-delc="${esc(c.id)}" title="Delete channel">${icon('trash')}</button></div>`;
+</div>`;
       if (who.length) {
-        h += `<div class="voice-users">${who.map((o) => `<div class="voice-user" data-uid="${esc(o.self ? me.id : o.user.id)}">${avatar(o.user)}<span class="vu-name">${esc(o.user.name)}</span>${pingTag(o)}<span class="vu-icons">${stateIcons(o.st)}</span></div>`).join('')}</div>`;
+        h += `<div class="voice-users" data-vc="${esc(c.id)}">${who.map((o) => `<div class="voice-user" data-uid="${esc(o.self ? me.id : o.user.id)}" draggable="true">${avatar(o.user)}<span class="vu-name">${esc(o.user.name)}</span>${pingTag(o)}<span class="vu-icons">${stateIcons(o.st)}</span></div>`).join('')}</div>`;
       }
     }
     el.innerHTML = h;
@@ -1713,6 +1721,7 @@
   // ---------------------------------------------------------------- call stage
   // One tile per person. Tiles are never moved in the DOM (moving an iframe reloads it);
   // focus / strip layout is pure CSS driven by classes and custom properties.
+  let listDrag = null;         // a channel or person being dragged in the channel list
   const tileEls = new Map();   // uid -> tile element
   const streamBr = {};         // vs -> chosen kbps (0 = auto)
   const autoFocused = new Set();
@@ -3060,11 +3069,73 @@
     }
   };
 
+  // drag a channel to reorder it (within text or within voice); drag a person onto a voice channel to
+  // move them there (yourself directly; someone else by asking their app to switch)
+  (function listDragging() {
+    const list = $('channelList');
+    const clearMarks = () => list.querySelectorAll('.drop-before, .drop-after, .drop-into').forEach((el) => el.classList.remove('drop-before', 'drop-after', 'drop-into'));
+    const voiceRowFor = (target) => {
+      const row = target.closest('.chan[data-type="voice"]');
+      if (row) return row;
+      const box = target.closest('.voice-users');
+      return box ? [...list.querySelectorAll('.chan[data-type="voice"]')].find((r) => r.dataset.cid === box.dataset.vc) : null;
+    };
+    list.addEventListener('dragstart', (e) => {
+      const person = e.target.closest('.voice-user[data-uid]'), row = !person && e.target.closest('.chan[data-cid]');
+      if (!person && !row) return;
+      listDrag = person ? { kind: 'user', id: person.dataset.uid } : { kind: 'chan', id: row.dataset.cid, type: row.dataset.type };
+      (person || row).classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', listDrag.id);
+    });
+    list.addEventListener('dragover', (e) => {
+      if (!listDrag) return;
+      clearMarks();
+      if (listDrag.kind === 'user') {
+        const row = voiceRowFor(e.target);
+        if (!row) return;
+        e.preventDefault();
+        row.classList.add('drop-into');
+        return;
+      }
+      const row = e.target.closest('.chan[data-cid]');
+      if (!row || row.dataset.type !== listDrag.type || row.dataset.cid === listDrag.id) return;
+      e.preventDefault();
+      const r = row.getBoundingClientRect();
+      row.classList.add(e.clientY < r.top + r.height / 2 ? 'drop-before' : 'drop-after');
+    });
+    list.addEventListener('drop', (e) => {
+      const d = listDrag, s = server(cur.sid);
+      if (!d || !s) return;
+      e.preventDefault();
+      if (d.kind === 'user') {
+        const row = voiceRowFor(e.target), dest = row && channel(s, row.dataset.cid);
+        if (!dest) return;
+        if (d.id === me.id) {
+          if (!(voice && voice.sid === s.id && voice.cid === dest.id)) joinVoice(s.id, dest.id, !!(voice && voice.sid === s.id && voice.cam));
+        } else {
+          const m = (members[s.id] || {})[d.id];
+          if (m && m.vc !== dest.id) { send(s.id, { t: 'move', to: d.id, cid: dest.id }); toast(`Moving ${m.user.name} to ${dest.name}`); }
+        }
+        return;
+      }
+      const row = e.target.closest('.chan[data-cid]');
+      if (!row || row.dataset.type !== d.type || row.dataset.cid === d.id) return;
+      const r = row.getBoundingClientRect(), after = e.clientY >= r.top + r.height / 2;
+      const moving = channel(s, d.id);
+      if (!moving) return;
+      s.channels = s.channels.filter((c) => c.id !== d.id);
+      const at = s.channels.findIndex((c) => c.id === row.dataset.cid);
+      s.channels.splice(at + (after ? 1 : 0), 0, moving);
+      listDrag = null; // let the list redraw
+      bumpServer(s);
+    });
+    list.addEventListener('dragend', () => { listDrag = null; clearMarks(); renderChannels(); });
+  })();
+
   $('channelList').onclick = (e) => {
     const add = e.target.closest('[data-add]');
     if (add) return channelModal(add.dataset.add);
-    const del = e.target.closest('[data-delc]');
-    if (del) { e.stopPropagation(); return deleteChannelConfirm(del.dataset.delc); }
     const sv = e.target.closest('[data-sid]');
     if (sv) return selectServer(sv.dataset.sid);
     const ch = e.target.closest('[data-cid]');
