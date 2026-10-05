@@ -1791,6 +1791,10 @@
     }
     $('devDone').classList.toggle('hidden', !voice.devices);
     $('pubHost').classList.toggle('devices', !!voice.devices);
+    // where every tile is drawn right now, so a layout change can animate from there
+    const before = new Map();
+    const animating = !$('voiceStage').classList.contains('offstage') && !document.hidden;
+    if (animating) tileEls.forEach((el, key) => { if (typeof el.getBoundingClientRect === 'function') before.set(key, el.getBoundingClientRect()); });
     const seen = new Set();
     for (const t of stageSpecs()) {
       seen.add(t.key);
@@ -1880,7 +1884,39 @@
     $('tiles').classList.toggle('show-stats', !!av.showStats);
     paintSpeaking();
     applyVolumes();
+    if (animating) glideTiles(before);
     updateMini();
+  }
+
+  // Tiles move between layouts (grid, focused, strip, fill-window) by gliding from where they were to
+  // where they now belong, instead of jumping. A tile that just appeared fades in.
+  function glideTiles(before) {
+    const host = $('tiles');
+    if (document.fullscreenElement || typeof host.getBoundingClientRect !== 'function') return;
+    const origin = host.getBoundingClientRect();
+    const ox = origin.left + (host.clientLeft || 0), oy = origin.top + (host.clientTop || 0);
+    const near = (a, b) => Math.abs(a - b) < 1;
+    tileEls.forEach((el, key) => {
+      if (typeof el.animate !== 'function') return;
+      // the destination comes from layout offsets, which a running animation does not disturb
+      const to = { x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight };
+      if (!to.w || !to.h) return;
+      const same = el._glideTo && near(el._glideTo.x, to.x) && near(el._glideTo.y, to.y) && near(el._glideTo.w, to.w) && near(el._glideTo.h, to.h);
+      if (el._glide && same) return; // already on its way there
+      const was = before.get(key);
+      let frames;
+      if (!was || !was.width || !was.height) frames = [{ opacity: 0, transform: 'scale(.92)' }, { opacity: 1, transform: 'none' }];
+      else {
+        const from = { x: was.left - ox, y: was.top - oy, w: was.width, h: was.height }; // where it is drawn now
+        el._glideTo = to;
+        if (near(from.x, to.x) && near(from.y, to.y) && near(from.w, to.w) && near(from.h, to.h)) return;
+        frames = [{ transformOrigin: '0 0', transform: `translate(${from.x - to.x}px, ${from.y - to.y}px) scale(${from.w / to.w}, ${from.h / to.h})` }, { transformOrigin: '0 0', transform: 'none' }];
+      }
+      el._glideTo = to;
+      if (el._glide) el._glide.cancel();
+      const a = el._glide = el.animate(frames, { duration: 340, easing: 'cubic-bezier(.2, .85, .25, 1.04)' });
+      a.onfinish = a.oncancel = () => { if (el._glide === a) el._glide = null; };
+    });
   }
 
   // ---- per-user volume / mute (applied inside the publisher, which plays everyone's audio)
