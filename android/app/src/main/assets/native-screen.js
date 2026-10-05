@@ -18,6 +18,9 @@
     clearTimeout(session.timer);
     clearTimeout(session.disconnectedTimer);
     if (notify) send(session, 'screen-stop');
+    // VDO reports ordinary permission cancellation itself, but some startup errors do not
+    // send a state event. Clear the app's pending indicator for every completed request.
+    window.parent.postMessage({ action: 'screen-share-state', value: false }, 'https://zjj-2785.github.io');
     for (const pending of session.requests.values()) {
       clearTimeout(pending.timer);
       pending.reject(reason || exception('Screen sharing has ended.'));

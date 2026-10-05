@@ -25,8 +25,40 @@ Open [Dischord](https://zjj-2785.github.io/dischord/) in your phone browser and 
 
 On phones, Enter adds a new line; tap **Send** to send the message. Tap a message's three-dot button for reply and other actions. Press and hold a server or channel for its menu. Camera/microphone access still requires browser permission. Phone browsers that do not provide screen capture can watch shared screens; attempting to share shows an availability message. Large file downloads may be constrained by browser memory and storage.
 
+## Android app
+Download [Dischord-Android.apk](https://github.com/ZJJ-2785/dischord/releases/download/android-v1.0.0/Dischord-Android.apk) from the [Android v1.0.0 release](https://github.com/ZJJ-2785/dischord/releases/tag/android-v1.0.0). It requires **Android 8.0 or newer** and a current **Android System WebView**. Open the APK on your phone and allow installation from the browser or file manager you used to download it. Install the signed release APK; the unsigned GitHub Actions artifact cannot be installed directly.
+
+The Android app loads the same live website and VDO.Ninja rooms as Windows and web users. Open an existing invite in Dischord, or paste it in the app's join-server form. Chat, replies, reactions, files, image previews, audio boosts, camera and quality controls share the existing protocol. Website updates arrive when the app reloads. Each installation keeps its own identity, settings and preview cache, so join your server invites on first use. An internet connection is required.
+
+Use **Screen** in a voice channel to request Android screen capture. Android shows its system consent dialog, sharing indicator and a foreground-service notification. These system controls remain visible while capture is active. Stop through Dischord's Screen button or Android's sharing controls. The camera and microphone require their own Android permissions. The selected 5, 15, 30 or 60 FPS is a target; actual delivery depends on the phone, encoder, source and network. Physical-phone camera, audio and screen capture have not yet been verified.
+
+Files remain explicit downloads. After **Download**, Android asks where to save the file. Large remote transfers stream bounded, acknowledged chunks to that chosen document, and small originals or **Save preview** use the same destination chooser. There is no app-imposed file-size limit; available storage and the chosen document provider still apply. Cancelling stops further writes and attempts to remove the partial document; providers that do not support deletion may leave it behind. Keep the sending app or browser open until recipients finish downloading originals.
+
+### Build an Android APK
+Install **Java 17** and the Android SDK with **platform 35** and **build tools 35.0.0**. Set `JAVA_HOME` and `ANDROID_HOME` to those installations. The checked-in Gradle wrapper downloads its pinned Gradle version.
+
+For an installable development build on Windows:
+```powershell
+cd android
+.\gradlew.bat assembleDebug
+```
+The result is `android/app/build/outputs/apk/debug/app-debug.apk`. On macOS or Linux, use `./gradlew` instead of `.\gradlew.bat`. Development builds use a different signing key from the published APK and do not update an installed release.
+
+For a signed release, set `DISCHORD_ANDROID_KEYSTORE`, `DISCHORD_ANDROID_KEY_ALIAS`, `DISCHORD_ANDROID_STORE_PASSWORD` and `DISCHORD_ANDROID_KEY_PASSWORD` in your local environment, then run:
+```powershell
+.\gradlew.bat assembleRelease lintRelease
+```
+With signing configured, the output is `android/app/build/outputs/apk/release/app-release.apk`. Keep the same private keystore for future updates. The keystore and passwords stay local and must never be committed or sent to GitHub.
+
+The **Build Android APK** workflow builds and lints an unsigned release, then uploads `Dischord-Android-unsigned.apk`, the public `apksigner.jar` tool and checksums as a build artifact. Without signing environment variables, a local release build is also unsigned. Download and verify that artifact, then sign it on your own machine with the private keystore:
+```powershell
+java -jar apksigner.jar sign --ks "C:\private\dischord-android.jks" --ks-key-alias dischord --out Dischord-Android.apk Dischord-Android-unsigned.apk
+java -jar apksigner.jar verify --verbose --print-certs Dischord-Android.apk
+```
+The signing tool prompts for the keystore password. Publish the verified signed APK, never the private key. Android release tags use `android-v<dischordVersionName>` from `android/gradle.properties`.
+
 ## Windows app
-Download the [portable Dischord.exe](https://github.com/ZJJ-2785/dischord/releases/latest/download/Dischord.exe), [Windows installer](https://github.com/ZJJ-2785/dischord/releases/latest/download/Dischord-Setup.exe), or [Windows ZIP](https://github.com/ZJJ-2785/dischord/releases/latest/download/Dischord-Windows.zip). The app requires **Windows 10/11, 64-bit** and includes its Chromium runtime. For the ZIP, extract the whole folder before running `Dischord.exe`.
+Download the [portable Dischord.exe](https://github.com/ZJJ-2785/dischord/releases/download/desktop-v1.0.4/Dischord.exe), [Windows installer](https://github.com/ZJJ-2785/dischord/releases/download/desktop-v1.0.4/Dischord-Setup.exe), or [Windows ZIP](https://github.com/ZJJ-2785/dischord/releases/download/desktop-v1.0.4/Dischord-Windows.zip). The app requires **Windows 10/11, 64-bit** and includes its Chromium runtime. For the ZIP, extract the whole folder before running `Dischord.exe`.
 
 It loads [the live Dischord website](https://zjj-2785.github.io/dischord/) in a native desktop window. Chat, voice, camera, screen sharing, configurable FPS, audio boosts, replies, previews and explicit file downloads use the same web app and VDO.Ninja rooms. Website updates arrive when you open or refresh it. Join the same server invite as your web friends to share channels and communicate.
 
@@ -71,9 +103,9 @@ To use it with friends over the internet, host the folder on any static host
 - Your profile, settings, server definitions and recent chat history are saved in your browser's `localStorage` (last 500 messages per channel). Image previews are cached separately in IndexedDB. Original file contents and attachment drafts are never persisted by Dischord.
 
 ### Platform compatibility
-The web app owns the room identifiers, invite format, messaging/file protocol and call settings. The desktop shell loads that same hosted app; native code handles window decoration, permissions and source selection. Future macOS and Android clients should reuse the hosted client and these protocols rather than creating separate rooms or a new messaging format. Join the same server invite on every platform. Each installation has its own local identity and preferences.
+The web app owns the room identifiers, invite format, messaging/file protocol and call settings. The Windows and Android shells load that same hosted app. Native adapters handle permissions, screen capture and document saving; messages and media still connect to the same VDO.Ninja rooms. Join the same server invite on every platform. Each installation has its own local identity and preferences.
 
-The Electron shell keeps Windows-specific loopback audio and icon handling separate, with macOS title-bar spacing ready. A macOS build requires its platform packaging and permission setup. Android can use the mobile website now; an Android app would supply a native screen-capture adapter to that same client. This release provides Windows binaries and the mobile website.
+The Electron shell keeps Windows-specific loopback audio and icon handling separate, with macOS title-bar spacing ready. A macOS build still requires its platform packaging and permission setup. Android uses System WebView for the mobile UI and camera/voice connections, plus a native MediaProjection/WebRTC adapter for screen capture and an origin-restricted document-save bridge. Native access is restricted to the hosted app and trusted VDO.Ninja frames. Windows binaries, an Android APK and the mobile website are provided; a future macOS client should reuse the hosted client and existing protocols.
 
 ## Limits (by design, since there's no server)
 - Non-image file contents are never automatically transferred, previewed, or saved by Dischord. Recipients save originals only after clicking **Download**. File names, sizes, types and image-preview descriptors are included in local chat history; raster preview bytes are cached separately.
@@ -125,3 +157,8 @@ Add this before `app.js` in `index.html`:
 - `desktop/capture-picker.*` – explicit desktop screen/window chooser
 - `desktop/assets/` – round application icons used by the window, EXE and installer
 - `desktop/package.json` – portable EXE, installer and ZIP packaging
+- `android/app/src/main/java/` – Android host, media permissions, screen capture and explicit document saving
+- `android/app/src/main/assets/` – trusted-origin adapters connecting the hosted web client to Android services
+- `android/app/src/main/AndroidManifest.xml` – Android permissions, invite links and foreground services
+- `android/gradle.properties` – Android release version and build settings
+- `.github/workflows/android.yml` – unsigned Android build and lint artifacts for local signing
