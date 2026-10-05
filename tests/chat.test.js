@@ -423,7 +423,7 @@ test('image preview: older image history displays an inline preview and requests
   app.api.addMsg('testserver', message);
   app.api.renderMessages();
   await settle();
-  assert(app.node('messages').innerHTML.includes('data-legacy-download="oldimage"'));
+  assert(!app.node('messages').innerHTML.includes('class="file-card"'));
   assert(app.node('messages').innerHTML.includes('data-img='));
   assert.deepStrictEqual(app.sent.map((item) => item.packet.t), ['imgreq']);
   assert.strictEqual(app.sent[0].packet.cid, 'general');
