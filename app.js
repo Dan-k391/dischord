@@ -90,6 +90,8 @@
     signal: '<path d="M4 20v-3M9 20v-7M14 20V9M19 20V4"/>',
     smile: '<circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0M9 9.5h.01M15 9.5h.01"/>',
     image: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-9 9"/>',
+    file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
+    download: '<path d="M12 4v11M7 11l5 5 5-5M5 20h14"/>',
     plusCircle: '<circle cx="12" cy="12" r="9.5"/><path d="M12 8v8M8 12h8"/>',
     volume: '<path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/>',
     eyeOff: '<path d="M3 3l18 18M10.6 6.1A9.8 9.8 0 0 1 12 6c5 0 9 6 9 6a17 17 0 0 1-3.2 3.8M6.6 6.6A17 17 0 0 0 3 12s4 6 9 6a9 9 0 0 0 4.2-1"/>',
@@ -687,7 +689,7 @@
   const filePaints = new Map();
   let filePaintTimer = null;
   function queueFileCardPaint(sid, cid, mid) {
-    if (sid !== cur.sid || cid !== cur.cid) return;
+    if (sid !== cur.sid || cid !== cur.cid) { paintFileCards(mid, sid, cid); return; }
     const key = sid + '/' + cid + '/' + mid;
     const status = fileTransfers.status(sid, cid, mid);
     if (status.state !== 'receiving' || status.progress === 0) {
@@ -981,13 +983,19 @@
     if (!imageStillLive(sid, m)) return;
     if (!url) { requestImg(sid, m.img.id, false, cid, mid, true); return; }
     modal(`<div class="lightbox"><img src="${esc(url)}" alt="${esc(m.file ? m.file.name : 'Shared image')}"></div>
-      <div class="actions"><button class="btn" id="downloadOpenImage">${m.file ? 'Download original' : 'Download image'}</button><button class="btn primary" data-close>Close</button></div>`, () => {
-      $('downloadOpenImage').onclick = () => m.file ? fileTransfers.download(sid, cid, mid) : downloadLegacyImage(sid, m.img.id, cid, mid);
+      <div class="actions">${m.file ? `<div class="image-download" id="imageDownload" data-image-download="${esc(mid)}" data-image-sid="${esc(sid)}" data-image-cid="${esc(cid)}">${imageDownloadContent(sid, m)}</div>` : '<button class="btn" id="downloadOpenImage">Download image</button>'}<button class="btn primary" data-close>Close</button></div>`, () => {
+      if (m.file) $('imageDownload').onclick = (e) => {
+        const button = e.target.closest('[data-file-download], [data-file-cancel]');
+        if (!button || button.disabled) return;
+        if (button.dataset.fileCancel) fileTransfers.cancel(sid, cid, mid);
+        else fileTransfers.download(sid, cid, mid);
+      };
+      else $('downloadOpenImage').onclick = () => downloadLegacyImage(sid, m.img.id, cid, mid);
     }, true, true);
     $('modal').classList.add('lb');
   }
 
-  function fileCardContent(sid, m) {
+  function fileDownloadState(sid, m) {
     const status = fileTransfers.status(sid, m.cid, m.id);
     const active = status.state === 'receiving' || status.state === 'preparing';
     const saving = status.state === 'saving';
@@ -1000,18 +1008,36 @@
     const label = status.state === 'preparing' ? 'Choose where to save this file…' : saving ? 'Saving file…'
       : active ? `Downloading ${Math.round(status.progress)}%` : status.state === 'error' ? status.message
       : status.state === 'complete' ? status.message || 'Sent to your browser for download.'
-      : unavailable ? 'File unavailable after reload. Attach it again.' : hint;
-    return `${icon('copy')}<div class="file-info"><strong>${esc(m.file.name)}</strong><span>${esc(window.DischordFiles.formatSize(m.file.size))}</span><small role="status">${esc(label)}</small></div>` +
-      (active ? `<button type="button" class="btn" data-file-cancel="${esc(m.id)}">Cancel</button>` : saving
-        ? '<button type="button" class="btn" disabled>Saving…</button>'
-        : `<button type="button" class="btn" data-file-download="${esc(m.id)}" ${unavailable ? 'disabled' : ''}>${status.state === 'error' ? 'Retry download' : 'Download'}</button>`);
+      : unavailable ? 'File unavailable after reload. Attach it again.' : '';
+    return { active, saving, unavailable, hint, label, error: status.state === 'error' };
   }
-  function paintFileCards(mid) {
+  function fileDownloadButton(m, state, compact = false) {
+    const label = state.active ? 'Cancel download' : state.saving ? 'Saving…'
+      : state.unavailable ? 'File unavailable' : state.error ? 'Retry download' : compact ? 'Download' : 'Download original';
+    return `<button type="button" class="${compact ? 'icon-btn file-action' : 'btn'}${state.saving ? ' is-saving' : ''}" data-file-${state.active ? 'cancel' : 'download'}="${esc(m.id)}" title="${esc(state.active ? label : state.label || state.hint)}" aria-label="${esc(label + ': ' + m.file.name)}" ${state.saving || state.unavailable ? 'disabled' : ''}>${compact ? icon(state.active ? 'x' : 'download') : esc(label)}</button>`;
+  }
+  function fileCardContent(sid, m) {
+    const state = fileDownloadState(sid, m);
+    return `${icon('file')}<div class="file-info"><button type="button" class="file-name" data-file-download="${esc(m.id)}" title="${esc(m.file.name)}" aria-label="${esc('Download ' + m.file.name)}" ${state.active || state.saving || state.unavailable ? 'disabled' : ''}>${esc(m.file.name)}</button><span class="file-size">${esc(window.DischordFiles.formatSize(m.file.size))}</span>${state.label ? `<small role="status">${esc(state.label)}</small>` : ''}</div>` + fileDownloadButton(m, state, true);
+  }
+  function imageDownloadContent(sid, m) {
+    const state = fileDownloadState(sid, m);
+    return `${state.label ? `<small role="status">${esc(state.label)}</small>` : ''}${fileDownloadButton(m, state)}`;
+  }
+  function paintFileCards(mid, sid = cur.sid, cid = cur.cid) {
     document.querySelectorAll('[data-file-card]').forEach((el) => {
-      if (el.dataset.fileCard !== mid) return;
-      const m = (getMsgs(cur.sid)[cur.cid] || []).find((x) => x.id === el.dataset.fileCard);
+      if (el.dataset.fileCard !== mid || sid !== cur.sid || cid !== cur.cid) return;
+      const m = (getMsgs(sid)[cid] || []).find((x) => x.id === el.dataset.fileCard);
       if (m && !m.del && m.file) {
-        const html = fileCardContent(cur.sid, m);
+        const html = fileCardContent(sid, m);
+        if (el.innerHTML !== html) el.innerHTML = html;
+      }
+    });
+    document.querySelectorAll('[data-image-download]').forEach((el) => {
+      if (el.dataset.imageDownload !== mid || el.dataset.imageSid !== sid || el.dataset.imageCid !== cid) return;
+      const m = (getMsgs(sid)[cid] || []).find((x) => x.id === mid);
+      if (m && !m.del && m.file) {
+        const html = imageDownloadContent(sid, m);
         if (el.innerHTML !== html) el.innerHTML = html;
       }
     });
@@ -2050,11 +2076,11 @@
       const edited = m.ed ? ' <span class="time">(edited)</span>' : '';
       const imageStateKey = imageMessageKey(s.id, m.cid, m.id);
       const failedPreview = imageErrors.has(imageStateKey);
+      const isImage = !!m.img || (m.file && window.DischordImages.isImage(m.file));
       const img = m.img ? `<button type="button" class="msg-img ${failedPreview ? '' : 'loading'}" style="aspect-ratio:${m.img.w}/${m.img.h};width:min(100%, ${Math.min(420, m.img.w)}px)" data-image-open="${esc(m.id)}" aria-label="Open image preview">
-        <img data-img="${esc(m.img.id)}" data-img-sid="${esc(s.id)}" data-img-cid="${esc(m.cid)}" data-img-mid="${esc(m.id)}" loading="lazy" decoding="async" alt="${esc(m.file ? m.file.name : 'Shared image')}"><span class="image-preview-status" role="status">${failedPreview ? 'Preview unavailable. Someone with it must be online.' : 'Loading image preview…'}</span></button>` +
-        (!m.file ? `<div class="file-card">${icon('image')}<div class="file-info"><strong>Image</strong><small>Preview shared automatically.</small></div><button type="button" class="btn" data-legacy-download="${esc(m.img.id)}" data-legacy-mid="${esc(m.id)}">Download image</button></div>` : '') : m.file && window.DischordImages.isImage(m.file)
-        ? `<div class="image-preview-placeholder" role="status">${icon('image')}<span>${imagePreparing.has(imageStateKey) && !failedPreview ? 'Preparing image preview…' : 'Image preview unavailable. Download the original to open it.'}</span></div>` : '';
-      const file = m.file ? `<div class="file-card" data-file-card="${esc(m.id)}">${fileCardContent(s.id, m)}</div>` : '';
+        <img data-img="${esc(m.img.id)}" data-img-sid="${esc(s.id)}" data-img-cid="${esc(m.cid)}" data-img-mid="${esc(m.id)}" loading="lazy" decoding="async" alt="${esc(m.file ? m.file.name : 'Shared image')}"><span class="image-preview-status" role="status">${failedPreview ? 'Preview unavailable. Someone with it must be online.' : 'Loading image preview…'}</span></button>` : m.file && isImage
+        ? `<div class="image-preview-placeholder">${icon('image')}<span role="status">${imagePreparing.has(imageStateKey) && !failedPreview ? 'Preparing image preview…' : 'Image preview unavailable. Download the original to open it.'}</span><div class="image-download" data-image-download="${esc(m.id)}" data-image-sid="${esc(s.id)}" data-image-cid="${esc(m.cid)}">${imageDownloadContent(s.id, m)}</div></div>` : '';
+      const file = m.file && !isImage ? `<div class="file-card" data-file-card="${esc(m.id)}">${fileCardContent(s.id, m)}</div>` : '';
       const reply = renderReply(m);
       const text = m.text ? `<div class="text">${formatText(m.text)}${edited}</div>` : '';
       const re = renderRe(m);
