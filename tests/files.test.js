@@ -65,9 +65,10 @@ function trackedFile(bytes, name = 'example.bin', type = 'application/octet-stre
   };
 }
 
-function createHarness() {
+function createHarness(options = {}) {
+  const harnessOptions = options;
   const clock = createClock(), queue = [], packets = [], peers = new Map();
-  const storageCalls = [], saves = [], changes = [], messages = new Map();
+  const storageCalls = [], saves = [], changes = [], messages = new Map(), blobCalls = [];
   let nextId = 1;
   const window = {};
   const DateMock = class extends Date {
@@ -75,7 +76,13 @@ function createHarness() {
     static now() { return clock.now(); }
   };
   const context = vm.createContext({
-    window, console, Blob, Uint8Array, ArrayBuffer, Map, Set, Date: DateMock,
+    window, console, Blob: class extends Blob {
+      constructor(parts, settings) {
+        blobCalls.push(parts.length);
+        if (options.forbidBlob) throw new Error('Streaming must not assemble a whole-file Blob');
+        super(parts, settings);
+      }
+    }, Uint8Array, ArrayBuffer, Map, Set, Date: DateMock,
     btoa: (text) => Buffer.from(text, 'binary').toString('base64'),
     atob: (text) => Buffer.from(text, 'base64').toString('binary'),
     setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
@@ -85,7 +92,16 @@ function createHarness() {
       setItem(...args) { storageCalls.push(['set', ...args]); } },
     indexedDB: { open(...args) { storageCalls.push(['indexedDB', ...args]); } },
   });
-  vm.runInContext(source, context, { filename: 'file-transfer.js' });
+  let protocolSource = source;
+  if (options.shortStreamFixture) {
+    // The actual classifier boundaries and multi-GB streaming prefix are
+    // tested unchanged below. Scale only this full commit fixture so its
+    // write/close/abort checks do not encode 300 MB every time CI runs.
+    const threshold = 'if (size < 100 * 1024 * 1024)';
+    assert(source.includes(threshold), 'The fixture classifier seam must match exactly');
+    protocolSource = source.replace(threshold, 'if (size < 2 * 1024 * 1024)');
+  }
+  vm.runInContext(protocolSource, context, { filename: 'file-transfer.js' });
   const module = window.DischordFiles;
   assert(module && typeof module.create === 'function', 'File protocol factory must be exported');
   function endpoint(uid, options = {}) {
@@ -98,11 +114,13 @@ function createHarness() {
         // one-chunk receiver. Throughput tests opt into the native/new window.
         if (payload.t === 'f-request' && options.requestWindow !== 'native') {
           payload = { ...payload };
-          if (options.requestWindow === 'legacy') delete payload.window;
+          if (options.requestWindow === 'legacy') {
+            for (const field of ['window', 'initialWindow', 'adaptive', 'ackEvery']) delete payload[field];
+          }
           else payload.window = options.requestWindow === undefined ? 1 : options.requestWindow;
         }
         const packet = { sid, payload: copy({ ...payload, u: { id: uid } }), from: uuid, to: target, sentAt: clock.now() };
-        packets.push(packet);
+        if (harnessOptions.recordPackets !== false) packets.push(packet);
         if (options.synchronous) {
           const recipient = peers.get(target);
           if (recipient) recipient.api.onPacket(sid, packet.payload, uuid, uid);
@@ -117,6 +135,8 @@ function createHarness() {
     };
     if (options.isPeer) protocolContext.isPeer = (sid, author, wantedUuid) =>
       !!(connections.has(author) && connections.get(author).has(wantedUuid));
+    if (options.openDownload) protocolContext.openDownload = options.openDownload;
+    if (options.maxWindow) protocolContext.maxWindow = options.maxWindow;
     const api = module.create(protocolContext);
     const result = { api, uid, uuid, resolve, connections };
     peers.set(uuid, result);
@@ -150,7 +170,7 @@ function createHarness() {
     assert.strictEqual(clock.count(), 0, 'Closing must clear all protocol timers');
     assert.deepStrictEqual(storageCalls, [], 'File protocol must never use persistent storage');
   }
-  return { module, endpoint, clock, messages, queue, packets, saves, changes, storageCalls, deliver, drain, close };
+  return { module, endpoint, clock, messages, queue, packets, saves, changes, blobCalls, storageCalls, deliver, drain, close };
 }
 
 const sid = 'server1', cid = 'channel1', mid = 'message1';
@@ -161,8 +181,21 @@ function offer(h, author, file, overrides = {}) {
   assert.strictEqual(author.api.register(sid, cid, mid, meta, file), true);
   return meta;
 }
-async function withHarness(run) {
-  const h = createHarness();
+function logicalFile(size, name = 'logical.bin') {
+  const reads = [];
+  return { name, type: 'application/octet-stream', size, reads,
+    slice(start, end) {
+      reads.push([start, end]);
+      return { async arrayBuffer() {
+        const bytes = new Uint8Array(end - start);
+        for (let i = 0; i < bytes.length; i++) bytes[i] = (start + i) % 251;
+        return bytes.buffer;
+      } };
+    },
+  };
+}
+async function withHarness(run, options) {
+  const h = createHarness(options);
   try { await run(h); }
   finally { h.close(); }
 }
@@ -650,9 +683,9 @@ test('exact peer membership prevents a disconnected tab from reading the next ch
 
 test('native receivers request a bounded pipeline and cumulative ACKs release only sent chunks', () => withHarness(async (h) => {
   const alice = h.endpoint('alice'), bob = h.endpoint('bob', { requestWindow: 'native' }), eve = h.endpoint('eve');
-  const limit = h.module.MAX_WINDOW;
-  assert.strictEqual(limit, 32);
-  const file = trackedFile(Buffer.alloc(h.module.CHUNK_BYTES * (limit * 2 + 3), 0xb7));
+  const limit = 32;
+  assert.strictEqual(h.module.MAX_WINDOW, 128);
+  const file = trackedFile(Buffer.alloc(h.module.CHUNK_BYTES * 100, 0xb7));
   offer(h, alice, file);
   assert.strictEqual(bob.api.download(sid, cid, mid), true);
   const request = h.queue.shift();
@@ -667,9 +700,10 @@ test('native receivers request a bounded pipeline and cumulative ACKs release on
   assert.strictEqual(file.reads.length, limit, 'The sender must never read beyond its outstanding capacity');
   for (const chunk of initial) await h.deliver(chunk);
   const earlyAcks = h.queue.splice(0);
-  assert.strictEqual(earlyAcks.length, limit);
+  assert.strictEqual(earlyAcks.length, limit / 4);
   assert(earlyAcks.every((p) => p.payload.t === 'f-ack'));
-  const cumulative = earlyAcks[7];
+  const cumulative = earlyAcks[1];
+  assert.strictEqual(cumulative.payload.index, 7);
   for (const index of [-1, limit, limit + 100, 1.5, Number.MAX_SAFE_INTEGER]) {
     alice.api.onPacket(sid, { ...cumulative.payload, index }, bob.uuid, bob.uid);
   }
@@ -684,7 +718,7 @@ test('native receivers request a bounded pipeline and cumulative ACKs release on
   await flush();
   assert.strictEqual(file.reads.length, limit + 8, 'Duplicate and older ACKs cannot free the same slots twice');
   // ACK 31 follows receipt of that prefix, even if ACK 0..30 were lost/delayed.
-  await h.deliver(earlyAcks[limit - 1]);
+  await h.deliver(earlyAcks[earlyAcks.length - 1]);
   assert.strictEqual(file.reads.length, limit * 2);
   assert.strictEqual(h.queue.length, limit, 'Unacknowledged chunks remain capped at the window size');
   await h.drain();
@@ -698,7 +732,7 @@ test('legacy or invalid requested windows use one chunk, and oversized valid win
     { value: 'legacy', expected: 1 }, { value: 0, expected: 1 }, { value: -1, expected: 1 },
     { value: 1.5, expected: 1 }, { value: null, expected: 1 }, { value: '32', expected: 1 },
     { value: Number.MAX_SAFE_INTEGER + 1, expected: 1 }, { value: 4, expected: 4 },
-    { value: 99, expected: 32 },
+    { value: 999, expected: 8 },
   ];
   for (const { value, expected } of requests) await withHarness(async (h) => {
     const alice = h.endpoint('alice'), bob = h.endpoint('bob', { requestWindow: value });
@@ -713,7 +747,7 @@ test('legacy or invalid requested windows use one chunk, and oversized valid win
 
 test('an ACK for a chunk still being read cannot advance or duplicate the read pump', () => withHarness(async (h) => {
   const alice = h.endpoint('alice'), bob = h.endpoint('bob', { requestWindow: 'native' });
-  const limit = h.module.MAX_WINDOW, bytes = Buffer.alloc(h.module.CHUNK_BYTES * (limit + 2), 0x4e);
+  const limit = 8, bytes = Buffer.alloc(h.module.CHUNK_BYTES * (limit + 2), 0x4e);
   const reads = [], pending = [];
   const file = { name: 'slow-window.bin', type: '', size: bytes.length,
     slice(start, end) {
@@ -762,7 +796,7 @@ test('an ACK for a chunk still being read cannot advance or duplicate the read p
 
 test('pumping unacknowledged slow reads does not extend the sender inactivity timeout', () => withHarness(async (h) => {
   const alice = h.endpoint('alice'), bob = h.endpoint('bob', { requestWindow: 'native' });
-  const pending = [], file = { name: 'stalled-acks.bin', type: '', size: h.module.CHUNK_BYTES * 40,
+  const pending = [], file = { name: 'stalled-acks.bin', type: '', size: 100 * 1024 * 1024,
     slice(start, end) { return { arrayBuffer: () => new Promise((resolve) =>
       pending.push(() => resolve(new Uint8Array(end - start).buffer))) }; },
   };
@@ -807,14 +841,14 @@ test('a 100 ms RTT simulation pipelines downloads faster while preserving every 
     let result;
     await withHarness(async (h) => {
       const alice = h.endpoint('alice'), bob = h.endpoint('bob', { requestWindow });
-      const bytes = Buffer.alloc(h.module.CHUNK_BYTES * 65 + 7);
+      const bytes = Buffer.alloc(h.module.CHUNK_BYTES * 129 + 7);
       for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 167 + 83) % 256;
       offer(h, alice, trackedFile(bytes));
       const started = h.clock.now();
       bob.api.download(sid, cid, mid);
       let steps = 0;
       while (h.queue.length) {
-        assert(++steps < 200, 'The simulated transport must settle');
+        assert(++steps < 400, 'The simulated transport must settle');
         h.queue.sort((a, b) => a.sentAt - b.sentAt);
         const packet = h.queue.shift();
         // Each direction costs 50 ms, producing a 100 ms chunk/ACK RTT.
@@ -834,6 +868,363 @@ test('a 100 ms RTT simulation pipelines downloads faster while preserving every 
   assert(pipelined.elapsed * 10 <= legacy.elapsed,
     `Pipelining should improve latency-bound throughput: ${legacy.elapsed} ms legacy versus ${pipelined.elapsed} ms windowed`);
 });
+
+test('file strategy boundaries select small, medium, and large transfer plans', () => withHarness(async (h) => {
+  const mib = 1024 * 1024;
+  const expected = [
+    [0, 'small', 8, 8, false, 1], [mib - 1, 'small', 8, 8, false, 1],
+    [mib, 'medium', 32, 32, false, 4], [100 * mib - 1, 'medium', 32, 32, false, 4],
+    [100 * mib, 'large', 32, 128, true, 8], [5 * 1024 * mib, 'large', 32, 128, true, 8],
+  ];
+  for (const [size, name, initialWindow, maxWindow, stream, ackEvery] of expected) {
+    assert.deepStrictEqual(copy(h.module.strategyFor(size)), { name, initialWindow, maxWindow, stream, ackEvery });
+  }
+}));
+
+test('a five GB offer shares metadata without reading or allocating the logical file', () => withHarness(async (h) => {
+  const alice = h.endpoint('alice'), bob = h.endpoint('bob', { requestWindow: 'native' });
+  const file = logicalFile(5 * 1024 * 1024 * 1024);
+  const meta = offer(h, alice, file);
+  assert.strictEqual(meta.size, file.size);
+  assert.strictEqual(file.reads.length, 0);
+  assert.strictEqual(h.packets.length, 0);
+  assert.strictEqual(h.blobCalls.length, 0);
+  assert.deepStrictEqual(Object.keys(copy(h.messages.get(messageKey(sid, cid, mid)).file)).sort(), ['id', 'name', 'size', 'type']);
+  bob.api.download(sid, cid, mid);
+  const request = h.queue.shift();
+  assert.strictEqual(request.payload.window, 128);
+  assert.strictEqual(request.payload.initialWindow, 32);
+  assert.strictEqual(request.payload.adaptive, true);
+  assert.strictEqual(request.payload.ackEvery, 8);
+  assert.strictEqual(file.reads.length, 0, 'The explicit request itself does not read the sender File');
+  await h.deliver(request);
+  assert.strictEqual(file.reads.length, 32);
+  assert.strictEqual(h.queue.length, 32);
+  assert.strictEqual(h.blobCalls.length, 0);
+  assert.strictEqual(h.saves.length, 0);
+}));
+
+test('large adaptive windows grow with healthy ACKs, shrink for congestion, and obey media caps', () => withHarness(async (h) => {
+  let mediaCap = 128;
+  const alice = h.endpoint('alice', { maxWindow: () => mediaCap });
+  const bob = h.endpoint('bob', { requestWindow: 'native' });
+  const file = logicalFile(5 * 1024 * 1024 * 1024);
+  offer(h, alice, file);
+  bob.api.download(sid, cid, mid);
+  await h.deliver(h.queue.shift());
+  let outstanding = h.queue.splice(0);
+  assert.strictEqual(outstanding.length, 32);
+  async function acknowledge(delay) {
+    const last = outstanding[outstanding.length - 1];
+    h.clock.advance(delay);
+    await h.deliver({ ...last, from: bob.uuid, to: alice.uuid,
+      payload: { ...last.payload, t: 'f-ack', u: { id: bob.uid } } });
+    outstanding = h.queue.splice(0);
+    return outstanding.length;
+  }
+  assert.strictEqual(await acknowledge(100), 40);
+  assert.strictEqual(await acknowledge(100), 48);
+  assert.strictEqual(await acknowledge(500), 24, 'A delayed RTT halves the live window');
+  mediaCap = 16;
+  assert.strictEqual(await acknowledge(100), 16, 'Voice/screen activity can lower the next pump capacity');
+  mediaCap = 128;
+  let peak = 0;
+  for (let round = 0; round < 20; round++) {
+    const count = await acknowledge(100);
+    assert(count > 0 && count <= 128, 'Adaptive growth remains within the strategy ceiling');
+    peak = Math.max(peak, count);
+  }
+  assert.strictEqual(peak, 128);
+  assert.strictEqual(h.blobCalls.length, 0);
+  assert.strictEqual(h.saves.length, 0);
+}, { recordPackets: false }));
+
+test('a one-chunk initial media cap also negotiates individual ACKs without a deadlock', () => withHarness(async (h) => {
+  const alice = h.endpoint('alice', { maxWindow: () => 1 }), bob = h.endpoint('bob', { requestWindow: 'native' });
+  offer(h, alice, logicalFile(5 * 1024 * 1024 * 1024));
+  bob.api.download(sid, cid, mid);
+  await h.deliver(h.queue.shift());
+  assert.strictEqual(h.queue.length, 1);
+  const chunk = h.queue.shift();
+  assert.strictEqual(chunk.payload.ackEvery, 1);
+  await h.deliver(chunk);
+  assert.strictEqual(h.queue.length, 1);
+  assert.strictEqual(h.queue[0].payload.t, 'f-ack');
+  await h.deliver(h.queue.shift());
+  assert.strictEqual(h.queue.length, 1);
+  assert.strictEqual(h.queue[0].payload.index, 1);
+}));
+
+test('a recipient already in voice requests a 32-chunk cap and advertises it in ACKs', () => withHarness(async (h) => {
+  const alice = h.endpoint('alice');
+  const bob = h.endpoint('bob', { requestWindow: 'native', maxWindow: () => 32 });
+  const file = logicalFile(5 * 1024 * 1024 * 1024);
+  offer(h, alice, file);
+  bob.api.download(sid, cid, mid);
+  const request = h.queue.shift();
+  assert.strictEqual(request.payload.window, 32);
+  assert.strictEqual(request.payload.initialWindow, 32);
+  await h.deliver(request);
+  const chunks = h.queue.splice(0);
+  assert.strictEqual(chunks.length, 32, 'The sender must respect the recipient cap, even outside its own voice call');
+  for (const chunk of chunks.slice(0, 8)) await h.deliver(chunk);
+  assert.strictEqual(h.queue.length, 1);
+  assert.strictEqual(h.queue[0].payload.t, 'f-ack');
+  assert.strictEqual(h.queue[0].payload.window, 32);
+  assert.strictEqual(h.saves.length, 0);
+}));
+
+test('joining and leaving voice mid-transfer changes the recipient cap without losing in-flight bytes', () => withHarness(async (h) => {
+  let recipientCap = 128, written = 0;
+  const alice = h.endpoint('alice');
+  const bob = h.endpoint('bob', { requestWindow: 'native', maxWindow: () => recipientCap,
+    openDownload: async () => ({ async write(bytes) { written += bytes.length; }, async close() {}, async abort() {} }) });
+  const file = logicalFile(5 * 1024 * 1024 * 1024);
+  offer(h, alice, file);
+  bob.api.download(sid, cid, mid);
+  await flush();
+  await h.deliver(h.queue.shift());
+  async function healthyRound() {
+    const chunks = h.queue.splice(0);
+    h.clock.advance(100);
+    for (const chunk of chunks) await h.deliver(chunk);
+    const acknowledgements = h.queue.splice(0);
+    assert(acknowledgements.every((packet) => packet.payload.t === 'f-ack'));
+    const last = acknowledgements[acknowledgements.length - 1];
+    assert.strictEqual(last.payload.window, recipientCap);
+    await h.deliver(last);
+  }
+  for (let round = 0; h.queue.length < 128 && round < 20; round++) await healthyRound();
+  assert.strictEqual(h.queue.length, 128, 'A healthy large transfer reaches its original negotiated ceiling');
+  const outstanding = h.queue.splice(0), readBeforeJoin = file.reads.length;
+  recipientCap = 32;
+  h.clock.advance(100);
+  for (let offset = 0; offset < outstanding.length; offset += 8) {
+    for (const chunk of outstanding.slice(offset, offset + 8)) await h.deliver(chunk);
+    const ack = h.queue.find((packet) => packet.payload.t === 'f-ack');
+    h.queue.splice(h.queue.indexOf(ack), 1);
+    assert(ack && ack.payload.window === 32);
+    await h.deliver(ack);
+    if (offset < 96) {
+      assert.strictEqual(file.reads.length, readBeforeJoin,
+        'A lower cap drains existing outstanding bytes before reading replacements');
+    }
+    assert(h.queue.length <= 32, 'Future sends must fit within the recipient voice cap');
+  }
+  assert.strictEqual(h.queue.length, 32);
+  assert.strictEqual(file.reads.length, readBeforeJoin + 32);
+  recipientCap = 128;
+  const capped = h.queue.splice(0);
+  h.clock.advance(100);
+  for (const chunk of capped.slice(0, 8)) await h.deliver(chunk);
+  const resumeAck = h.queue.shift();
+  assert.strictEqual(resumeAck.payload.window, 128);
+  await h.deliver(resumeAck);
+  assert.strictEqual(h.queue.length + capped.length - 8, 128,
+    'Leaving voice restores capacity up to the original negotiated ceiling');
+  assert(written > 0);
+  assert.strictEqual(h.blobCalls.length, 0);
+  assert.strictEqual(h.saves.length, 0);
+}, { recordPackets: false, forbidBlob: true }));
+
+test('wrong-peer, wrong-token, and malformed ACKs cannot change recipient flow control', () => withHarness(async (h) => {
+  const alice = h.endpoint('alice'), bob = h.endpoint('bob', { requestWindow: 'native' }), eve = h.endpoint('eve');
+  const file = logicalFile(5 * 1024 * 1024 * 1024);
+  offer(h, alice, file);
+  bob.api.download(sid, cid, mid);
+  await h.deliver(h.queue.shift());
+  let chunks = h.queue.splice(0);
+  const original = { ...chunks[chunks.length - 1].payload, t: 'f-ack', window: 1 };
+  alice.api.onPacket(sid, original, eve.uuid, eve.uid);
+  alice.api.onPacket(sid, { ...original, token: 'wrongtoken' }, bob.uuid, bob.uid);
+  alice.api.onPacket(sid, { ...original, index: chunks.length }, bob.uuid, bob.uid);
+  alice.api.onPacket(sid, { ...original, index: -1 }, bob.uuid, bob.uid);
+  await flush();
+  assert.strictEqual(file.reads.length, 32);
+  const invalidCaps = [0, -1, 1.5, '32', Number.MAX_SAFE_INTEGER + 1, null, undefined];
+  for (let round = 0; round < invalidCaps.length; round++) {
+    const payload = { ...chunks[chunks.length - 1].payload, t: 'f-ack', window: invalidCaps[round] };
+    if (invalidCaps[round] === undefined) delete payload.window;
+    h.clock.advance(100);
+    alice.api.onPacket(sid, payload, bob.uuid, bob.uid);
+    await flush();
+    chunks = h.queue.splice(0);
+    assert.strictEqual(chunks.length, 40 + round * 8,
+      'Malformed or missing cap values must preserve the negotiated legacy/default capacity');
+  }
+}, { recordPackets: false }));
+
+test('modern medium transfers batch ACKs while unflagged legacy chunks receive individual ACKs', () => withHarness(async (h) => {
+  const alice = h.endpoint('alice'), bob = h.endpoint('bob', { requestWindow: 'native' });
+  offer(h, alice, logicalFile(2 * 1024 * 1024));
+  bob.api.download(sid, cid, mid);
+  await h.deliver(h.queue.shift());
+  const chunks = h.queue.splice(0);
+  for (const chunk of chunks.slice(0, 12)) {
+    assert.strictEqual(chunk.payload.ackEvery, 4);
+    await h.deliver(chunk);
+  }
+  assert.deepStrictEqual(h.queue.map((p) => p.payload.index), [3, 7, 11]);
+  h.queue.length = 0;
+  for (const chunk of chunks.slice(12, 16)) {
+    const legacy = { ...chunk, payload: { ...chunk.payload } };
+    delete legacy.payload.ackEvery;
+    await h.deliver(legacy);
+  }
+  assert.deepStrictEqual(h.queue.map((p) => p.payload.index), [12, 13, 14, 15]);
+  assert.strictEqual(h.saves.length, 0);
+}));
+
+test('large downloads wait for the user-selected sink and ACK only committed bounded writes', () => withHarness(async (h) => {
+  let resolvePicker;
+  const writes = [], pendingWrites = [];
+  let pickerCalls = 0, aborts = 0;
+  const sink = {
+    write(bytes) { writes.push(bytes.length); return new Promise((resolve) => pendingWrites.push(resolve)); },
+    async close() { throw new Error('This prefix-only test must not close a five GB file'); },
+    async abort() { aborts++; },
+  };
+  const alice = h.endpoint('alice');
+  const bob = h.endpoint('bob', { requestWindow: 'native', openDownload(meta, strategy) {
+    pickerCalls++;
+    assert.strictEqual(meta.size, 5 * 1024 * 1024 * 1024);
+    assert.strictEqual(strategy.name, 'large');
+    return new Promise((resolve) => { resolvePicker = resolve; });
+  } });
+  const file = logicalFile(5 * 1024 * 1024 * 1024);
+  offer(h, alice, file);
+  assert.strictEqual(pickerCalls, 0);
+  assert.strictEqual(bob.api.download(sid, cid, mid), true);
+  assert.strictEqual(pickerCalls, 1, 'Open the browser picker synchronously within the Download gesture');
+  assert.strictEqual(state(bob).state, 'preparing');
+  assert.strictEqual(h.packets.length, 0);
+  assert.strictEqual(file.reads.length, 0);
+  assert.strictEqual(bob.api.download(sid, cid, mid), false, 'Preparing reserves the receiver slot');
+  resolvePicker(sink);
+  await flush();
+  assert.strictEqual(h.queue.length, 1);
+  await h.deliver(h.queue.shift());
+  const chunks = h.queue.splice(0);
+  assert.strictEqual(chunks.length, 32);
+  for (const chunk of chunks) await h.deliver(chunk);
+  assert.deepStrictEqual(writes, [8 * h.module.CHUNK_BYTES], 'Write one bounded batch while later chunks queue');
+  assert.strictEqual(h.queue.length, 0, 'Nothing is acknowledged before the disk write succeeds');
+  pendingWrites.shift()();
+  await flush();
+  assert.deepStrictEqual(writes, [8 * h.module.CHUNK_BYTES, 8 * h.module.CHUNK_BYTES]);
+  assert.strictEqual(h.queue.length, 1);
+  assert.strictEqual(h.queue[0].payload.t, 'f-ack');
+  assert.strictEqual(h.queue[0].payload.index, 7);
+  assert.strictEqual(h.blobCalls.length, 0);
+  assert.strictEqual(h.saves.length, 0);
+  bob.api.cancel(sid, cid, mid);
+  await flush();
+  assert.strictEqual(aborts, 1);
+  const ackCount = h.packets.filter((p) => p.payload.t === 'f-ack').length;
+  pendingWrites.shift()();
+  await flush();
+  assert.strictEqual(h.packets.filter((p) => p.payload.t === 'f-ack').length, ackCount, 'A late write after cancellation must not acknowledge');
+  assert.strictEqual(writes.length, 2, 'Cancellation discards the remaining queued batches');
+  assert.strictEqual(state(bob).state, 'error');
+}, { forbidBlob: true }));
+
+test('cancelled, deleted, or disconnected downloads abort a picker that resolves late', async () => {
+  for (const action of ['cancel', 'release', 'disconnect']) await withHarness(async (h) => {
+    let resolvePicker, aborts = 0;
+    const alice = h.endpoint('alice');
+    const bob = h.endpoint('bob', { requestWindow: 'native', openDownload: () =>
+      new Promise((resolve) => { resolvePicker = resolve; }) });
+    const file = logicalFile(5 * 1024 * 1024 * 1024);
+    offer(h, alice, file);
+    bob.api.download(sid, cid, mid);
+    if (action === 'cancel') bob.api.cancel(sid, cid, mid);
+    if (action === 'release') { h.messages.get(messageKey(sid, cid, mid)).del = true; bob.api.release(sid, cid, mid); }
+    if (action === 'disconnect') bob.api.closeServer(sid);
+    resolvePicker({ async write() {}, async close() {}, async abort() { aborts++; } });
+    await flush();
+    assert.strictEqual(aborts, 1, action + ' must release the late file handle');
+    assert(!h.packets.some((p) => p.payload.t === 'f-request'), action + ' cannot request bytes after consent ended');
+    assert.strictEqual(file.reads.length, 0);
+    assert.strictEqual(h.blobCalls.length, 0);
+  });
+});
+
+test('picker cancellation and sink write failure stop consent without saving or acknowledging bytes', async () => {
+  for (const failure of ['picker', 'write']) await withHarness(async (h) => {
+    let aborts = 0, writes = 0;
+    const alice = h.endpoint('alice');
+    const bob = h.endpoint('bob', { requestWindow: 'native', openDownload: async () => {
+      if (failure === 'picker') throw new Error('User cancelled picker');
+      return { async write() { writes++; throw new Error('Disk write failed'); }, async close() {}, async abort() { aborts++; } };
+    } });
+    offer(h, alice, logicalFile(5 * 1024 * 1024 * 1024));
+    bob.api.download(sid, cid, mid);
+    await flush();
+    if (failure === 'write') {
+      await h.deliver(h.queue.shift());
+      const chunks = h.queue.splice(0);
+      for (const chunk of chunks) await h.deliver(chunk);
+      assert.strictEqual(writes, 1);
+      assert.strictEqual(aborts, 1);
+    } else assert(!h.packets.some((p) => p.payload.t === 'f-request'));
+    assert.strictEqual(state(bob).state, 'error');
+    assert(!h.packets.some((p) => p.payload.t === 'f-ack'));
+    assert.strictEqual(h.blobCalls.length, 0);
+    assert.strictEqual(h.saves.length, 0);
+  });
+});
+
+test('streaming fixtures commit after sender departure, report close failure, and respect close cancellation', () => withHarness(async (h) => {
+  const alice = h.endpoint('alice'), size = 2 * 1024 * 1024 + 3;
+  const stats = {}, recipients = [];
+  let resolveCompleteClose, resolveLateClose;
+  for (const mode of ['complete', 'failure', 'cancel']) {
+    const counts = stats[mode] = { bytes: 0, writes: 0, closes: 0, aborts: 0 };
+    const sink = {
+      async write(bytes) {
+        assert(bytes.length > 0 && bytes.length <= 8 * h.module.CHUNK_BYTES, 'Disk writes stay bounded to one ACK batch');
+        assert.strictEqual(bytes[0], counts.bytes % 251);
+        assert.strictEqual(bytes[bytes.length - 1], (counts.bytes + bytes.length - 1) % 251);
+        counts.bytes += bytes.length;
+        counts.writes++;
+      },
+      close() {
+        counts.closes++;
+        if (mode === 'failure') return Promise.reject(new Error('Final disk commit failed'));
+        if (mode === 'cancel') return new Promise((resolve) => { resolveLateClose = resolve; });
+        return new Promise((resolve) => { resolveCompleteClose = resolve; });
+      },
+      async abort() { counts.aborts++; },
+    };
+    recipients.push(h.endpoint(mode, { requestWindow: 'native', openDownload: async () => sink }));
+  }
+  offer(h, alice, logicalFile(size));
+  for (const peer of recipients) assert.strictEqual(peer.api.download(sid, cid, mid), true);
+  await flush();
+  await h.drain(40000);
+  for (const counts of Object.values(stats)) {
+    assert.strictEqual(counts.bytes, size, 'The counting sink receives the complete logical file without retaining it');
+    assert.strictEqual(counts.closes, 1);
+  }
+  assert.strictEqual(state(recipients[0]).state, 'saving');
+  recipients[0].resolve.delete(alice.uid);
+  resolveCompleteClose();
+  await flush();
+  assert.strictEqual(state(recipients[0]).state, 'complete', 'The sender can leave after all bytes were committed');
+  assert.strictEqual(stats.complete.aborts, 0);
+  assert.strictEqual(state(recipients[1]).state, 'error');
+  assert.strictEqual(stats.failure.aborts, 1);
+  assert.strictEqual(state(recipients[2]).state, 'saving');
+  assert.strictEqual(recipients[2].api.cancel(sid, cid, mid), true);
+  await flush();
+  assert.strictEqual(stats.cancel.aborts, 1);
+  resolveLateClose();
+  await flush();
+  assert.strictEqual(state(recipients[2]).state, 'error', 'Closing after cancellation must never report success');
+  assert.strictEqual(h.blobCalls.length, 0);
+  assert.strictEqual(h.saves.length, 0, 'Streaming never creates a second browser Blob download');
+  assert.strictEqual(h.clock.count(), 0);
+}, { recordPackets: false, forbidBlob: true, shortStreamFixture: true }));
 
 (async () => {
   let failed = 0;

@@ -30,13 +30,15 @@ jobs:
         run: |
           node --check app.js
           node --check file-transfer.js
+          node --check image-preview.js
           node tests/media.test.js
           node tests/files.test.js
           node tests/chat.test.js
+          node tests/image-preview.test.js
       - name: Prepare static site
         run: |
           mkdir _site
-          cp index.html app.js file-transfer.js style.css _site/
+          cp index.html app.js file-transfer.js image-preview.js style.css _site/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

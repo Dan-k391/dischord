@@ -1,14 +1,15 @@
 /* Dischord file offers: metadata travels with chat; bytes travel only after Download.
  * No file contents are persisted, previewed, broadcast, or fetched for history sync.
  * The sender retains the selected File reference until its message/server is removed
- * or the tab closes. Receivers keep one explicitly requested transfer in RAM and
- * release its buffers on completion, cancellation, timeout, or an error.
+ * or the tab closes. Small/medium downloads use RAM; large downloads can stream
+ * bounded batches to a destination chosen by the recipient after Download.
+ * Cancellation, timeout, and errors release queued bytes and abort open sinks.
  */
 (() => {
   'use strict';
 
   const CHUNK_BYTES = 12 * 1024;
-  const MAX_WINDOW = 32;
+  const MAX_WINDOW = 128;
   const TIMEOUT_MS = 15000;
   const MAX_SENDERS = 3;
   const MAX_RECEIVERS = 1;
@@ -17,6 +18,12 @@
   const ID = /^[a-z0-9]{1,64}$/i;
   const TOKEN = /^[a-z0-9_-]{1,96}$/i;
   const MIME = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i;
+
+  function strategyFor(size) {
+    if (size < 1024 * 1024) return { name: 'small', initialWindow: 8, maxWindow: 8, stream: false, ackEvery: 1 };
+    if (size < 100 * 1024 * 1024) return { name: 'medium', initialWindow: 32, maxWindow: 32, stream: false, ackEvery: 4 };
+    return { name: 'large', initialWindow: 32, maxWindow: MAX_WINDOW, stream: true, ackEvery: 8 };
+  }
 
   function cleanMeta(raw) {
     if (!raw || typeof raw !== 'object' || typeof raw.id !== 'string' || !ID.test(raw.id) ||
@@ -44,11 +51,14 @@
    * Context: send(sid, payload, uuid), getMessage(sid, cid, mid),
    * resolvePeer(sid, userId, cid, mid) -> connected UUID or null, userId(), randomId(),
    * optional isPeer(sid, userId, uuid) -> true for that exact live connection,
-   * onChange(sid, cid, mid), saveDownload(blob, safeName).
+   * onChange(sid, cid, mid), saveDownload(blob, safeName), optional maxWindow().
+   * Optional openDownload(meta, strategy) is called synchronously from Download
+   * for large remote files. Its promise returns a {write,close,abort} sink or null
+   * when disk streaming is unsupported. Rejection cancels without requesting bytes.
    * register(sid,cid,mid,meta,file) retains a File/Blob without reading it.
    * download/cancel/status/release/hasLocal use (sid,cid,mid).
    * onPacket(sid,payload,uuid,senderUid) requires the app's validated sender identity.
-   * status returns {state:'idle'|'receiving'|'complete'|'error', progress:0..100, message}.
+   * status states: idle, preparing, receiving, saving, complete, error.
    */
   function create(context) {
     const offers = new Map(), receivers = new Map(), senders = new Map(), states = new Map();
@@ -96,6 +106,12 @@
       clearTimeout(t.timer);
       if (senders.get(t.key) === t) senders.delete(t.key);
       t.file = null;
+      t.sentAt.clear();
+    }
+
+    function abortSink(sink) {
+      if (!sink || typeof sink.abort !== 'function') return;
+      try { Promise.resolve(sink.abort()).catch(() => {}); } catch {}
     }
 
     function stopReceiver(t, state, message, tellPeer) {
@@ -103,8 +119,21 @@
       clearTimeout(t.timer);
       receivers.delete(t.key);
       t.parts.length = 0;
-      if (tellPeer) sendPacket(t.sid, envelope(t, 'f-cancel'), t.uuid);
+      t.queue.length = 0;
+      const sink = t.sink;
+      t.sink = null;
+      if (state !== 'complete') abortSink(sink);
+      if (tellPeer && t.started) sendPacket(t.sid, envelope(t, 'f-cancel'), t.uuid);
       change(t.sid, t.cid, t.mid, state, state === 'complete' ? 100 : 0, message);
+    }
+
+    function aliveReceiver(t) {
+      if (closed || receivers.get(t.key) !== t) return false;
+      const message = messageFor(t.sid, t.cid, t.mid);
+      if (!message || message.author !== t.uid || !sameMeta(message.meta, t.meta)) return false;
+      const connected = typeof context.isPeer === 'function' ? context.isPeer(t.sid, t.uid, t.uuid) :
+        context.resolvePeer(t.sid, t.uid, t.cid, t.mid) === t.uuid;
+      return !!connected;
     }
 
     function aliveSender(t) {
@@ -132,9 +161,42 @@
     }
 
     function encode(bytes) {
-      let binary = '';
-      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-      return btoa(binary);
+      // Fixed 12 KiB chunks stay comfortably below browser argument-count limits.
+      return btoa(String.fromCharCode.apply(null, bytes));
+    }
+
+    function mediaWindow(maximum) {
+      try {
+        const limit = typeof context.maxWindow === 'function' ? context.maxWindow() : maximum;
+        return Number.isSafeInteger(limit) && limit > 0 ? Math.min(maximum, limit) : maximum;
+      } catch { return maximum; }
+    }
+
+    function sendWindow(t) {
+      // A full ACK batch must fit even if media activity lowers the window mid-transfer.
+      return Math.max(t.ackEvery, Math.min(t.window, mediaWindow(t.maxWindow), t.peerWindow));
+    }
+
+    function acknowledgeSender(t, index) {
+      const progress = index - t.acked;
+      const sent = t.sentAt.get(index);
+      t.acked = index;
+      for (const i of t.sentAt.keys()) if (i <= index) t.sentAt.delete(i);
+      if (!t.adaptive || sent === undefined) return;
+      const sample = Math.max(0, Date.now() - sent);
+      t.rtt = t.rtt === null ? sample : t.rtt * 0.875 + sample * 0.125;
+      t.baseline = t.baseline === null ? t.rtt : Math.min(t.baseline, t.rtt);
+      if (sample > t.baseline * 2 + 100) {
+        t.window = Math.max(16, Math.floor(t.window / 2));
+        t.growth = 0;
+      } else if (t.rtt <= t.baseline * 2 + 100) {
+        t.growth += progress;
+        const window = sendWindow(t);
+        if (t.growth >= window) {
+          t.growth -= window;
+          t.window = Math.min(t.maxWindow, t.window + 8);
+        }
+      }
     }
 
     async function pump(t) {
@@ -143,7 +205,7 @@
       if (!aliveSender(t)) { stopSender(t); return; }
       t.pumping = true;
       try {
-        while (t.next < t.count && t.next - t.acked - 1 < t.window) {
+        while (t.next < t.count && t.next - t.acked - 1 < sendWindow(t)) {
           if (!aliveSender(t)) { stopSender(t); return; }
           const index = t.next;
           const start = index * CHUNK_BYTES;
@@ -156,7 +218,8 @@
           const data = encode(bytes);
           // Mark it sent first so even a synchronous ACK cannot reserve this index twice.
           t.next++;
-          if (!sendPacket(t.sid, envelope(t, 'f-chunk', { index, data }), t.uuid)) {
+          t.sentAt.set(index, Date.now());
+          if (!sendPacket(t.sid, envelope(t, 'f-chunk', { index, data, ackEvery: t.ackEvery }), t.uuid)) {
             stopSender(t);
             return;
           }
@@ -180,6 +243,56 @@
       // Changing an existing offer invalidates any pending requests for it.
       if (offers.has(k)) release(sid, cid, mid);
       offers.set(k, { sid, cid, mid, meta, file });
+      return true;
+    }
+
+    function beginReceiver(t, sink) {
+      if (!aliveReceiver(t)) {
+        abortSink(sink);
+        stopReceiver(t, 'error', 'This file is no longer available or the sender disconnected.', false);
+        return false;
+      }
+      t.sink = sink;
+      t.ready = true;
+      change(t.sid, t.cid, t.mid, 'receiving', 0);
+      if (receivers.get(t.key) !== t) return false;
+      armReceiver(t);
+      t.started = true;
+      const strategy = t.strategy;
+      const window = mediaWindow(strategy.maxWindow);
+      if (!sendPacket(t.sid, envelope(t, 'f-request', {
+        window, initialWindow: Math.min(window, strategy.initialWindow),
+        adaptive: strategy.name === 'large', ackEvery: strategy.ackEvery,
+      }), t.uuid)) {
+        stopReceiver(t, 'error', 'Unable to contact the sender.', false);
+        return false;
+      }
+      return true;
+    }
+
+    function prepareReceiver(t) {
+      change(t.sid, t.cid, t.mid, 'preparing', 0, 'Choose where to save this file.');
+      if (receivers.get(t.key) !== t) return false;
+      let opening;
+      try {
+        // Invoke the picker before yielding so the browser retains the Download click gesture.
+        opening = context.openDownload({ ...t.meta }, { ...t.strategy });
+      } catch (error) {
+        stopReceiver(t, 'error', error && error.name === 'AbortError' ? 'Download cancelled.' : 'The browser could not open this destination.', false);
+        return false;
+      }
+      Promise.resolve(opening).then((sink) => {
+        if (receivers.get(t.key) !== t || closed) { abortSink(sink); return; }
+        if (sink !== null && (!sink || typeof sink.write !== 'function' ||
+            typeof sink.close !== 'function' || typeof sink.abort !== 'function')) {
+          abortSink(sink);
+          stopReceiver(t, 'error', 'The browser could not open this destination.', false);
+          return;
+        }
+        beginReceiver(t, sink);
+      }, (error) => {
+        stopReceiver(t, 'error', error && error.name === 'AbortError' ? 'Download cancelled.' : 'The browser could not open this destination.', false);
+      });
       return true;
     }
 
@@ -217,15 +330,11 @@
       const token = String(random) + '_' + (++sequence).toString(36);
       if (!TOKEN.test(token)) { change(sid, cid, mid, 'error', 0, 'Unable to start this download.'); return false; }
       const t = { sid, cid, mid, key: k, meta: message.meta, token, uuid, uid: message.author,
-        index: 0, bytes: 0, parts: [], timer: null };
+        strategy: strategyFor(message.meta.size), index: 0, acceptedBytes: 0, bytes: 0,
+        parts: [], queue: [], sink: null, writing: false, ready: false, started: false,
+        committing: false, lastAck: -1, timer: null };
       receivers.set(k, t);
-      armReceiver(t);
-      change(sid, cid, mid, 'receiving', 0);
-      if (!sendPacket(sid, envelope(t, 'f-request', { window: MAX_WINDOW }), uuid)) {
-        stopReceiver(t, 'error', 'Unable to contact the sender.', false);
-        return false;
-      }
-      return true;
+      return t.strategy.stream && typeof context.openDownload === 'function' ? prepareReceiver(t) : beginReceiver(t, null);
     }
 
     function onRequest(sid, p, uuid, uid) {
@@ -244,10 +353,17 @@
         return;
       }
       if (senders.size >= MAX_SENDERS) { error('The sender is busy. Try Download again shortly.'); return; }
+      const strategy = strategyFor(offer.meta.size);
       // Older receivers request no window and retain their one-chunk pacing.
-      const window = Number.isSafeInteger(p.window) && p.window >= 1 ? Math.min(p.window, MAX_WINDOW) : 1;
+      const maximum = Number.isSafeInteger(p.window) && p.window >= 1 ? Math.min(p.window, MAX_WINDOW, strategy.maxWindow) : 1;
+      const adaptive = p.adaptive === true && strategy.name === 'large' && maximum >= 16;
+      const initial = Number.isSafeInteger(p.initialWindow) && p.initialWindow >= 1 ? p.initialWindow : strategy.initialWindow;
+      const window = adaptive ? Math.min(maximum, Math.max(16, initial)) : maximum;
+      const ackEvery = Number.isSafeInteger(p.ackEvery) && p.ackEvery >= 1 && p.ackEvery <= 8 ?
+        Math.min(p.ackEvery, strategy.ackEvery, window, mediaWindow(maximum)) : 1;
       const t = { sid, cid: p.cid, mid: p.mid, key, offerKey: k, meta: offer.meta, file: offer.file,
-        token: p.token, uuid, uid, next: 0, acked: -1, window, pumping: false,
+        token: p.token, uuid, uid, next: 0, acked: -1, window, maxWindow: maximum, adaptive,
+        peerWindow: maximum, ackEvery, sentAt: new Map(), rtt: null, baseline: null, growth: 0, pumping: false,
         count: Math.max(1, Math.ceil(offer.meta.size / CHUNK_BYTES)), timer: null };
       senders.set(key, t);
       // Only acknowledged progress extends this deadline; reads and queued sends do not.
@@ -255,16 +371,77 @@
       void pump(t);
     }
 
+    function ackReceiver(t, index, every, final) {
+      if (!final && index - t.lastAck < every) return true;
+      t.lastAck = index;
+      if (sendPacket(t.sid, envelope(t, 'f-ack', { index, window: mediaWindow(MAX_WINDOW) }), t.uuid)) return true;
+      stopReceiver(t, 'error', 'Unable to contact the sender.', false);
+      return false;
+    }
+
+    async function drainReceiver(t) {
+      if (t.writing || !t.queue.length) return;
+      t.writing = true;
+      try {
+        while (t.queue.length) {
+          if (!aliveReceiver(t)) {
+            stopReceiver(t, 'error', 'This file was removed or the sender disconnected.', true);
+            return;
+          }
+          const every = t.queue[0].ackEvery;
+          // Disk writes amortize IPC across an ACK batch, without timers or whole-file buffering.
+          if (t.queue.length < every && t.acceptedBytes !== t.meta.size) return;
+          const batch = t.queue.slice(0, Math.min(every, t.queue.length));
+          const length = batch.reduce((sum, chunk) => sum + chunk.bytes.length, 0);
+          const bytes = batch.length === 1 ? batch[0].bytes : new Uint8Array(length);
+          if (batch.length > 1) {
+            let offset = 0;
+            for (const chunk of batch) { bytes.set(chunk.bytes, offset); offset += chunk.bytes.length; }
+          }
+          await t.sink.write(bytes);
+          // Consent, the message, or the peer can disappear while disk I/O is pending.
+          if (!aliveReceiver(t)) {
+            stopReceiver(t, 'error', 'This file was removed or the sender disconnected.', true);
+            return;
+          }
+          t.queue.splice(0, batch.length);
+          t.bytes += length;
+          armReceiver(t);
+          const final = t.bytes === t.meta.size;
+          if (final) t.committing = true;
+          if (!ackReceiver(t, batch[batch.length - 1].index, every, final) || receivers.get(t.key) !== t) return;
+          if (final) {
+            // Closing commits the destination; network inactivity no longer applies.
+            clearTimeout(t.timer);
+            change(t.sid, t.cid, t.mid, 'saving', 100, 'Saving file…');
+            if (receivers.get(t.key) !== t) return;
+            await t.sink.close();
+            // The sender may leave after the final ACK; committed bytes no longer need its connection.
+            if (closed || receivers.get(t.key) !== t) return;
+            t.sink = null;
+            stopReceiver(t, 'complete', 'File saved to your chosen location.', false);
+            return;
+          }
+          change(t.sid, t.cid, t.mid, 'receiving', Math.floor(t.bytes / t.meta.size * 100));
+        }
+      } catch {
+        stopReceiver(t, 'error', 'The browser could not write or save this file.', true);
+      } finally {
+        t.writing = false;
+      }
+    }
+
     function onChunk(sid, p, uuid, uid) {
       const t = receivers.get(keyOf(sid, p.cid, p.mid));
-      if (!t || t.uuid !== uuid || t.uid !== uid || t.token !== p.token || t.meta.id !== p.fid ||
-          !Number.isSafeInteger(p.index) || p.index !== t.index || typeof p.data !== 'string') return;
-      const message = messageFor(sid, p.cid, p.mid);
-      if (!message || message.author !== t.uid || !sameMeta(message.meta, t.meta)) {
-        stopReceiver(t, 'error', 'This file was removed or changed.', true);
+      if (!t || !t.ready || t.uuid !== uuid || t.uid !== uid || t.token !== p.token || t.meta.id !== p.fid ||
+          !Number.isSafeInteger(p.index) || p.index !== t.index ||
+          p.index >= Math.max(1, Math.ceil(t.meta.size / CHUNK_BYTES)) || typeof p.data !== 'string') return;
+      if (!aliveReceiver(t)) {
+        stopReceiver(t, 'error', 'This file was removed or the sender disconnected.', true);
         return;
       }
-      const expected = Math.min(CHUNK_BYTES, t.meta.size - t.bytes);
+      if (t.sink && t.queue.length >= MAX_WINDOW) return;
+      const expected = Math.min(CHUNK_BYTES, t.meta.size - t.acceptedBytes);
       const length = Math.ceil(expected / 3) * 4;
       if (p.data.length !== length || (length && !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(p.data))) return;
       let bytes;
@@ -275,11 +452,18 @@
         bytes = new Uint8Array(expected);
         for (let i = 0; i < expected; i++) bytes[i] = binary.charCodeAt(i);
       } catch { return; }
+      const every = Number.isSafeInteger(p.ackEvery) && p.ackEvery >= 1 && p.ackEvery <= 8 ? p.ackEvery : 1;
+      t.acceptedBytes += bytes.length;
+      t.index++;
+      if (t.sink) {
+        t.queue.push({ index: p.index, bytes, ackEvery: every });
+        void drainReceiver(t);
+        return;
+      }
       t.parts.push(bytes);
       t.bytes += bytes.length;
-      t.index++;
       armReceiver(t);
-      sendPacket(sid, envelope(t, 'f-ack', { index: p.index }), uuid);
+      if (!ackReceiver(t, p.index, every, t.bytes === t.meta.size)) return;
       // A synchronous transport callback can cancel this consent while acknowledging.
       if (receivers.get(t.key) !== t) return;
       if (t.bytes === t.meta.size) {
@@ -309,7 +493,8 @@
         if (p.t === 'f-cancel' || p.t === 'f-error') stopSender(t);
         else if (p.t === 'f-ack' && Number.isSafeInteger(p.index) && p.index > t.acked && p.index < t.next) {
           // Ordered receivers make ACKs cumulative. Duplicates and unsent indices add no capacity.
-          t.acked = p.index;
+          if (Number.isSafeInteger(p.window) && p.window >= 1) t.peerWindow = Math.min(p.window, t.maxWindow);
+          acknowledgeSender(t, p.index);
           if (t.acked + 1 >= t.count) stopSender(t);
           else {
             armSender(t);
@@ -319,7 +504,7 @@
       }
       if (p.t === 'f-error' || p.t === 'f-cancel') {
         const r = receivers.get(keyOf(sid, p.cid, p.mid));
-        if (r && r.uid === senderUid && r.uuid === uuid && r.token === p.token && r.meta.id === p.fid) {
+        if (r && !r.committing && r.uid === senderUid && r.uuid === uuid && r.token === p.token && r.meta.id === p.fid) {
           const text = p.t === 'f-cancel' ? 'The sender cancelled this transfer.' :
             (typeof p.message === 'string' && p.message.length <= 200 ? p.message : 'File transfer failed.');
           stopReceiver(r, 'error', text, false);
@@ -378,5 +563,5 @@
     };
   }
 
-  window.DischordFiles = Object.freeze({ cleanMeta, formatSize, create, CHUNK_BYTES, MAX_WINDOW, TIMEOUT_MS });
+  window.DischordFiles = Object.freeze({ cleanMeta, formatSize, strategyFor, create, CHUNK_BYTES, MAX_WINDOW, TIMEOUT_MS });
 })();

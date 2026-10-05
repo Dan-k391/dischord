@@ -307,6 +307,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
   width: 100%; background: #1e1f22; border: 0; border-radius: 4px; padding: 10px; color: var(--text); font: inherit; outline: none;
 }
 #modal select { cursor: pointer; }
+#aMicGain { width: 100%; accent-color: var(--accent); }
 #modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
 .tabs { display: flex; gap: 4px; border-bottom: 1px solid #3f4147; margin-bottom: 8px; }
@@ -448,8 +449,13 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .att-x:hover { background: var(--red); }
 .att-x .ico-svg { width: 14px; height: 14px; }
 .msg-img { margin-top: 4px; border-radius: 8px; overflow: hidden; background: #2b2d31; cursor: zoom-in; max-height: 360px; }
+.msg-img { position: relative; border: 0; padding: 0; max-width: 520px; }
 .msg-img img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .msg-img.loading { background: linear-gradient(90deg, #2b2d31 25%, #35373c 50%, #2b2d31 75%); background-size: 200% 100%; animation: shimmer 1.4s infinite; }
+.msg-img.loading img { visibility: hidden; }
+.image-preview-status { position: absolute; left: 8px; bottom: 8px; padding: 4px 8px; border-radius: 4px; background: #1e1f22; color: var(--text-muted); font-size: 12px; }
+.image-preview-status:empty { display: none; }
+.image-preview-placeholder { display: flex; align-items: center; gap: 8px; max-width: 520px; margin-top: 4px; padding: 16px; border-radius: 8px; background: #2b2d31; color: var(--text-muted); font-size: 13px; }
 @keyframes shimmer { to { background-position: -200% 0; } }
 #textView { position: relative; }
 .drop-hint { display: none; }

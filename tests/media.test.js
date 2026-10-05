@@ -100,24 +100,28 @@ function createElement(tag = 'div') {
       postMessage(message, origin) {
         node.messages.push({ ...JSON.parse(JSON.stringify(message)), _origin: origin });
         if (Object.prototype.hasOwnProperty.call(message, 'volume')) {
-          node.audio.globalVolume = message.volume;
-          if (message.target) perStream.set(message.target, message.volume);
+          node.audio.globalVolume = Math.max(0, Math.min(1, Number(message.volume)));
+          if (message.target) perStream.set(message.target, node.audio.globalVolume);
         }
         if (message.target && message.settings && Object.prototype.hasOwnProperty.call(message.settings, 'volume')) {
-          perStream.set(message.target, message.settings.volume);
+          // A native HTMLMediaElement cannot amplify above one. Boost tests
+          // must exercise the actual Web Audio gain bridge, not a permissive
+          // mock accepting an impossible volume=2 assignment.
+          perStream.set(message.target, Math.max(0, Math.min(1, Number(message.settings.volume))));
         }
+        if (node.runVdoMessage) node.runVdoMessage(message);
       },
     };
   }
   return node;
 }
 
-function createApp({ micOn = true, deaf = false, av = {}, legacyAv = false } = {}) {
+function createApp({ micOn = true, deaf = false, av = {}, legacyAv = false, vol = {} } = {}) {
   const clock = createClock(), nodes = new Map(), frames = [];
   const me = { id: 'alice', name: 'Alice', color: '#5865f2' };
   const server = { id: 'testserver', key: 'secret', name: 'Test server', v: 1,
     channels: [{ id: 'lounge', name: 'Lounge', type: 'voice' }, { id: 'games', name: 'Games', type: 'voice' }] };
-  const stored = new Map(Object.entries({ me, servers: [server], micOn, deaf,
+  const stored = new Map(Object.entries({ me, servers: [server], micOn, deaf, vol,
     av: { ...(legacyAv ? {} : { v8: 1, v9: 1 }), ...av } }).map(([key, value]) => ['dischord.' + key, JSON.stringify(value)]));
   const document = eventTarget({
     getElementById(id) { if (!nodes.has(id)) nodes.set(id, createElement()); return nodes.get(id); },
@@ -151,11 +155,15 @@ function createApp({ micOn = true, deaf = false, av = {}, legacyAv = false } = {
     renderControls = () => {};
     renderPresence = () => {};
     renderTyping = () => {};
+    renderStage = () => {};
+    wireProfileEditor = () => {};
     playTone = () => {};
     showVoice = () => {};
     window.mediaTest = {
       joinVoice, leaveVoice, toggleMic, toggleDeaf, toggleCam,
-      toggleShare, stopShare, voiceUrl, screenUrl, myState, applyVolumes,
+      toggleShare, stopShare, voiceUrl, screenUrl, myState, applyVolumes, setVol,
+      settingsModal, closeModal, userMenu,
+      setMicGain: (value) => setMicGain(value),
       get voice() { return voice; }, get av() { return av; },
       get micOn() { return micOn; }, get deaf() { return deaf; },
       setAudio(mic, muted) { micOn = mic; deaf = muted; },
@@ -168,6 +176,7 @@ function createApp({ micOn = true, deaf = false, av = {}, legacyAv = false } = {
   const api = window.mediaTest;
   const emit = (frame, data, origin = 'https://vdo.ninja') => window.dispatch('message', { source: frame.contentWindow, data, origin });
   return { api, clock, document, frames, emit, stored, server,
+    node: (id) => document.getElementById(id),
     join(camera = false) { api.joinVoice(server.id, 'lounge', camera); clock.advance(camera ? 500 : 0); return api.voice.iframe; },
     addPeer(id, stream = 'stream' + id, screen = null) {
       if (!api.members[server.id]) api.members[server.id] = {};
@@ -178,6 +187,124 @@ function createApp({ micOn = true, deaf = false, av = {}, legacyAv = false } = {
 
 function lastMessage(frame, key) {
   return [...frame.messages].reverse().find((message) => Object.prototype.hasOwnProperty.call(message, key));
+}
+
+function openAudioSettings(app) {
+  app.api.settingsModal('av');
+  app.node('mName').value = 'Alice';
+  const controls = {
+    aCamQ: 'camQ', aCamFps: 'camFps', aCamBr: 'camBr', aSsQ: 'ssQ',
+    aSsFps: 'ssFps', aSsBr: 'ssBr', aSsHint: 'ssHint', aRecv: 'recvCap',
+    aCodec: 'codec', aSelf: 'selfPreview', aMicGain: 'micGain',
+  };
+  // These lightweight DOM nodes do not parse HTML. Initialize controls from
+  // the real settings draft before invoking its actual Save/Cancel handlers.
+  for (const [id, key] of Object.entries(controls)) app.node(id).value = String(app.api.av[key]);
+  app.node('aStats').checked = app.api.av.showStats;
+}
+
+function installVdoAudio(frame) {
+  let sequence = 1;
+  const connections = [], gains = [], sources = [], processed = [], originalCalls = [], micCalls = [];
+  function track(prefix) {
+    return { id: prefix + sequence++, kind: 'audio', readyState: 'live', stops: 0,
+      stop() { this.stops++; this.readyState = 'ended'; } };
+  }
+  class MediaStreamMock {
+    constructor(tracks = []) { this.tracks = [...tracks]; }
+    getAudioTracks() { return this.tracks.filter((t) => t.kind === 'audio'); }
+    getTracks() { return [...this.tracks]; }
+  }
+  function node(type) {
+    return { type, disconnected: false, outputs: [],
+      connect(destination) {
+        assert.notStrictEqual(destination, audioCtx.destination, 'Boosted audio must retain VDO media-element playback');
+        this.outputs.push(destination);
+        destination.input = this;
+        connections.push([this, destination]);
+        return destination;
+      },
+      disconnect() { this.disconnected = true; this.outputs.length = 0; },
+    };
+  }
+  const audioCtx = {
+    currentTime: 0, state: 'running', destination: { type: 'device-output' },
+    createMediaStreamSource(stream) { const source = Object.assign(node('source'), { stream }); sources.push(source); return source; },
+    createGain() {
+      const gain = Object.assign(node('gain'), { gain: { value: 1, setValueAtTime(value) { this.value = value; } } });
+      gains.push(gain);
+      return gain;
+    },
+    createMediaStreamDestination() {
+      const destination = node('stream-destination');
+      const output = track('owned');
+      output.destination = destination;
+      destination.stream = new MediaStreamMock([output]);
+      return destination;
+    },
+    async resume() { this.state = 'running'; },
+  };
+  const session = { rpcs: {}, audioCtx, audioGain: 100, audioEffects: false, muted: false };
+  const vdoWindow = eventTarget({});
+  const original = function (uuid, input) {
+    originalCalls.push({ uuid, input });
+    const output = track('native-processed');
+    processed.push(output);
+    session.rpcs[uuid].inboundAudioPipeline = { input, output };
+    return output;
+  };
+  let context;
+  function rebuild(uuid) {
+    const peer = session.rpcs[uuid];
+    const raw = peer.streamSrc.getAudioTracks()[0];
+    const output = session.audioEffects ? context.addAudioPipeline(uuid, raw) : raw;
+    peer.videoElement.srcObject = new MediaStreamMock([output]);
+  }
+  context = vm.createContext({ window: vdoWindow, session, MediaStream: MediaStreamMock, console,
+    addAudioPipeline: original, updateIncomingAudioElement: rebuild,
+    changeMainGain(percent) { micCalls.push(percent); session.appliedMicGain = percent / 100; },
+  });
+  frame.runVdoMessage = (message) => {
+    if (message.function === 'eval') vm.runInContext(message.value, context, { filename: 'actual-vdo-audio-bridge.js' });
+    if (Object.prototype.hasOwnProperty.call(message, 'mute')) {
+      session.muted = message.mute;
+      for (const peer of Object.values(session.rpcs)) peer.videoElement.muted = session.muted;
+    }
+    if (message.settings && Object.prototype.hasOwnProperty.call(message.settings, 'volume')) {
+      for (const peer of Object.values(session.rpcs)) if (peer.streamID === message.target) {
+        peer.videoElement.volume = Math.max(0, Math.min(1, message.settings.volume));
+      }
+    }
+    if (message.close) vdoWindow.dispatch('pagehide');
+  };
+  const api = { session, gains, sources, processed, originalCalls, micCalls, connections, window: vdoWindow, context,
+    add(uuid, streamID) {
+      const raw = track('original');
+      const peer = { streamID, originalTrack: raw, streamSrc: new MediaStreamMock([raw]), inboundAudioPipeline: null,
+        videoElement: { srcObject: new MediaStreamMock([raw]), volume: 1, muted: session.muted, sinkId: 'chosen-headphones' } };
+      session.rpcs[uuid] = peer;
+      return peer;
+    },
+    replace(uuid) {
+      const raw = track('replacement');
+      session.rpcs[uuid].originalTrack = raw;
+      session.rpcs[uuid].streamSrc = new MediaStreamMock([raw]);
+      session.audioEffects = true;
+      rebuild(uuid);
+      session.audioEffects = false;
+      return raw;
+    },
+    gain(streamID) {
+      const peer = Object.values(session.rpcs).find((p) => p.streamID === streamID);
+      if (!peer) return 1;
+      const element = peer.videoElement;
+      if (element.muted) return 0;
+      const output = element.srcObject.getAudioTracks()[0];
+      return element.volume * (output.destination ? output.destination.input.gain.value : 1);
+    },
+  };
+  frame.audio.gain = api.gain;
+  return api;
 }
 
 for (const fps of [5, 15, 30, 60]) {
@@ -233,6 +360,62 @@ test('saved media preferences survive loading and migrations', () => {
   const saved = { ssQ: 'source', ssFps: 15, ssBr: 4000, ssHint: 'detail', selfPreview: 'full', codec: '' };
   const app = createApp({ av: saved, legacyAv: true });
   for (const [key, value] of Object.entries(saved)) assert.strictEqual(app.api.av[key], value, key + ' must be preserved');
+});
+
+test('microphone gain defaults to 100 percent and configures VDO Web Audio on join', () => {
+  const app = createApp();
+  assert.strictEqual(app.api.av.micGain, 100);
+  assert.strictEqual(new URL(app.join().src).searchParams.get('audiogain'), '100');
+});
+
+test('saved microphone and per-person 200 percent preferences survive loading', () => {
+  const app = createApp({ av: { micGain: 200 }, vol: { bob: { v: 200, sv: 175, m: false } } });
+  assert.strictEqual(app.api.av.micGain, 200);
+  assert.strictEqual(new URL(app.join().src).searchParams.get('audiogain'), '200');
+  assert.strictEqual(app.api.userVol.bob.v, 200);
+  assert.strictEqual(app.api.userVol.bob.sv, 175);
+});
+
+test('microphone gain setters clamp the supported range and persist without changing capture settings', () => {
+  const app = createApp({ av: { ssFps: 15, ssBr: 4000, camQ: '1080' } });
+  app.api.setMicGain(250);
+  assert.strictEqual(app.api.av.micGain, 200);
+  assert.strictEqual(JSON.parse(app.stored.get('dischord.av')).micGain, 200);
+  app.api.setMicGain(-10);
+  assert.strictEqual(app.api.av.micGain, 0);
+  for (const [key, value] of Object.entries({ ssFps: 15, ssBr: 4000, camQ: '1080' })) {
+    assert.strictEqual(app.api.av[key], value, 'Gain adjustments must retain ' + key);
+  }
+});
+
+test('settings Cancel leaves microphone gain and saved preferences unchanged', () => {
+  const app = createApp({ av: { micGain: 125 } });
+  const before = app.stored.get('dischord.av');
+  openAudioSettings(app);
+  assert(/id="aMicGain"[^>]*max="200"|max="200"[^>]*id="aMicGain"/.test(app.node('modal').innerHTML),
+    'The settings control must expose the 200 percent limit');
+  app.node('aMicGain').value = '200';
+  if (app.node('aMicGain').oninput) app.node('aMicGain').oninput();
+  app.api.closeModal();
+  assert.strictEqual(app.api.av.micGain, 125);
+  assert.strictEqual(app.stored.get('dischord.av'), before);
+});
+
+test('settings Save applies microphone gain without reconnecting or changing screen choices', () => {
+  const app = createApp({ av: { micGain: 100, ssFps: 15, ssQ: 'source', ssBr: 4000 } });
+  const frame = app.join();
+  app.api.toggleShare();
+  const screen = app.api.voice.ssFrame;
+  openAudioSettings(app);
+  app.node('aMicGain').value = '200';
+  app.node('mOk').onclick();
+  assert.strictEqual(app.api.av.micGain, 200);
+  assert.strictEqual(JSON.parse(app.stored.get('dischord.av')).micGain, 200);
+  assert.strictEqual(app.api.voice.iframe, frame, 'Live gain adjustment does not require a device reconnect');
+  assert.strictEqual(app.api.voice.ssFrame, screen);
+  assert.strictEqual(app.api.av.ssFps, 15);
+  assert.strictEqual(app.api.av.ssQ, 'source');
+  assert.strictEqual(app.api.av.ssBr, 4000);
 });
 
 test('microphone muted on join does not put the publisher into speaker mute mode', () => {
@@ -374,6 +557,166 @@ test('voice and screen volumes target their own streams and restore 100% on reco
   app.api.applyVolumes(true);
   assert.strictEqual(frame.audio.gain('bobsvoice'), 1);
   assert.strictEqual(frame.audio.gain('bobsscreen'), 1);
+});
+
+test('live microphone 200 percent executes the VDO gain API and survives readiness events', () => {
+  const app = createApp();
+  const frame = app.join(), vdo = installVdoAudio(frame);
+  app.api.setMicGain(200);
+  assert.strictEqual(vdo.session.audioGain, 200);
+  assert.strictEqual(vdo.session.appliedMicGain, 2, 'Execute changeMainGain rather than asserting an outgoing message');
+  assert.strictEqual(JSON.parse(app.stored.get('dischord.av')).micGain, 200);
+  app.emit(frame, { action: 'local-microphone-event', value: true });
+  app.clock.advance(250);
+  assert.strictEqual(vdo.session.appliedMicGain, 2);
+  app.api.setMicGain(NaN);
+  assert.strictEqual(app.api.av.micGain, 100);
+  assert.strictEqual(vdo.session.appliedMicGain, 1);
+});
+
+test('200 percent voice and screen boosts execute independent media-stream gain graphs', () => {
+  const app = createApp(), frame = app.join(), vdo = installVdoAudio(frame);
+  app.addPeer('bob', 'bobsvoice', 'bobsscreen');
+  const voicePeer = vdo.add('bob-voice', 'bobsvoice'), screenPeer = vdo.add('bob-screen', 'bobsscreen');
+  app.api.setVol('bob', { v: 200, sv: 175 });
+  assert.strictEqual(vdo.gain('bobsvoice'), 2);
+  assert.strictEqual(vdo.gain('bobsscreen'), 1.75);
+  assert.strictEqual(voicePeer.videoElement.volume, 1);
+  assert.strictEqual(screenPeer.videoElement.volume, 1);
+  assert.strictEqual(vdo.gains.length, 2);
+  assert.strictEqual(vdo.originalCalls.length, 2, 'The boost wrapper must first run the existing VDO processing pipeline');
+  assert(vdo.sources.every((source) => source.stream.getAudioTracks()[0].id.startsWith('native-processed')),
+    'The graph processes the native pipeline output rather than bypassing it');
+  assert(vdo.connections.every(([, destination]) => destination !== vdo.session.audioCtx.destination));
+  assert.strictEqual(vdo.session.audioEffects, false, 'A one-time rebuild restores VDO processing preferences');
+  assert.strictEqual(voicePeer.videoElement.sinkId, 'chosen-headphones');
+  assert.strictEqual(screenPeer.videoElement.sinkId, 'chosen-headphones');
+  assert.strictEqual(frame.audio.globalVolume, 1);
+  assert.strictEqual(voicePeer.originalTrack.stops, 0);
+  assert(vdo.processed.every((track) => track.stops === 0));
+});
+
+test('lowering a boosted peer to 50 percent restores unity gain and native half volume', () => {
+  const app = createApp(), frame = app.join(), vdo = installVdoAudio(frame);
+  app.addPeer('bob');
+  const peer = vdo.add('bob', 'streambob');
+  app.api.setVol('bob', { v: 200 });
+  app.api.setVol('bob', { v: 50 });
+  assert.strictEqual(vdo.gains.length, 1, 'Reusing the owned graph avoids duplicate audio sources');
+  assert.strictEqual(vdo.gains[0].gain.value, 1);
+  assert.strictEqual(peer.videoElement.volume, 0.5);
+  assert.strictEqual(vdo.gain('streambob'), 0.5);
+  assert.strictEqual(JSON.parse(app.stored.get('dischord.vol')).bob.v, 50);
+  app.api.setVol('bob', { v: 250, sv: -10 });
+  assert.strictEqual(app.api.userVol.bob.v, 200);
+  assert.strictEqual(app.api.userVol.bob.sv, 0);
+  assert.strictEqual(vdo.gain('streambob'), 2);
+  app.api.setVol('bob', { v: NaN });
+  assert.strictEqual(app.api.userVol.bob.v, 100);
+  assert.strictEqual(vdo.gain('streambob'), 1);
+});
+
+test('mute and deafen silence boosted graphs and restore the saved 200 percent level', () => {
+  const app = createApp({ av: { micGain: 200 } }), frame = app.join(), vdo = installVdoAudio(frame);
+  app.addPeer('bob');
+  const peer = vdo.add('bob', 'streambob');
+  app.api.setVol('bob', { v: 200 });
+  app.api.setVol('bob', { m: true });
+  assert.strictEqual(vdo.gain('streambob'), 0);
+  assert.strictEqual(vdo.gains[0].gain.value, 0);
+  app.api.setVol('bob', { m: false });
+  assert.strictEqual(vdo.gain('streambob'), 2);
+  app.api.toggleDeaf();
+  assert.strictEqual(peer.videoElement.muted, true);
+  assert.strictEqual(vdo.gains[0].gain.value, 0);
+  assert.strictEqual(vdo.gain('streambob'), 0);
+  app.api.toggleDeaf();
+  assert.strictEqual(peer.videoElement.muted, false);
+  assert.strictEqual(vdo.gain('streambob'), 2);
+  assert.strictEqual(vdo.session.appliedMicGain, 2);
+  app.api.toggleMic();
+  assert.strictEqual(lastMessage(frame, 'mic').mic, false);
+  assert.strictEqual(vdo.gain('streambob'), 2, 'Muting input must leave amplified remote playback audible');
+  assert.strictEqual(frame.audio.globalVolume, 1);
+});
+
+test('a new default-volume peer joins audibly without inheriting another person boost', () => {
+  const app = createApp(), frame = app.join(), vdo = installVdoAudio(frame);
+  app.addPeer('bob');
+  vdo.add('bob', 'streambob');
+  app.api.setVol('bob', { v: 200 });
+  app.addPeer('carol');
+  const carol = vdo.add('carol', 'streamcarol');
+  app.emit(frame, { action: 'new-audio-track-added', value: true, streamID: 'streamcarol' });
+  app.clock.advance(250);
+  assert.strictEqual(vdo.gain('streambob'), 2);
+  assert.strictEqual(vdo.gain('streamcarol'), 1);
+  assert.strictEqual(carol.videoElement.volume, 1);
+  assert.strictEqual(vdo.gains.length, 1, 'A 100 percent stream uses the existing playback pipeline');
+  assert.strictEqual(frame.audio.globalVolume, 1);
+});
+
+test('a suspended audio context resumes when the receiver activates a boost', () => {
+  const app = createApp(), frame = app.join(), vdo = installVdoAudio(frame);
+  app.addPeer('bob');
+  vdo.add('bob', 'streambob');
+  vdo.session.audioCtx.state = 'suspended';
+  app.api.setVol('bob', { v: 200 });
+  assert.strictEqual(vdo.session.audioCtx.state, 'running');
+  assert.strictEqual(vdo.gain('streambob'), 2);
+  app.emit(frame, { action: 'new-stream-added', value: true });
+  app.clock.advance(250);
+  assert.strictEqual(vdo.gains.length, 1, 'Ready events reuse the installed graph');
+});
+
+test('replaced tracks and departed peers release owned graphs without stopping native tracks', () => {
+  const app = createApp(), frame = app.join(), vdo = installVdoAudio(frame);
+  app.addPeer('bob');
+  const peer = vdo.add('bob', 'streambob'), originalInput = peer.originalTrack;
+  app.api.setVol('bob', { v: 200 });
+  const firstOutput = peer.videoElement.srcObject.getAudioTracks()[0];
+  const replacement = vdo.replace('bob');
+  assert.strictEqual(firstOutput.stops, 1);
+  assert.strictEqual(vdo.sources[0].disconnected, true);
+  assert.strictEqual(vdo.gains[0].disconnected, true);
+  assert.strictEqual(originalInput.stops, 0);
+  assert.strictEqual(replacement.stops, 0);
+  assert(vdo.processed.every((track) => track.stops === 0));
+  assert.strictEqual(vdo.gain('streambob'), 2);
+  const finalOutput = peer.videoElement.srcObject.getAudioTracks()[0];
+  delete vdo.session.rpcs.bob;
+  delete app.api.members[app.server.id].bob;
+  app.api.applyVolumes(true);
+  assert.strictEqual(finalOutput.stops, 1);
+  assert.strictEqual(vdo.window.__dischordAudioGainV1.records.size, 0);
+  assert.strictEqual(replacement.stops, 0);
+  app.api.leaveVoice();
+  assert.strictEqual(vdo.window.__dischordAudioGainV1, undefined);
+});
+
+test('camera reconnect reapplies microphone and peer gain while retiring the old bridge', () => {
+  const app = createApp({ av: { micGain: 200 }, vol: { bob: { v: 200 } } });
+  const oldFrame = app.join(), oldVdo = installVdoAudio(oldFrame);
+  app.addPeer('bob');
+  const oldPeer = oldVdo.add('bob', 'streambob');
+  app.emit(oldFrame, { action: 'joined-room-complete' });
+  const output = oldPeer.videoElement.srcObject.getAudioTracks()[0];
+  app.api.toggleCam();
+  assert.strictEqual(output.stops, 1);
+  assert.strictEqual(oldVdo.window.__dischordAudioGainV1, undefined);
+  app.clock.advance(500);
+  const newFrame = app.api.voice.iframe, newVdo = installVdoAudio(newFrame);
+  newVdo.add('bob', 'streambob');
+  const oldMessageCount = oldFrame.messages.length;
+  app.emit(newFrame, { action: 'joined-room-complete' });
+  app.clock.advance(250);
+  assert.strictEqual(newVdo.gain('streambob'), 2);
+  assert.strictEqual(newVdo.session.appliedMicGain, 2);
+  assert.strictEqual(new URL(newFrame.src).searchParams.get('audiogain'), '200');
+  oldFrame.dispatch('load');
+  app.clock.advance(3000);
+  assert.strictEqual(oldFrame.messages.length, oldMessageCount, 'Retired loads must not send gain commands');
+  assert.strictEqual(newVdo.gains.length, 1);
 });
 
 test('muting microphone leaves speaker playback enabled', () => {
