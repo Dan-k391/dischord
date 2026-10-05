@@ -614,5 +614,6 @@ body.resizing iframe { pointer-events: none !important; }
 }
 @container voice-stage (max-width: 440px) {
   #callBar { height: 124px; flex-wrap: wrap; align-content: center; }
+  #voiceStage.winfs #callBar { left: 0; right: 0; transform: none; padding: 8px; }
   #tiles, #pubHost.devices { bottom: 124px; }
 }
