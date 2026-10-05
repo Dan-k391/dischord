@@ -188,7 +188,8 @@
     const preview = i.preview === 1;
     const maximum = preview ? window.DischordImages.MAX_PREVIEW : IMG_MAX;
     if (!Number.isInteger(i.n) || i.n < 1 || i.n > maximum) return undefined;
-    return { id: i.id, w: clampInt(i.w, 1, preview ? 1024 : 10000), h: clampInt(i.h, 1, preview ? 1024 : 10000), n: i.n, ...(preview ? { preview: 1 } : {}) };
+    const side = preview ? window.DischordImages.MAX_SIDE : 10000;
+    return { id: i.id, w: clampInt(i.w, 1, side), h: clampInt(i.h, 1, side), n: i.n, ...(preview ? { preview: 1 } : {}) };
   }
   function cleanRe(re) {
     if (!re || typeof re !== 'object') return undefined;
@@ -939,6 +940,12 @@
       if (url) {
         const status = el.parentElement.querySelector('.image-preview-status');
         el.onload = () => {
+          // size the box from the real picture, so a wrong or outdated descriptor can never letterbox or crop it
+          if (el.naturalWidth && el.naturalHeight && el.parentElement.style) {
+            const k = Math.min(1, 550 / el.naturalWidth, 350 / el.naturalHeight);
+            el.parentElement.style.aspectRatio = el.naturalWidth + ' / ' + el.naturalHeight;
+            el.parentElement.style.width = `min(100%, ${Math.max(48, Math.round(el.naturalWidth * k))}px)`;
+          }
           el.parentElement.classList.remove('loading');
           imageErrors.delete(imageMessageKey(sid, cid, mid));
           if (status) status.hidden = true;
@@ -1035,6 +1042,7 @@
     u += '&autostart&webcam&novideo&nocontrolbar&hideheader&chatbutton=false&nohangupbutton';
     u += `&audiogain=${audioPercent(av.micGain)}`;
     if (store.get('micLabel', '')) u += '&audiodevice=' + encodeURIComponent(store.get('micLabel', '')); // remembered microphone; falls back to default if unplugged
+    if (store.get('outLabel', '')) u += '&outputdevice=' + encodeURIComponent(store.get('outLabel', '')); // remembered speakers / headphones
     u += withCam ? `&quality=${CAM_Q[av.camQ] ?? 1}&maxframerate=${av.camFps}` : '&videodevice=0';
     u += `&screensharequality=${SS_Q[av.ssQ] ?? 0}&screensharefps=${av.ssFps}`;
     u += `&maxvideobitrate=${av.camBr}&exclude=${ssVs}`; // preserve exclusion when camera reconnects during a share
@@ -1334,7 +1342,7 @@
         scheduleVoice(call, () => syncVoiceState(call), 250);
       }
       if (d.loudness) { voice.loudnessReady = true; onLoudness(d.loudness); }
-      if (Array.isArray(d.deviceList) && d.cib === 'dischord-mics' && micWait) micWait.show(d.deviceList);
+      if (Array.isArray(d.deviceList) && d.cib === 'dischord-devs' && devWait) devWait.show(d.deviceList);
       if (d.stats) onSendStats(false, d.stats);
       return;
     }
@@ -1852,57 +1860,185 @@
   const ctxSelect = (act, label, val, opts) => `<div class="ctx-select"><span>${label}</span><select data-sel="${act}">${opts.map(([v, l]) => `<option value="${v}" ${String(v) === String(val) ? 'selected' : ''}>${l}</option>`).join('')}</select></div>`;
   const qOpts = (auto) => [[0, 'Auto' + (auto ? ' · ' + mbps(auto) : '')], ...VIEW_BRS.map((k) => [k, mbps(k)])];
 
-  // ---- microphone picker (right-click the mic button); stays inside Dischord instead of VDO.Ninja's page
-  let micWait = null;
-  const micLabelNow = () => store.get('micLabel', '');
+  // ---- device menus (the caret beside, or a right-click on, the mic and headphones buttons); all inside Dischord
+  let devWait = null;
   const sameLabel = (a, b) => !!a && !!b && String(a).replace(/\W+/g, '_').toLowerCase() === String(b).replace(/\W+/g, '_').toLowerCase();
-  function micMenu(anchor) {
+  function deviceMenu(anchor, kind) { // kind: 'audioinput' | 'audiooutput'
     closeCtx();
+    const input = kind === 'audioinput', key = input ? 'micLabel' : 'outLabel';
     const rect = anchor.getBoundingClientRect();
     const token = {};
-    clearTimeout(micWait && micWait.timer);
+    clearTimeout(devWait && devWait.timer);
     const show = (list) => {
-      if (!micWait || micWait.token !== token) return;
-      clearTimeout(micWait.timer); micWait = null;
-      const mics = (list || []).filter((d) => d.kind === 'audioinput' && d.deviceId !== 'communications');
-      const named = mics.some((d) => d.label);
-      const saved = micLabelNow();
-      let h = '<div class="ctx-head"><span>Microphone</span></div>';
-      if (!mics.length) h += '<div class="ctx-note">No microphone found.</div>';
+      if (!devWait || devWait.token !== token) return;
+      clearTimeout(devWait.timer); devWait = null;
+      const devs = (list || []).filter((d) => d.kind === kind && d.deviceId !== 'communications');
+      const named = devs.some((d) => d.label);
+      const saved = store.get(key, '');
+      let h = `<div class="ctx-head"><span>${input ? 'Input device' : 'Output device'}</span></div>`;
+      if (!devs.length) h += `<div class="ctx-note">${input ? 'No microphone found.' : 'This browser does not list output devices.'}</div>`;
       else if (!named) h += '<div class="ctx-note">Join a voice channel and allow microphone access to see device names.</div>';
-      else h += mics.map((d, i) => {
+      else h += devs.map((d, i) => {
         const on = saved ? sameLabel(saved, d.label) : d.deviceId === 'default';
-        return `<button class="ctx-item check ${on ? 'on' : ''}" data-act="mic" data-i="${i}"><span>${esc(d.label)}</span><i class="box">${on ? icon('check') : ''}</i></button>`;
+        return `<button class="ctx-item check ${on ? 'on' : ''}" data-act="dev" data-i="${i}"><span>${esc(d.label)}</span><i class="box">${on ? icon('check') : ''}</i></button>`;
       }).join('');
+      h += '<div class="ctx-sep"></div>';
+      h += input ? ctxSlider('micgain', 'Input volume', av.micGain) + ctxCheck('mic', 'Mute', !micOn || deaf) : ctxCheck('deaf', 'Deafen', deaf);
+      h += ctxItem('avset', 'gear', 'Voice & video settings');
       openCtx(rect.left, rect.top, h, (menu) => {
         // open upwards from bottom-of-screen buttons
         if (rect.top > window.innerHeight / 2) menu.style.top = Math.max(6, rect.top - menu.offsetHeight - 8) + 'px';
+        menu.querySelectorAll('[data-slide]').forEach((r) => {
+          r.oninput = () => {
+            menu.querySelector(`[data-out="${r.dataset.slide}"]`).textContent = audioPercent(r.value) + '%';
+            setMicGain(r.value);
+          };
+        });
         menu.onclick = (e) => {
-          const b = e.target.closest('[data-act="mic"]');
+          const b = e.target.closest('[data-act]');
           if (!b) return;
           closeCtx();
-          pickMic(mics[+b.dataset.i]);
+          switch (b.dataset.act) {
+            case 'dev': return pickDevice(kind, devs[+b.dataset.i]);
+            case 'mic': return toggleMic();
+            case 'deaf': return toggleDeaf();
+            case 'avset': return settingsModal('av');
+          }
         };
       });
     };
-    micWait = { token, show, timer: null };
+    devWait = { token, show, timer: null };
     const ownList = () => (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices ? navigator.mediaDevices.enumerateDevices() : Promise.resolve([]))
       .then((l) => show(l.map((d) => ({ kind: d.kind, deviceId: d.deviceId, label: d.label })))).catch(() => show([]));
     if (voice && voice.iframe && voice.iframe.contentWindow) {
-      voicePost({ getDeviceList: true, cib: 'dischord-mics' });
-      micWait.timer = setTimeout(ownList, 2500); // the call frame did not answer
+      voicePost({ getDeviceList: true, cib: 'dischord-devs' });
+      devWait.timer = setTimeout(ownList, 2500); // the call frame did not answer
     } else ownList();
   }
-  function pickMic(d) {
+  function pickDevice(kind, d) {
     if (!d) return;
-    store.set('micLabel', d.label || '');
+    const input = kind === 'audioinput';
+    store.set(input ? 'micLabel' : 'outLabel', d.label || '');
     if (voice) {
-      // run inside the call frame: switch to that device id (ids are per-origin, so they come from the frame's own list)
-      voicePost({ function: 'eval', value: `if (typeof changeAudioDeviceById === 'function') changeAudioDeviceById(${JSON.stringify(String(d.deviceId))});` });
+      // device ids are per-origin, so they come from the call frame's own list and are applied inside it
+      if (input) voicePost({ function: 'eval', value: `if (typeof changeAudioDeviceById === 'function') changeAudioDeviceById(${JSON.stringify(String(d.deviceId))});` });
+      else voicePost({ changeAudioOutputDevice: String(d.deviceId) });
       const call = voice;
       scheduleVoice(call, () => syncVoiceState(call), 1500); // re-apply mute / gain after the device swap
     }
-    toast('Microphone: ' + (d.label || 'selected'));
+    toast((input ? 'Microphone: ' : 'Output: ') + (d.label || 'selected'));
+  }
+
+  // ---- channel list menus
+  function renameChannelModal(cid) {
+    const s = server(cur.sid), c = channel(s, cid);
+    if (!c) return;
+    modal(`<h2>Rename channel</h2><label>Channel name</label><input type="text" id="mName" maxlength="40" value="${esc(c.name)}">
+      <div class="actions"><button class="btn link" data-close>Cancel</button><button class="btn primary" id="mOk">Save</button></div>`, () => {
+      const inp = $('mName');
+      inp.select();
+      const ok = () => {
+        let n = inp.value.trim();
+        if (c.type === 'text') n = n.toLowerCase().replace(/\s+/g, '-');
+        if (!n) return;
+        c.name = n.slice(0, 40);
+        bumpServer(s);
+        closeModal();
+      };
+      $('mOk').onclick = ok;
+      inp.onkeydown = (e) => { if (e.key === 'Enter') ok(); };
+    });
+  }
+  function deleteChannelConfirm(cid) {
+    const s = server(cur.sid), c = channel(s, cid);
+    if (!c) return;
+    confirmModal('Delete channel', `Delete ${c.type === 'text' ? '#' : ''}${c.name} for everyone?`, 'Delete channel', () => {
+      s.channels = s.channels.filter((x) => x.id !== c.id);
+      releaseChannelFiles(s.id, c.id);
+      if (voice && voice.sid === s.id && voice.cid === c.id) leaveVoice();
+      if (cur.cid === c.id) selectChannel((s.channels.find((x) => x.type === 'text') || s.channels[0] || {}).id || null);
+      bumpServer(s);
+    });
+  }
+  function copyInvite(s) {
+    const link = inviteLink(s);
+    (navigator.clipboard ? navigator.clipboard.writeText(link) : Promise.reject()).then(() => toast('Invite link copied'), () => { if (s.id === cur.sid) inviteModal(); });
+  }
+  function markServerRead(sid) {
+    const s = server(sid);
+    if (!s) return;
+    s.channels.forEach((c) => { if (c.type === 'text') markRead(sid, c.id); });
+    renderRail(); renderChannels();
+  }
+  function channelMenu(cid, x, y) {
+    const s = server(cur.sid), c = channel(s, cid);
+    if (!c) return;
+    const inIt = !!(voice && voice.sid === s.id && voice.cid === c.id);
+    let h = `<div class="ctx-head"><span>${c.type === 'text' ? '# ' : ''}${esc(c.name)}</span></div>`;
+    if (c.type === 'text') h += ctxItem('read', 'check', 'Mark as read');
+    else h += inIt ? ctxItem('leave', 'hangup', 'Disconnect', 'danger') : ctxItem('join', 'speaker', 'Join voice') + ctxItem('joincam', 'camera', 'Join with camera');
+    h += ctxItem('invite', 'userPlus', 'Invite people') + '<div class="ctx-sep"></div>';
+    h += ctxItem('rename', 'edit', 'Rename channel') + ctxItem('del', 'trash', 'Delete channel', 'danger');
+    openCtx(x, y, h, (menu) => {
+      menu.onclick = (e) => {
+        const b = e.target.closest('[data-act]');
+        if (!b) return;
+        closeCtx();
+        switch (b.dataset.act) {
+          case 'read': markRead(s.id, c.id); renderRail(); return renderChannels();
+          case 'join': selectChannel(c.id); return joinVoice(s.id, c.id, false);
+          case 'joincam': selectChannel(c.id); return joinVoice(s.id, c.id, true);
+          case 'leave': return leaveVoice();
+          case 'invite': return inviteModal();
+          case 'rename': return renameChannelModal(c.id);
+          case 'del': return deleteChannelConfirm(c.id);
+        }
+      };
+    });
+  }
+  // empty space in the channel list, a category header, or the server header
+  function serverAreaMenu(x, y) {
+    const s = server(cur.sid);
+    if (!s) return;
+    const h = `<div class="ctx-head"><span>${esc(s.name)}</span></div>` +
+      ctxItem('addText', 'hash', 'Create text channel') + ctxItem('addVoice', 'speaker', 'Create voice channel') +
+      ctxItem('invite', 'userPlus', 'Invite people') + ctxItem('read', 'check', 'Mark server as read') + '<div class="ctx-sep"></div>' +
+      ctxItem('rename', 'edit', 'Rename server') + ctxItem('leave', 'logout', 'Leave server', 'danger');
+    openCtx(x, y, h, (menu) => {
+      menu.onclick = (e) => {
+        const b = e.target.closest('[data-act]');
+        if (!b) return;
+        closeCtx();
+        switch (b.dataset.act) {
+          case 'addText': return channelModal('text');
+          case 'addVoice': return channelModal('voice');
+          case 'invite': return inviteModal();
+          case 'read': return markServerRead(s.id);
+          case 'rename': return renameModal();
+          case 'leave': return confirmLeave(s);
+        }
+      };
+    });
+  }
+  const confirmLeave = (s) => confirmModal(`Leave '${s.name}'`, 'You can rejoin later with an invite link. Your local message history for this server will be removed.', 'Leave server', () => leaveServer(s.id));
+  function railMenu(sid, x, y) {
+    const s = server(sid);
+    if (!s) return;
+    const h = `<div class="ctx-head"><span>${esc(s.name)}</span></div>` +
+      ctxItem('read', 'check', 'Mark as read') + ctxItem('invite', 'userPlus', 'Copy invite link') + '<div class="ctx-sep"></div>' +
+      ctxItem('leave', 'logout', 'Leave server', 'danger');
+    openCtx(x, y, h, (menu) => {
+      menu.onclick = (e) => {
+        const b = e.target.closest('[data-act]');
+        if (!b) return;
+        closeCtx();
+        switch (b.dataset.act) {
+          case 'read': return markServerRead(s.id);
+          case 'invite': return copyInvite(s);
+          case 'leave': return confirmLeave(s);
+        }
+      };
+    });
   }
 
   function userMenu(uid, x, y) {
@@ -1990,8 +2126,8 @@
     const m = (getMsgs(cur.sid)[cur.cid] || []).find((z) => z.id === mid);
     if (!m) return;
     const mine = m.a.id === me.id;
-    let h = `<div class="ctx-emojis">${REACTS.slice(0, 8).map((e) => `<button data-emo="${e}">${e}</button>`).join('')}</div>`;
-    h += ctxItem('reply', 'reply', 'Reply');
+    let h = `<div class="ctx-emojis">${REACTS.slice(0, 6).map((e) => `<button data-emo="${e}">${e}</button>`).join('')}</div>`;
+    h += ctxItem('react', 'smile', 'Add reaction') + ctxItem('reply', 'reply', 'Reply');
     if (m.text) h += ctxItem('copy', 'copy', 'Copy text');
     if (m.img) h += ctxItem('openimg', 'image', 'Open image') + ctxItem('saveimg', 'download', 'Download image');
     if (!mine) h += ctxItem('mention', 'at', 'Mention ' + esc(m.a.name));
@@ -2005,6 +2141,7 @@
         if (!b) return;
         closeCtx();
         switch (b.dataset.act) {
+          case 'react': return emojiPicker({ getBoundingClientRect: () => ({ left: x, right: x, top: y, bottom: y }) }, (emo) => toggleReaction(mid, emo));
           case 'reply': return replyToMessage(mid);
           case 'copy': navigator.clipboard && navigator.clipboard.writeText(m.text); return toast('Copied');
           case 'openimg': return openImage(cur.sid, m.cid, m.id);
@@ -2115,7 +2252,8 @@
       const edited = m.ed ? ' <span class="time">(edited)</span>' : '';
       const imageStateKey = imageMessageKey(s.id, m.cid, m.id);
       const failedPreview = imageErrors.has(imageStateKey);
-      const img = m.img ? `<button type="button" class="msg-img ${failedPreview ? '' : 'loading'}" style="aspect-ratio:${m.img.w}/${m.img.h};width:min(100%, ${Math.min(420, m.img.w)}px)" data-image-open="${esc(m.id)}" aria-label="Open image preview">
+      const imgW = m.img ? Math.max(48, Math.round(m.img.w * Math.min(1, 550 / m.img.w, 350 / m.img.h))) : 0;
+      const img = m.img ? `<button type="button" class="msg-img ${failedPreview ? '' : 'loading'}" style="aspect-ratio:${m.img.w}/${m.img.h};width:min(100%, ${imgW}px)" data-image-open="${esc(m.id)}" aria-label="Open image preview">
         <img data-img="${esc(m.img.id)}" data-img-sid="${esc(s.id)}" data-img-cid="${esc(m.cid)}" data-img-mid="${esc(m.id)}" loading="lazy" decoding="async" alt="${esc(m.file ? m.file.name : 'Shared image')}"><span class="image-preview-status" role="status">${failedPreview ? 'Preview unavailable. Someone with it must be online.' : 'Loading image preview…'}</span><span class="img-save" data-image-save="${esc(m.id)}" role="button" tabindex="0" title="Download image">${icon('download')}</span></button>` : m.file && window.DischordImages.isImage(m.file)
         ? `<div class="image-preview-placeholder" role="status">${icon('image')}<span>${imagePreparing.has(imageStateKey) && !failedPreview ? 'Preparing image preview…' : 'Image preview unavailable.'}</span></div>` : '';
       // images are preview-only; every other file is a card that transfers on Download
@@ -2214,7 +2352,7 @@
 
   function renderControls() {
     const muted = !micOn || deaf;
-    for (const id of ['micBtn', 'cbMic']) { const b = $(id); setIcon(b, muted ? 'micOff' : 'mic'); b.classList.toggle('off', muted); b.title = (muted ? 'Unmute' : 'Mute') + ' (right-click: choose microphone)'; }
+    for (const id of ['micBtn', 'cbMic']) { const b = $(id); setIcon(b, muted ? 'micOff' : 'mic'); b.classList.toggle('off', muted); b.title = muted ? 'Unmute' : 'Mute'; }
     for (const id of ['deafBtn', 'cbDeaf']) { const b = $(id); setIcon(b, deaf ? 'deaf' : 'headphones'); b.classList.toggle('off', deaf); b.title = deaf ? 'Undeafen' : 'Deafen'; }
     const cam = !!(voice && voice.cam), ss = !!(voice && voice.ss);
     setIcon($('cbCam'), cam ? 'camera' : 'cameraOff');
@@ -2344,7 +2482,7 @@
         </div>
         <label class="inline-check"><input type="checkbox" id="aStats" ${av.showStats ? 'checked' : ''}> Always show stream stats (resolution · fps · bitrate · codec) on video tiles</label>
         <p class="hint">Higher bitrate improves detail, and every viewer needs that much upload bandwidth. Change any stream's quality from its tile. ${voice ? 'Camera changes reconnect your call. Screen share changes apply after you stop and share again.' : ''}</p>
-        ${voice ? '<button class="btn" id="aDevices">Choose camera…</button><p class="hint">Right-click the microphone button to choose your microphone.</p>' : '<p class="hint">Join a voice channel to pick your camera. Right-click the microphone button to choose your microphone.</p>'}
+        ${voice ? '<button class="btn" id="aDevices">Choose camera…</button><p class="hint">Use the small arrows beside the microphone and headphones buttons to choose your input and output devices.</p>' : '<p class="hint">Join a voice channel to pick your camera. Use the small arrows beside the microphone and headphones buttons to choose your input and output devices.</p>'}
       </div>
       <div class="actions"><button class="btn link" data-close>Cancel</button><button class="btn primary" id="mOk">Save</button></div>`, () => {
       const show = (t) => {
@@ -2500,7 +2638,7 @@
       case 'addText': channelModal('text'); break;
       case 'addVoice': channelModal('voice'); break;
       case 'rename': renameModal(); break;
-      case 'leave': confirmModal(`Leave '${s.name}'`, 'You can rejoin later with an invite link. Your local message history for this server will be removed.', 'Leave server', () => leaveServer(s.id)); break;
+      case 'leave': confirmLeave(s); break;
     }
   };
 
@@ -2508,17 +2646,7 @@
     const add = e.target.closest('[data-add]');
     if (add) return channelModal(add.dataset.add);
     const del = e.target.closest('[data-delc]');
-    if (del) {
-      e.stopPropagation();
-      const s = server(cur.sid), c = channel(s, del.dataset.delc);
-      return confirmModal('Delete channel', `Delete ${c.type === 'text' ? '#' : ''}${c.name} for everyone?`, 'Delete channel', () => {
-        s.channels = s.channels.filter((x) => x.id !== c.id);
-        releaseChannelFiles(s.id, c.id);
-        if (voice && voice.sid === s.id && voice.cid === c.id) leaveVoice();
-        if (cur.cid === c.id) selectChannel((s.channels.find((x) => x.type === 'text') || s.channels[0] || {}).id || null);
-        bumpServer(s);
-      });
-    }
+    if (del) { e.stopPropagation(); return deleteChannelConfirm(del.dataset.delc); }
     const sv = e.target.closest('[data-sid]');
     if (sv) return selectServer(sv.dataset.sid);
     const ch = e.target.closest('[data-cid]');
@@ -2591,6 +2719,9 @@
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && focusUid && $('modalBack').classList.contains('hidden')) { focusUid = null; renderStage(); } });
   $('devDone').onclick = () => { if (!voice) return; voice.devices = false; voicePost({ toggleSettings: false }); renderStage(); };
+  for (const [id, kind] of [['micCaret', 'audioinput'], ['cbMicCaret', 'audioinput'], ['deafCaret', 'audiooutput'], ['cbDeafCaret', 'audiooutput']]) {
+    $(id).onclick = (e) => { e.stopPropagation(); deviceMenu($(id), kind); };
+  }
   $('micBtn').onclick = toggleMic;
   $('cbMic').onclick = toggleMic;
   $('deafBtn').onclick = toggleDeaf;
@@ -2601,13 +2732,22 @@
 
   // right-click menus
   document.addEventListener('contextmenu', (e) => {
-    const mic = e.target.closest('#cbMic, #micBtn');
-    if (mic) { e.preventDefault(); return micMenu(mic); }
+    const mic = e.target.closest('#cbMic, #micBtn, #micCaret, #cbMicCaret');
+    if (mic) { e.preventDefault(); return deviceMenu(mic, 'audioinput'); }
+    const out = e.target.closest('#cbDeaf, #deafBtn, #deafCaret, #cbDeafCaret');
+    if (out) { e.preventDefault(); return deviceMenu(out, 'audiooutput'); }
     const u = e.target.closest('#channelList .voice-user[data-uid], #members .mem[data-uid], #tiles .tile[data-key], [data-ctx="user"][data-uid], #userPanel');
     const msg = !u && e.target.closest('#messages .msg[data-mid]');
     // never show the browser's own menu, except in text fields where it provides paste / spellcheck
     if (!e.target.closest('input, textarea, [contenteditable="true"]')) e.preventDefault();
-    if (!u && !msg) return closeCtx();
+    if (!u && !msg) {
+      const chan = e.target.closest('#channelList .chan[data-cid]');
+      if (chan) return channelMenu(chan.dataset.cid, e.clientX, e.clientY);
+      const rail = e.target.closest('#serverList [data-sid]');
+      if (rail) return railMenu(rail.dataset.sid, e.clientX, e.clientY);
+      if (e.target.closest('#channelList, #serverHeader') && server(cur.sid)) return serverAreaMenu(e.clientX, e.clientY);
+      return closeCtx();
+    }
     e.preventDefault();
     if (msg) return messageMenu(msg.dataset.mid, e.clientX, e.clientY);
     const uid = u.id === 'userPanel' ? me.id : (u.dataset.uid || (u.dataset.key || '').split(':')[0]);
@@ -2634,6 +2774,41 @@
   $('textView').addEventListener('dragleave', (e) => { if (!e.relatedTarget || !$('textView').contains(e.relatedTarget)) $('textView').classList.remove('drop'); });
   $('textView').addEventListener('drop', (e) => { e.preventDefault(); $('textView').classList.remove('drop'); addAttachments(e.dataTransfer.files); });
   $('attachBar').onclick = (e) => { const b = e.target.closest('[data-rm]'); if (b) { pending.splice(+b.dataset.rm, 1); renderAttachBar(); } };
+
+  // drag the inner edge of the channel sidebar / member list to resize; double-click resets
+  const PANEL_MIN = 180, PANEL_MAX = 420;
+  function applyPanelWidths() {
+    for (const [key, prop] of [['sideW', '--side-w'], ['memW', '--mem-w']]) {
+      const w = +store.get(key, 0);
+      $('app').style.setProperty(prop, w ? Math.max(PANEL_MIN, Math.min(PANEL_MAX, w)) + 'px' : ''); // '' falls back to the stylesheet default
+    }
+  }
+  applyPanelWidths();
+  for (const [id, key, panel, fromLeft] of [['sideResizer', 'sideW', 'sidebar', true], ['memResizer', 'memW', 'members', false]]) {
+    const handle = $(id);
+    handle.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      try { handle.setPointerCapture(e.pointerId); } catch { }
+      handle.classList.add('dragging'); document.body.classList.add('resizing');
+      const move = (ev) => {
+        const r = $(panel).getBoundingClientRect();
+        const w = Math.max(PANEL_MIN, Math.min(PANEL_MAX, Math.round(fromLeft ? ev.clientX - r.left : r.right - ev.clientX)));
+        store.set(key, w);
+        applyPanelWidths();
+      };
+      const up = () => {
+        handle.classList.remove('dragging'); document.body.classList.remove('resizing');
+        handle.removeEventListener('pointermove', move);
+        handle.removeEventListener('pointerup', up);
+        handle.removeEventListener('pointercancel', up);
+      };
+      handle.addEventListener('pointermove', move);
+      handle.addEventListener('pointerup', up);
+      handle.addEventListener('pointercancel', up);
+    });
+    handle.addEventListener('dblclick', () => { store.del(key); applyPanelWidths(); });
+  }
 
   // in-call reactions
   $('stripToggle').onclick = () => { hideStrip = !hideStrip; store.set('hideStrip', hideStrip); renderStage(); };

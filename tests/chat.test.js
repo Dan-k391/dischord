@@ -32,7 +32,7 @@ function eventTarget(target = {}) {
 function createElement(tag = 'div', onClick = () => {}) {
   const classes = new Set();
   return eventTarget({
-    tagName: tag.toUpperCase(), children: [], dataset: {}, style: {},
+    tagName: tag.toUpperCase(), children: [], dataset: {}, style: { setProperty(name, value) { this[name] = value; } },
     innerHTML: '', textContent: '', value: '', scrollHeight: 100,
     scrollTop: 0, clientHeight: 100,
     classList: {
