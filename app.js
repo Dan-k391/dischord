@@ -23,9 +23,9 @@
   const MAX_MSGS = 500;
   const HIST_SEND = 80;           // messages per channel sent during history sync
   const PING_MS = 8000;           // presence heartbeat
-  const STALE_CONNECTED = 120000; // connected peer considered gone after this long silent
+  const STALE_CONNECTED = 600000; // peer with a live connection: trust the connection; this is only a safety net if a disconnect event is ever missed
   const STALE_LOOSE = 60000;      // peer with no live connection considered gone after this
-  const STALE_VOICE = 180000;     // someone in a call: their voice/screen keep flowing even if chat pings stall (background tab)
+  const STALE_VOICE = 180000;     // same, for someone in a call
   const PEER_GRACE = 20000;       // a dropped mesh connection may just be reconnecting: wait this long for the next ping
   const COLORS = ['#5865f2', '#7b61ff', '#9b59b6', '#eb459e', '#ed4245', '#f47b67', '#e67e22', '#faa61a',
     '#f1c40f', '#57f287', '#3ba55c', '#1abc9c', '#00a8fc', '#3498db', '#607d8b', '#99aab5'];
@@ -317,7 +317,7 @@
 
   function isOnline(m) {
     if (!m || !m.seen) return false;
-    return now() - m.seen < (m.vc ? STALE_VOICE : m.uuids && m.uuids.size ? STALE_CONNECTED : STALE_LOOSE);
+    return now() - m.seen < (m.uuids && m.uuids.size ? STALE_CONNECTED : m.vc ? STALE_VOICE : STALE_LOOSE);
   }
 
   function touch(sid, body, uuid) {
