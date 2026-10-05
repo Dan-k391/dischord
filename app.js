@@ -94,6 +94,9 @@
     check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
     expand: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
     collapse: '<path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/>',
+    winfs: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7.5 12V9h3M16.5 12v3h-3"/>',
+    person: '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.5-6 8-6s8 2 8 6"/>',
+    personOff: '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.5-6 8-6s8 2 8 6M3 3l18 18"/>',
     live: '<rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><circle cx="12" cy="10.5" r="2" fill="currentColor"/>',
   };
   const icon = (name, cls = '') => `<svg class="ico-svg ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[name] || ''}</svg>`;
@@ -1078,6 +1081,8 @@
   const streamBr = {};         // vs -> chosen kbps (0 = auto)
   const autoFocused = new Set();
   let focusUid = null;
+  let winFs = null;            // tile key filling the whole app window, or null
+  let hideAvatars = store.get('hideAv', false); // only show people who have video on
 
   function wantedBr(t) {
     // own preview: by default exactly what others receive (your own send bitrate, full resolution)
@@ -1100,6 +1105,7 @@
       out.push({ key: o.user.id, uid: o.user.id, user: o.user, st, self: !!o.self, screen: false, vs: st.c && o.vs && !hideSelf && !hideCam ? o.vs : '' });
       if (st.s && o.vss) out.push({ key: o.user.id + ':s', uid: o.user.id, user: o.user, st, self: !!o.self, screen: true, vs: hideSelf ? '' : o.vss });
     }
+    if (hideAvatars && out.some((t) => t.vs)) return out.filter((t) => t.vs); // nothing to watch: keep the avatars
     return out;
   }
 
@@ -1155,6 +1161,7 @@
       if (nameEl.innerHTML !== name) nameEl.innerHTML = name;
       const tools = hasVid
         ? (t.self ? '' : `<button class="tool-btn q-btn" data-q="${esc(t.key)}" title="Stream quality">${esc(streamBr[t.vs] ? mbps(br) : 'Auto · ' + mbps(br))}</button>`) +
+          `<button class="tool-btn" data-wfs="${esc(t.key)}" title="${winFs === t.key ? 'Exit window fullscreen' : 'Fill the window'}">${icon(winFs === t.key ? 'collapse' : 'winfs')}</button>` +
           `<button class="tool-btn fs-btn" data-fs="${esc(t.key)}" title="${document.fullscreenElement === el ? 'Exit fullscreen' : 'Fullscreen'}">${icon(document.fullscreenElement === el ? 'collapse' : 'expand')}</button>`
         : '';
       const toolsEl = el.querySelector('.tile-tools');
@@ -1165,6 +1172,9 @@
     }
     for (const [key, el] of tileEls) if (!seen.has(key)) { el.remove(); tileEls.delete(key); }
     if (focusUid && !(tileEls.get(focusUid) && tileEls.get(focusUid).classList.contains('video'))) focusUid = null;
+    if (winFs && !(tileEls.get(winFs) && tileEls.get(winFs).classList.contains('video'))) winFs = null;
+    $('voiceStage').classList.toggle('winfs', !!winFs);
+    tileEls.forEach((el, key) => el.classList.toggle('winfull', key === winFs));
 
     // layout
     const n = tileEls.size;
@@ -1547,7 +1557,7 @@
     const r = anchor.getBoundingClientRect();
     m.classList.remove('hidden');
     const mw = m.offsetWidth, mh = m.offsetHeight;
-    m.style.left = Math.max(8, Math.min(window.innerWidth - mw - 8, r.right - mw)) + 'px';
+    m.style.left = Math.max(8, r.left + mw <= window.innerWidth - 8 ? r.left : r.right - mw) + 'px';
     m.style.top = Math.max(8, Math.min(window.innerHeight - mh - 8, r.top - mh - 6 > 8 ? r.top - mh - 6 : r.bottom + 6)) + 'px';
     m.onclick = (e) => { const b = e.target.closest('[data-emo]'); if (!b) return; m.classList.add('hidden'); onPick(b.dataset.emo); };
   }
@@ -1608,6 +1618,8 @@
     const cam = !!(voice && voice.cam), ss = !!(voice && voice.ss);
     setIcon($('cbCam'), cam ? 'camera' : 'cameraOff');
     $('cbCam').classList.toggle('on', cam); $('cbCam').title = cam ? 'Turn off camera' : 'Turn on camera';
+    setIcon($('cbAvatars'), hideAvatars ? 'personOff' : 'person');
+    $('cbAvatars').classList.toggle('off', hideAvatars); $('cbAvatars').title = hideAvatars ? 'Show people without video' : 'Hide people without video';
     const pending = !!(voice && voice.ssFrame && !voice.ss);
     $('cbShare').classList.toggle('on', ss); $('cbShare').classList.toggle('pending', pending);
     $('cbShare').title = ss ? 'Stop sharing' : pending ? 'Waiting for you to pick a screen… (click to cancel)' : 'Share your screen';
@@ -1948,6 +1960,9 @@
   $('tiles').addEventListener('click', (e) => {
     const q = e.target.closest('[data-q]');
     if (q) { e.stopPropagation(); return qualityMenu(q.dataset.q, q); }
+    const wf = e.target.closest('[data-wfs]');
+    if (wf) { winFs = winFs === wf.dataset.wfs ? null : wf.dataset.wfs; if (document.fullscreenElement) document.exitFullscreen(); return renderStage(); }
+    if (winFs) return; // a click on the picture shouldn't change the layout underneath
     const fs = e.target.closest('[data-fs]');
     if (fs) { const el = tileEls.get(fs.dataset.fs); if (document.fullscreenElement) document.exitFullscreen(); else if (el && el.requestFullscreen) el.requestFullscreen(); return; }
     const t = e.target.closest('.tile.video');
@@ -1982,7 +1997,7 @@
     if (!e.target.closest('#emojiMenu') && !e.target.closest('[data-react]') && !e.target.closest('#cbReact')) $('emojiMenu').classList.add('hidden');
   });
   window.addEventListener('blur', closeCtx);
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeCtx(); $('emojiMenu').classList.add('hidden'); } });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeCtx(); $('emojiMenu').classList.add('hidden'); if (winFs) { winFs = null; renderStage(); } } });
 
   // images: button, paste, drag & drop
   $('attachBtn').onclick = () => $('fileInput').click();
@@ -1997,6 +2012,7 @@
   $('attachBar').onclick = (e) => { const b = e.target.closest('[data-rm]'); if (b) { pending.splice(+b.dataset.rm, 1); renderAttachBar(); } };
 
   // in-call reactions
+  $('cbAvatars').onclick = () => { hideAvatars = !hideAvatars; store.set('hideAv', hideAvatars); renderControls(); renderStage(); };
   $('cbReact').onclick = (e) => { e.stopPropagation(); emojiPicker($('cbReact'), sendCallReaction); };
 
   window.addEventListener('hashchange', checkInviteHash);
