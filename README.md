@@ -6,7 +6,7 @@ A Discord-style chat app built on [VDO.Ninja](https://vdo.ninja). No accounts, n
 - **Servers** with text and voice channels, shareable **invite links**
 - **Text chat** sent peer-to-peer: Markdown-ish formatting, edit/delete, typing indicators, unread badges, desktop notifications
 - **Replies**: reply from message actions or the right-click menu; click the quote to jump to the original message
-- **Files and images**: attach, paste or drag & drop up to four files (100 MB each). Only metadata is shared until the recipient clicks **Download**; contents transfer directly from the sender, with progress and cancellation
+- **Files and images**: attach, paste or drag & drop up to four files with no app-imposed file size limit. Only metadata is shared until the recipient clicks **Download**; contents transfer directly from the sender, with progress and cancellation
 - **Reactions** on messages, plus floating emoji reactions in voice calls
 - **History sync**: when you come online, peers send you recent messages you missed
 - **Voice channels** with mute/deafen, **camera** and **screen share at the same time**, speaking indicators, focus view + fullscreen
@@ -38,6 +38,7 @@ To use it with friends over the internet, host the folder on any static host
 
 ## Limits (by design, since there's no server)
 - File contents are never automatically transferred, previewed, or saved by Dischord. Recipients only save files after clicking **Download**. Only file names, sizes and types are included in local chat history.
+- Downloads are assembled in browser memory before saving, so practical file sizes depend on available memory and the connection.
 - Keep the original sender tab open for downloads. Reloading or closing it removes its file offers; files cannot be recovered from other recipients or chat history. A recipient can cancel a transfer, and incomplete downloads are discarded from memory.
 - If nobody else is online, messages you send are only delivered when someone who has them
   comes back online alongside the recipient.

@@ -405,9 +405,9 @@ test('server disconnect clears offers, receiver buffers, and pending sender work
   assert.strictEqual(h.clock.count(), 0);
 }));
 
-test('metadata enforces file size, ID, safe filename, and MIME limits', () => withHarness(async (h) => {
-  const { cleanMeta, MAX_BYTES } = h.module;
-  for (const size of [-1, 0.5, Infinity, NaN, MAX_BYTES + 1]) {
+test('metadata validates numeric size, ID, safe filename, and MIME limits', () => withHarness(async (h) => {
+  const { cleanMeta } = h.module;
+  for (const size of [-1, 0.5, Infinity, NaN, Number.MAX_SAFE_INTEGER + 1]) {
     assert.strictEqual(cleanMeta({ id: 'file1', name: 'test.bin', size, type: '' }), null);
   }
   for (const id of ['', '../bad', 'a'.repeat(65), null]) {
@@ -416,10 +416,10 @@ test('metadata enforces file size, ID, safe filename, and MIME limits', () => wi
   for (const name of ['', '   ', null]) {
     assert.strictEqual(cleanMeta({ id: 'file1', name, size: 1, type: '' }), null);
   }
-  const safe = cleanMeta({ id: 'file1', name: '../folder\\name\u0000\u202E.txt', size: MAX_BYTES, type: 'text/plain' });
+  const safe = cleanMeta({ id: 'file1', name: '../folder\\name\u0000\u202E.txt', size: Number.MAX_SAFE_INTEGER, type: 'text/plain' });
   assert(safe);
   assert(!/[\/\\\u0000-\u001f\u202a-\u202e]/.test(safe.name), 'Filename must not contain path/control/bidi characters');
-  assert.strictEqual(safe.size, MAX_BYTES);
+  assert.strictEqual(safe.size, Number.MAX_SAFE_INTEGER);
   assert.strictEqual(safe.type, 'text/plain');
   const long = cleanMeta({ id: 'file1', name: 'x'.repeat(300), size: 0, type: 'invalid\nvalue' });
   assert.strictEqual(long.name.length, 255);

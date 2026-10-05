@@ -7,7 +7,6 @@
 (() => {
   'use strict';
 
-  const MAX_BYTES = 100 * 1024 * 1024;
   const CHUNK_BYTES = 12 * 1024;
   const TIMEOUT_MS = 15000;
   const MAX_SENDERS = 3;
@@ -20,7 +19,7 @@
 
   function cleanMeta(raw) {
     if (!raw || typeof raw !== 'object' || typeof raw.id !== 'string' || !ID.test(raw.id) ||
-        !Number.isSafeInteger(raw.size) || raw.size < 0 || raw.size > MAX_BYTES ||
+        !Number.isSafeInteger(raw.size) || raw.size < 0 ||
         typeof raw.name !== 'string' || !raw.name.trim()) return null;
     let name = raw.name.replace(/[\/\\\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069:*?"<>|]/g, '_')
       .trim().slice(0, 255).replace(/[ .]+$/, '');
@@ -360,5 +359,5 @@
     };
   }
 
-  window.DischordFiles = Object.freeze({ cleanMeta, formatSize, create, MAX_BYTES, CHUNK_BYTES, TIMEOUT_MS });
+  window.DischordFiles = Object.freeze({ cleanMeta, formatSize, create, CHUNK_BYTES, TIMEOUT_MS });
 })();

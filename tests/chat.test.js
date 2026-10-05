@@ -387,7 +387,7 @@ test('malformed file metadata is removed and cannot create a blank message', () 
   const app = createApp();
   for (const file of [null, {}, { id: 'file1', name: 'x', size: -1, type: '' },
     { id: 'invalid id', name: 'x', size: 1, type: '' },
-    { id: 'file1', name: 'x', size: 101 * 1024 * 1024, type: '' }]) {
+    { id: 'file1', name: 'x', size: Number.MAX_SAFE_INTEGER + 1, type: '' }]) {
     const withText = app.api.cleanMsg(app.message({ file }));
     assert(withText && !withText.file);
     assert.strictEqual(app.api.cleanMsg(app.message({ text: '', file })), null);

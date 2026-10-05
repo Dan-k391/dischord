@@ -738,7 +738,7 @@
     for (const f of [...files].slice(0, 4)) {
       if (pending.length >= 4) { toast('Up to 4 files per message.'); break; }
       const meta = window.DischordFiles.cleanMeta({ id: rid(16), name: f.name, size: f.size, type: f.type });
-      if (!meta) { toast('Files must be 100 MB or smaller.'); continue; }
+      if (!meta) { toast('Could not attach that file. Its name or size is invalid.'); continue; }
       pending.push({ meta, file: f });
     }
     renderAttachBar();
