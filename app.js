@@ -1755,12 +1755,12 @@
     const now = stageShape();
     if (!((was.mini && now.full) || (was.full && now.mini)) || !now.rect.width || !now.rect.height || !was.rect.width) return;
     if (morphStage.running) morphStage.running.cancel(); // never stack two
-    stage.classList.add('morph'); // replaces the slide-in from the edge
+    stage.classList.remove('slide'); // shrinking out of the call replaces the slide-in from the edge
     const from = `translate(${was.rect.left - now.rect.left}px, ${was.rect.top - now.rect.top}px) scale(${was.rect.width / now.rect.width}, ${was.rect.height / now.rect.height})`;
     const a = stage.animate([{ transformOrigin: '0 0', transform: from }, { transformOrigin: '0 0', transform: 'none' }],
       { duration: 380, easing: 'cubic-bezier(.2, .85, .25, 1.06)' });
     morphStage.running = a;
-    a.onfinish = a.oncancel = () => { if (morphStage.running === a) { morphStage.running = null; stage.classList.remove('morph'); } };
+    a.onfinish = a.oncancel = () => { if (morphStage.running === a) morphStage.running = null; };
   }
 
   // While I'm in a call but looking elsewhere, keep one stream visible as a small click-to-return preview.
@@ -1778,7 +1778,9 @@
       const pos = store.get('miniPos', null), main = $('main');
       const left = !!(pos && main && main.clientWidth && pos.r > (main.clientWidth - (+store.get('miniW', 320) || 320)) / 2);
       stage.style.setProperty('--mini-from', left ? '-130%' : '130%');
+      stage.classList.add('slide'); // only a preview that appears on its own slides in; see morphStage
     }
+    if (!key) stage.classList.remove('slide');
     stage.classList.toggle('mini', !!key);
     tileEls.forEach((el, k) => el.classList.toggle('mini-main', k === key));
   }

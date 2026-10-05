@@ -585,8 +585,8 @@ body.resizing { cursor: col-resize; user-select: none; }
 body.resizing iframe { pointer-events: none !important; }
 
 /* ---------- v25: call preview while browsing elsewhere, emoji button, ping ---------- */
-#voiceStage.offstage.mini.morph { animation: none; }
-#voiceStage.offstage.mini { visibility: visible; pointer-events: auto; top: auto; left: auto; right: var(--mini-r, 16px); bottom: var(--mini-b, 84px); touch-action: none; transition: transform .2s cubic-bezier(.34, 1.56, .64, 1); animation: miniIn .55s cubic-bezier(.3, 1.4, .5, 1); width: var(--mini-w, 320px); height: calc(var(--mini-w, 320px) * 9 / 16); z-index: 30; border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.6); cursor: pointer; }
+#voiceStage.offstage.mini.slide { animation: miniIn .55s cubic-bezier(.3, 1.4, .5, 1); }
+#voiceStage.offstage.mini { visibility: visible; pointer-events: auto; top: auto; left: auto; right: var(--mini-r, 16px); bottom: var(--mini-b, 84px); touch-action: none; transition: transform .2s cubic-bezier(.34, 1.56, .64, 1); width: var(--mini-w, 320px); height: calc(var(--mini-w, 320px) * 9 / 16); z-index: 30; border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.6); cursor: pointer; }
 #voiceStage.offstage.mini #tiles { inset: 0; padding: 0; display: block; visibility: visible !important; }
 #voiceStage.offstage.mini .tile.mini-main { display: grid !important; position: absolute; left: 0; right: 0; top: 0; bottom: 0; width: auto; height: auto; aspect-ratio: auto; border-radius: 0; box-shadow: none; }
 #voiceStage.offstage.mini .tile.mini-main, #voiceStage.offstage.mini .tile.mini-main .tile-media, #voiceStage.offstage.mini .tile.mini-main .tile-media *,
