@@ -927,6 +927,7 @@
         if (!m.file && pendingImageSaves.delete(imageKey(sid, m))) saveLegacyImage(url);
         const status = el.parentElement.querySelector('.image-preview-status');
         el.onload = () => {
+          el.hidden = false;
           el.parentElement.classList.remove('loading');
           imageErrors.delete(imageMessageKey(sid, cid, mid));
           if (status) status.hidden = true;
@@ -981,8 +982,13 @@
     if (!m) return;
     const url = await getImg(sid, m);
     if (!imageStillLive(sid, m)) return;
-    if (!url) { requestImg(sid, m.img.id, false, cid, mid, true); return; }
-    modal(`<div class="lightbox"><img src="${esc(url)}" alt="${esc(m.file ? m.file.name : 'Shared image')}"></div>
+    if (!url) {
+      requestImg(sid, m.img.id, false, cid, mid, true);
+      if (!m.file) return;
+    }
+    const preview = url ? `<img src="${esc(url)}" alt="${esc(m.file ? m.file.name : 'Shared image')}">`
+      : `<img data-img="${esc(m.img.id)}" data-img-sid="${esc(sid)}" data-img-cid="${esc(cid)}" data-img-mid="${esc(mid)}" alt="${esc(m.file.name)}" hidden><span class="image-preview-status" role="status">Preview unavailable. Download the original to open it.</span>`;
+    modal(`<div class="lightbox">${preview}</div>
       <div class="actions">${m.file ? `<div class="image-download" id="imageDownload" data-image-download="${esc(mid)}" data-image-sid="${esc(sid)}" data-image-cid="${esc(cid)}">${imageDownloadContent(sid, m)}</div>` : '<button class="btn" id="downloadOpenImage">Download image</button>'}<button class="btn primary" data-close>Close</button></div>`, () => {
       if (m.file) $('imageDownload').onclick = (e) => {
         const button = e.target.closest('[data-file-download], [data-file-cancel]');
@@ -993,6 +999,7 @@
       else $('downloadOpenImage').onclick = () => downloadLegacyImage(sid, m.img.id, cid, mid);
     }, true, true);
     $('modal').classList.add('lb');
+    if (!url) paintImages();
   }
 
   function fileDownloadState(sid, m) {
