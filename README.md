@@ -26,7 +26,7 @@ Open [Dischord](https://zjj-2785.github.io/dischord/) in your phone browser and 
 On phones, Enter adds a new line; tap **Send** to send the message. Tap a message's three-dot button for reply and other actions. Press and hold a server or channel for its menu. Camera/microphone access still requires browser permission. Phone browsers that do not provide screen capture can watch shared screens; attempting to share shows an availability message. Large file downloads may be constrained by browser memory and storage.
 
 ## Android app
-Download [Dischord-Android.apk](https://github.com/ZJJ-2785/dischord/releases/download/android-v1.0.1/Dischord-Android.apk) from the [Android v1.0.1 release](https://github.com/ZJJ-2785/dischord/releases/tag/android-v1.0.1). It requires **Android 8.0 or newer** and a current **Android System WebView**. Open the APK on your phone and allow installation from the browser or file manager you used to download it. Install the signed release APK; the unsigned GitHub Actions artifact cannot be installed directly. Version 1.0.1 installs over 1.0.0 with the same signing key, retaining your local profile and settings.
+Download [Dischord-Android.apk](https://github.com/ZJJ-2785/dischord/releases/download/android-v1.0.2/Dischord-Android.apk) from the [Android v1.0.2 release](https://github.com/ZJJ-2785/dischord/releases/tag/android-v1.0.2). It requires **Android 8.0 or newer** and a current **Android System WebView**. Open the APK on your phone and allow installation from the browser or file manager you used to download it. Install the signed release APK; the unsigned GitHub Actions artifact cannot be installed directly. Version 1.0.2 installs over earlier Android releases with the same signing key, retaining your local profile and settings.
 
 The Android app loads the same live website and VDO.Ninja rooms as Windows and web users. Open an existing invite in Dischord, or paste it in the app's join-server form. Chat, replies, reactions, files, image previews, audio boosts, camera and quality controls share the existing protocol. Website updates arrive when the app reloads. Each installation keeps its own identity, settings and preview cache, so join your server invites on first use. An internet connection is required.
 
@@ -58,7 +58,7 @@ java -jar apksigner.jar verify --verbose --print-certs Dischord-Android.apk
 The signing tool prompts for the keystore password. Publish the verified signed APK, never the private key. Android release tags use `android-v<dischordVersionName>` from `android/gradle.properties`.
 
 ## Windows app
-Download the [portable Dischord.exe](https://github.com/ZJJ-2785/dischord/releases/download/desktop-v1.0.4/Dischord.exe), [Windows installer](https://github.com/ZJJ-2785/dischord/releases/download/desktop-v1.0.4/Dischord-Setup.exe), or [Windows ZIP](https://github.com/ZJJ-2785/dischord/releases/download/desktop-v1.0.4/Dischord-Windows.zip). The app requires **Windows 10/11, 64-bit** and includes its Chromium runtime. For the ZIP, extract the whole folder before running `Dischord.exe`.
+Download the [portable Dischord.exe](https://github.com/ZJJ-2785/dischord/releases/download/desktop-v1.0.5/Dischord.exe), [Windows installer](https://github.com/ZJJ-2785/dischord/releases/download/desktop-v1.0.5/Dischord-Setup.exe), or [Windows ZIP](https://github.com/ZJJ-2785/dischord/releases/download/desktop-v1.0.5/Dischord-Windows.zip). The app requires **Windows 10/11, 64-bit** and includes its Chromium runtime. For the ZIP, extract the whole folder before running `Dischord.exe`.
 
 It loads [the live Dischord website](https://zjj-2785.github.io/dischord/) in a native desktop window. Chat, voice, camera, screen sharing, configurable FPS, audio boosts, replies, previews and explicit file downloads use the same web app and VDO.Ninja rooms. Website updates arrive when you open or refresh it. Join the same server invite as your web friends to share channels and communicate.
 
@@ -124,7 +124,7 @@ Add `?as=alice` (or any name) to the URL to get a separate identity and storage 
 
 ## Voice and screen sharing
 - New profiles start at **1080p / 60 FPS**, with **Smoothness** priority and a **Low** own preview to reduce encoding load. Existing saved preferences are preserved.
-- Choose 5, 15, 30 or 60 FPS freely in **User settings → Voice & Video**. Resolution, bitrate, preview and clarity/smoothness remain selectable. Stop and restart an active share after changing its capture settings.
+- Choose 5, 15, 30 or 60 FPS freely in **User settings → Voice & Video**. Resolution, bitrate, preview and clarity/smoothness remain selectable. Changes to resolution, FPS, bitrate and smoothness apply to the active share. The source stays selected and the voice/camera connection remains separate. If live capture changes are unavailable, the Windows app automatically re-captures the same selected screen/window. Browsers may require selecting a source again for a change they cannot apply live; the current share stays running when an update fails.
 - The selected FPS is a capture target. Delivered FPS can be lower when the source is static or the browser, encoder or network is limited. Try a browser tab as the source for smooth motion; enable stream stats to check the actual FPS. [VDO.Ninja explains capture limits here](https://docs.vdo.ninja/guides/how-to-screen-share-in-1080p).
 - Microphone mute and deafen are independent. Audio settings are reapplied when media connects or reconnects; muting one person does not affect the playback volume of people joining later.
 - Set microphone volume from 0–200% in **User settings → Voice & Video**, or right-click yourself for a live adjustment. Right-click another person to set their voice or stream volume from 0–200%. All levels default to 100%; playback preferences affect only what you hear and persist in this browser.
@@ -152,6 +152,7 @@ Add this before `app.js` in `index.html`:
 - `app.js` – all app logic (servers, mesh protocol, rendering, voice)
 - `file-transfer.js` – explicit-download file transfers with bounded chunks and no persistent file cache
 - `image-preview.js` – automatic bounded raster previews without a limit on original image sizes
+- `screen-quality.js` – live capture and encoder settings for the screen-only VDO publisher
 - `desktop/main.js` – native Windows client loading the live website, permissions and screen capture
 - `desktop/desktop-preload.js` – marks the hosted app for its integrated native title bar without exposing Node.js
 - `desktop/capture-picker.*` – explicit desktop screen/window chooser

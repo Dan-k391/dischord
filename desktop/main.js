@@ -11,6 +11,9 @@ const OFFLINE_URL = pathToFileURL(path.join(__dirname, 'offline.html')).href;
 const TITLE_BAR_HEIGHT = 32;
 const pickers = new Map();
 const cancelledCaptureFrames = new WeakSet();
+// A selection belongs only to its current publisher document. It is never saved
+// to disk or offered to a different frame, room, or manually started share.
+let selectedCaptureFrames = new WeakMap();
 const grants = new Set();
 const permissionDialogs = new Map();
 let mainWindow = null;
@@ -60,6 +63,88 @@ function captureFrameLive(pending) {
       trustedFrame(mainWindow.webContents, pending.request.frame.url);
   } catch { return false; }
 }
+function captureStreamId(frame) {
+  try {
+    if (originOf(frame.url) !== MEDIA_ORIGIN) return '';
+    const streamId = new URL(frame.url).searchParams.get('push');
+    return typeof streamId === 'string' && streamId.length > 0 && streamId.length <= 256 ? streamId : '';
+  } catch { return ''; }
+}
+function captureOwner(event) {
+  return appContents(event.sender) && event.senderFrame === event.sender.mainFrame &&
+    !!siteURL(event.senderFrame.url);
+}
+function captureSelection(streamId) {
+  if (!appContents(mainWindow?.webContents)) return null;
+  for (const frame of mainWindow.webContents.mainFrame.framesInSubtree) {
+    const record = selectedCaptureFrames.get(frame);
+    if (record && !frame.isDestroyed() && !frame.detached &&
+      captureStreamId(frame) === streamId && record.streamId === streamId) return { frame, record };
+  }
+  return null;
+}
+function restartDetails(payload) {
+  return typeof payload?.streamId === 'string' && payload.streamId.length > 0 && payload.streamId.length <= 256 &&
+    typeof payload.requestId === 'string' && payload.requestId.length > 0 && payload.requestId.length <= 128;
+}
+function restartFailed(frame, record, error) {
+  // Denial must also suppress VDO's automatic no-audio retry: a quality change
+  // must never unexpectedly replace its source with a newly selected screen.
+  cancelledCaptureFrames.add(frame);
+  selectedCaptureFrames.delete(frame);
+  if (appContents(mainWindow?.webContents)) {
+    mainWindow.webContents.send('dischord:screen-quality-restart-failed', {
+      streamId: record.streamId, requestId: record.restart?.requestId || '', error
+    });
+  }
+}
+ipcMain.handle('dischord:screen-quality-restart', (event, payload) => {
+  if (!captureOwner(event) || !restartDetails(payload)) return { ok: false, error: 'Invalid sharing request.' };
+  const selection = captureSelection(payload.streamId);
+  if (!selection || cancelledCaptureFrames.has(selection.frame)) {
+    return { ok: false, error: 'The previous sharing source is no longer available.' };
+  }
+  if (selection.record.restart) return { ok: false, error: 'A quality change is already in progress.' };
+  selection.record.restart = { requestId: payload.requestId, expiresAt: Date.now() + 15000, consumed: false };
+  return { ok: true };
+});
+ipcMain.handle('dischord:screen-quality-restart-run', async (event, payload) => {
+  if (!captureOwner(event) || !restartDetails(payload)) return { ok: false, error: 'Invalid sharing request.' };
+  const selection = captureSelection(payload.streamId);
+  const restart = selection?.record.restart;
+  if (!restart || restart.requestId !== payload.requestId || restart.consumed || restart.runStarted ||
+    restart.expiresAt < Date.now() || cancelledCaptureFrames.has(selection.frame)) {
+    return { ok: false, error: 'The quality change is no longer armed.' };
+  }
+  restart.runStarted = true;
+  // This is the only script the bridge can run. Preferences are prepared by
+  // Dischord's fixed iframe helper; IPC accepts only an existing request id.
+  // Calling getDisplayMedia synchronously here retains Chromium's activation.
+  const code = `(() => { const bridge = window.__dischordScreenQualityV1;
+    if (!bridge || typeof bridge.runArmedRestart !== 'function') return false;
+    return bridge.runArmedRestart(${JSON.stringify(payload.requestId)}) !== false; })()`;
+  try {
+    const started = await selection.frame.executeJavaScript(code, true);
+    return started === true ? { ok: true } : { ok: false, error: 'The stream quality helper is unavailable.' };
+  } catch {
+    return { ok: false, error: 'The stream quality helper could not restart this share.' };
+  }
+});
+ipcMain.on('dischord:screen-quality-restart-cancel', (event, payload) => {
+  if (!captureOwner(event) || !restartDetails(payload)) return;
+  const selection = captureSelection(payload.streamId);
+  if (selection?.record.restart?.requestId === payload.requestId) {
+    selection.record.restart = null;
+  }
+});
+ipcMain.on('dischord:screen-share-stopped', (event, payload) => {
+  if (!captureOwner(event) || typeof payload?.streamId !== 'string' || payload.streamId.length > 256) return;
+  const selection = captureSelection(payload.streamId);
+  if (selection) {
+    cancelledCaptureFrames.add(selection.frame);
+    selectedCaptureFrames.delete(selection.frame);
+  }
+});
 function finishCapture(pending, source, includeAudio = false) {
   if (pending.finished) return;
   pending.finished = true;
@@ -68,6 +153,12 @@ function finishCapture(pending, source, includeAudio = false) {
   const streams = source && captureFrameLive(pending) ? { video: source } : {};
   if (streams.video && pending.request.audioRequested && includeAudio && process.platform === 'win32') {
     streams.audio = 'loopback';
+  }
+  if (streams.video) {
+    const streamId = captureStreamId(pending.request.frame);
+    if (streamId) selectedCaptureFrames.set(pending.request.frame, {
+      sourceId: source.id, streamId, includeAudio: !!streams.audio, restart: null
+    });
   }
   try { pending.callback(streams); } catch { }
   pending.owner.removeListener('resize', pending.layout);
@@ -130,7 +221,7 @@ ipcMain.handle('dischord:capture-cancel', (event) => {
   return { ok: true };
 });
 
-function chooseCapture(request, callback) {
+async function chooseCapture(request, callback) {
   let frameIsOurs = false;
   try {
     frameIsOurs = appContents(mainWindow?.webContents) && request.frame &&
@@ -139,6 +230,44 @@ function chooseCapture(request, callback) {
   if (!frameIsOurs || !request.videoRequested || pickers.size || cancelledCaptureFrames.has(request.frame)) {
     // Electron also reports this denial to the requesting renderer as an error.
     // Its callback can throw while validating the intentionally empty streams.
+    try { callback({}); } catch { }
+    return;
+  }
+  const selection = selectedCaptureFrames.get(request.frame);
+  if (selection?.restart) {
+    const restart = selection.restart;
+    if (restart.consumed || restart.expiresAt < Date.now() || captureStreamId(request.frame) !== selection.streamId) {
+      restartFailed(request.frame, selection, 'The quality change has expired.');
+      try { callback({}); } catch { }
+      return;
+    }
+    restart.consumed = true;
+    try {
+      const sources = await desktopCapturer.getSources({
+        types: ['screen', 'window'], thumbnailSize: { width: 0, height: 0 }, fetchWindowIcons: false
+      });
+      const live = captureFrameLive({ request }) && selectedCaptureFrames.get(request.frame) === selection &&
+        selection.restart === restart && captureStreamId(request.frame) === selection.streamId;
+      if (!live) { try { callback({}); } catch { } return; }
+      if (restart.expiresAt < Date.now()) throw new Error('The quality change has expired.');
+      const source = sources.find((item) => item.id === selection.sourceId);
+      if (!source) throw new Error('The previously shared window or screen has closed or disconnected.');
+      const streams = { video: source };
+      if (selection.includeAudio && request.audioRequested && process.platform === 'win32') streams.audio = 'loopback';
+      callback(streams);
+      selection.restart = null;
+    } catch (error) {
+      // A stopped/navigated frame cannot use a selection even if enumeration
+      // completed after its explicit Stop action.
+      restartFailed(request.frame, selection, error?.message || 'The sharing source could not be restarted.');
+      try { callback({}); } catch { }
+    }
+    return;
+  }
+  if (selection) {
+    // This document already owns its explicit selection. VDO may retry a failed
+    // native capture without audio; it cannot open another chooser unless the
+    // user first stops the current share and starts a new publisher document.
     try { callback({}); } catch { }
     return;
   }
@@ -259,6 +388,12 @@ function createWindow(destination) {
     }
   });
   mainWindow.webContents.setUserAgent(browserUserAgent);
+  mainWindow.webContents.on('did-start-navigation', (details) => {
+    if (details.isSameDocument) return;
+    if (details.isMainFrame) selectedCaptureFrames = new WeakMap();
+    else if (details.frame) selectedCaptureFrames.delete(details.frame);
+  });
+  mainWindow.webContents.on('render-process-gone', () => { selectedCaptureFrames = new WeakMap(); });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     const invite = siteURL(url);
     if (invite) acceptInvite(invite); else openExternal(url);
@@ -294,7 +429,7 @@ function createWindow(destination) {
   mainWindow.on('close', () => {
     for (const pending of [...pickers.values()]) finishCapture(pending);
   });
-  mainWindow.on('closed', () => { mainWindow = null; grants.clear(); });
+  mainWindow.on('closed', () => { mainWindow = null; grants.clear(); selectedCaptureFrames = new WeakMap(); });
   mainWindow.once('ready-to-show', () => mainWindow?.show());
   mainWindow.loadURL(destination.href).catch(() => {});
 }

@@ -119,19 +119,15 @@ public final class ScreenCaptureBridge {
             case "screen-constraints": {
                 JSONObject video = message.optJSONObject("video");
                 String requestId = message.optString("requestId");
-                if (video == null || requestId.length() > 80) return;
+                if (video == null || !requestId.matches("[A-Za-z0-9_-]{1,80}")) return;
                 runRtc(session, () -> {
                     if (session.stopped || session.capturer == null) return;
-                    JSONObject previous = session.video;
                     try {
-                        session.video = video;
-                        configure(session, true);
+                        configure(session, video, true);
                         JSONObject result = configuration(session, "screen-config");
                         put(result, "requestId", requestId);
                         send(session, result);
                     } catch (RuntimeException exception) {
-                        session.video = previous;
-                        safely(() -> configure(session, true));
                         JSONObject result = configuration(session, "screen-constraints-error");
                         put(result, "requestId", requestId);
                         put(result, "name", "OverconstrainedError");
@@ -231,7 +227,9 @@ public final class ScreenCaptureBridge {
                             configure(session, true);
                             send(session, configuration(session, "screen-config"));
                         } catch (RuntimeException exception) {
-                            fail(session, "NotReadableError", "The shared screen could not be resized.");
+                            // Keep the last working format if a device cannot resize it.
+                            // A rotation must not consume another consent or end the share.
+                            send(session, configuration(session, "screen-config"));
                         }
                     });
                 }
@@ -345,7 +343,10 @@ public final class ScreenCaptureBridge {
     }
 
     private void configure(Session session, boolean resize) {
-        JSONObject video = session.video;
+        configure(session, session.video, resize);
+    }
+
+    private void configure(Session session, JSONObject video, boolean resize) {
         double maxWidth = constraint(video, "width", session.sourceWidth, 2, 8192);
         double maxHeight = constraint(video, "height", session.sourceHeight, 2, 8192);
         // VDO quality presets describe landscape bounds; keep their equivalent quality in portrait.
@@ -355,26 +356,61 @@ public final class ScreenCaptureBridge {
             maxHeight = swap;
         }
         double scale = Math.min(1, Math.min(maxWidth / session.sourceWidth, maxHeight / session.sourceHeight));
-        session.width = Math.max(2, ((int) Math.round(session.sourceWidth * scale)) & ~1);
-        session.height = Math.max(2, ((int) Math.round(session.sourceHeight * scale)) & ~1);
-        session.fps = (int) constraint(video, "frameRate", 60, 1, 60);
-        session.bitrate = (int) constraint(video, "bitrate", 12000, 500, 40000) * 1000;
-        if (resize) session.capturer.changeCaptureFormat(session.width, session.height, session.fps);
-        // ScreenCapturerAndroid ignores its FPS argument; the source and sender enforce the target.
-        session.source.adaptOutputFormat(session.width, session.height, session.fps);
-        updateSender(session);
+        CaptureFormat desired = new CaptureFormat(
+                Math.max(2, ((int) Math.round(session.sourceWidth * scale)) & ~1),
+                Math.max(2, ((int) Math.round(session.sourceHeight * scale)) & ~1),
+                (int) constraint(video, "frameRate", 60, 1, 60),
+                (int) constraint(video, "bitrate", 12000, 500, 40000) * 1000,
+                contentHint(video));
+        CaptureFormat previous = new CaptureFormat(session);
+        boolean resizeDisplay = resize && (desired.width != previous.width || desired.height != previous.height);
+        try {
+            // The pinned capturer resizes the existing VirtualDisplay on Android 12+.
+            // Never stop/start MediaProjection or reuse its consent for quality changes.
+            if (resizeDisplay) session.capturer.changeCaptureFormat(desired.width, desired.height, desired.fps);
+            // ScreenCapturerAndroid ignores its FPS argument; source and sender enforce it.
+            session.source.adaptOutputFormat(desired.width, desired.height, desired.fps);
+            if (!updateSender(session, desired)) throw new IllegalStateException("Capture encoder rejected the settings.");
+        } catch (RuntimeException exception) {
+            if (previous.width > 0 && previous.height > 0) {
+                // A failed update leaves the existing share alive in its previous format.
+                if (resizeDisplay) safely(() -> session.capturer.changeCaptureFormat(previous.width, previous.height, previous.fps));
+                safely(() -> session.source.adaptOutputFormat(previous.width, previous.height, previous.fps));
+                safely(() -> updateSender(session, previous));
+            }
+            throw exception;
+        }
+        session.width = desired.width;
+        session.height = desired.height;
+        session.fps = desired.fps;
+        session.bitrate = desired.bitrate;
+        session.contentHint = desired.contentHint;
+        session.video = video;
+        session.configurationRevision++;
     }
 
-    private void updateSender(Session session) {
-        if (session.sender == null || session.stopped) return;
+    private boolean updateSender(Session session) {
+        return updateSender(session, new CaptureFormat(session));
+    }
+
+    private boolean updateSender(Session session, CaptureFormat format) {
+        if (session.sender == null || session.stopped) return true;
         RtpParameters parameters = session.sender.getParameters();
-        if (parameters.encodings.isEmpty()) return;
-        parameters.degradationPreference = RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE;
+        if (parameters.encodings.isEmpty()) return true;
+        parameters.degradationPreference = "motion".equals(format.contentHint)
+                ? RtpParameters.DegradationPreference.MAINTAIN_FRAMERATE
+                : RtpParameters.DegradationPreference.MAINTAIN_RESOLUTION;
         for (RtpParameters.Encoding encoding : parameters.encodings) {
-            encoding.maxFramerate = session.fps;
-            encoding.maxBitrateBps = Math.max(6000000, session.bitrate);
+            encoding.maxFramerate = format.fps;
+            // Leave enough headroom in this local bridge for VDO's second encode.
+            encoding.maxBitrateBps = Math.max(6000000, format.bitrate);
         }
-        session.sender.setParameters(parameters);
+        return session.sender.setParameters(parameters);
+    }
+
+    private static String contentHint(JSONObject video) {
+        String hint = video == null ? "motion" : video.optString("contentHint", "motion");
+        return "detail".equals(hint) || "text".equals(hint) ? hint : "motion";
     }
 
     private static double constraint(JSONObject video, String key, double fallback, double min, double max) {
@@ -395,6 +431,9 @@ public final class ScreenCaptureBridge {
         put(message, "width", session.width);
         put(message, "height", session.height);
         put(message, "frameRate", session.fps);
+        put(message, "bitrate", session.bitrate / 1000);
+        put(message, "contentHint", session.contentHint);
+        put(message, "revision", session.configurationRevision);
         put(message, "displaySurface", "monitor");
         return message;
     }
@@ -521,6 +560,8 @@ public final class ScreenCaptureBridge {
         int height;
         int fps;
         int bitrate;
+        String contentHint = "motion";
+        int configurationRevision;
         EglBase egl;
         PeerConnectionFactory factory;
         PeerConnection peer;
@@ -535,6 +576,26 @@ public final class ScreenCaptureBridge {
             this.offer = offer;
             this.video = video;
             this.reply = reply;
+        }
+    }
+
+    private static final class CaptureFormat {
+        final int width;
+        final int height;
+        final int fps;
+        final int bitrate;
+        final String contentHint;
+
+        CaptureFormat(Session session) {
+            this(session.width, session.height, session.fps, session.bitrate, session.contentHint);
+        }
+
+        CaptureFormat(int width, int height, int fps, int bitrate, String contentHint) {
+            this.width = width;
+            this.height = height;
+            this.fps = fps;
+            this.bitrate = bitrate;
+            this.contentHint = contentHint;
         }
     }
 }

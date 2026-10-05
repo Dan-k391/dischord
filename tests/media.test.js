@@ -23,6 +23,7 @@ function eventTarget(target = {}) {
   target.dispatch = (type, event = {}) => {
     for (const listener of [...(listeners.get(type) || [])]) listener({ target, ...event });
   };
+  target.dispatchEvent = (event) => { target.dispatch(event.type, event); return true; };
   return target;
 }
 
@@ -118,6 +119,7 @@ function createElement(tag = 'div') {
 
 function createApp({ micOn = true, deaf = false, av = {}, legacyAv = false, vol = {} } = {}) {
   const clock = createClock(), nodes = new Map(), frames = [];
+  let randomSequence = 0;
   const me = { id: 'alice', name: 'Alice', color: '#5865f2' };
   const server = { id: 'testserver', key: 'secret', name: 'Test server', v: 1,
     channels: [{ id: 'lounge', name: 'Lounge', type: 'voice' }, { id: 'games', name: 'Games', type: 'voice' }] };
@@ -127,17 +129,18 @@ function createApp({ micOn = true, deaf = false, av = {}, legacyAv = false, vol 
     getElementById(id) { if (!nodes.has(id)) nodes.set(id, createElement()); return nodes.get(id); },
     createElement(tag) { const el = createElement(tag); if (tag === 'iframe') frames.push(el); return el; },
     querySelectorAll: () => [], querySelector: () => null,
-    body: createElement('body'), hidden: false, fullscreenElement: null,
+    body: createElement('body'), documentElement: createElement('html'), hidden: false, fullscreenElement: null,
   });
   const window = eventTarget({ innerHeight: 800, innerWidth: 1200 });
   const DateMock = class extends Date { constructor(...args) { super(...(args.length ? args : [clock.now()])); } static now() { return clock.now(); } };
   const context = vm.createContext({
     window, document, console, URL, URLSearchParams, Date: DateMock,
-    location: { search: '', hash: '', pathname: '/', protocol: 'https:', hostname: 'localhost' },
+    location: { search: '', hash: '', pathname: '/', protocol: 'https:', hostname: 'localhost', href: 'https://localhost/' },
+    CustomEvent: class { constructor(type, options = {}) { this.type = type; this.detail = options.detail; } },
     history: { replaceState() {} }, navigator: {},
     localStorage: { getItem: (key) => stored.has(key) ? stored.get(key) : null,
       setItem: (key, value) => stored.set(key, value), removeItem: (key) => stored.delete(key) },
-    crypto: { getRandomValues(values) { for (let i = 0; i < values.length; i++) values[i] = frames.length * 7 + i; return values; } },
+    crypto: { getRandomValues(values) { const seed = ++randomSequence; for (let i = 0; i < values.length; i++) values[i] = seed * 17 + frames.length * 7 + i; return values; } },
     indexedDB: { open: () => ({}) },
     btoa: (text) => Buffer.from(text, 'binary').toString('base64'),
     atob: (text) => Buffer.from(text, 'base64').toString('binary'),
@@ -161,7 +164,7 @@ function createApp({ micOn = true, deaf = false, av = {}, legacyAv = false, vol 
     showVoice = () => {};
     window.mediaTest = {
       joinVoice, leaveVoice, toggleMic, toggleDeaf, toggleCam,
-      toggleShare, stopShare, voiceUrl, screenUrl, myState, applyVolumes, setVol,
+      toggleShare, stopShare, voiceUrl, screenUrl, myState, applyVolumes, setVol, saveAv,
       settingsModal, closeModal, userMenu,
       setMicGain: (value) => setMicGain(value),
       get voice() { return voice; }, get av() { return av; },
@@ -172,10 +175,11 @@ function createApp({ micOn = true, deaf = false, av = {}, legacyAv = false, vol 
   `;
   const source = appSource.replace(boot, '').replace(/\}\)\(\);\s*$/, hooks + '\n})();');
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'file-transfer.js'), 'utf8'), context, { filename: 'file-transfer.js' });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'screen-quality.js'), 'utf8'), context, { filename: 'screen-quality.js' });
   vm.runInContext(source, context, { filename: 'app.js' });
   const api = window.mediaTest;
   const emit = (frame, data, origin = 'https://vdo.ninja') => window.dispatch('message', { source: frame.contentWindow, data, origin });
-  return { api, clock, document, frames, emit, stored, server,
+  return { api, clock, document, window, frames, emit, stored, server,
     node: (id) => document.getElementById(id),
     join(camera = false) { api.joinVoice(server.id, 'lounge', camera); clock.advance(camera ? 500 : 0); return api.voice.iframe; },
     addPeer(id, stream = 'stream' + id, screen = null) {
@@ -521,10 +525,17 @@ test('screen capture started by its iframe on a fallback host still clears the p
   const app = createApp();
   app.join();
   app.api.toggleShare();
-  const timeout = app.api.voice.ssTimer;
-  app.emit(app.api.voice.ssFrame, { action: 'screen-share-state', value: true }, 'https://cdn-backup.vdo.ninja');
+  const timeout = app.api.voice.ssTimer, screen = app.api.voice.ssFrame;
+  app.emit(screen, { action: 'screen-share-state', value: true }, 'https://cdn-backup.vdo.ninja');
   assert.strictEqual(app.api.voice.ss, true);
   assert(!app.clock.pending(timeout));
+  app.api.saveAv({ ssBr: 16000 });
+  const config = screenQualityConfig(screen);
+  assert.strictEqual(lastMessage(screen, 'function')._origin, 'https://cdn-backup.vdo.ninja', 'Hot changes must target the actual trusted fallback publisher');
+  app.emit(screen, { dischordScreenQuality: { requestId: config.requestId, ok: true, active: true, mode: 'hot' } }, 'https://untrusted.example');
+  assert.strictEqual(app.api.myState().sb, 12000, 'An unrelated origin must not acknowledge a fallback update');
+  app.emit(screen, { dischordScreenQuality: { requestId: config.requestId, ok: true, active: true, mode: 'hot' } }, 'https://cdn-backup.vdo.ninja');
+  assert.strictEqual(app.api.myState().sb, 16000);
 });
 
 test('per-user mute preserves the global playback default for a peer joining later', () => {
@@ -825,6 +836,97 @@ test('an active share advertises its captured settings until sharing restarts', 
   assert.strictEqual(app.api.voice.ssSettings.ssBr, 16000);
   assert.strictEqual(new URL(app.api.voice.ssFrame.src).searchParams.get('screensharefps'), '60');
   assert.strictEqual(app.api.myState().sb, 16000);
+});
+
+function screenQualityConfig(frame) {
+  const message = [...frame.messages].reverse().find((entry) => entry.function === 'eval' && entry.value.includes('__dischordScreenQualityV1'));
+  assert(message, 'Quality changes must reach the active screen publisher');
+  const config = message.value.match(/\)\((\{[\s\S]*\})\);$/);
+  assert(config, 'The fixed quality adapter must receive a JSON configuration');
+  return JSON.parse(config[1]);
+}
+
+test('live screen settings commit only after the active publisher acknowledges them', () => {
+  const app = createApp({ av: { ssBr: 8000, ssFps: 30 } }), camera = app.join(true);
+  app.api.toggleShare();
+  const screen = app.api.voice.ssFrame, initialUrl = screen.src;
+  app.emit(screen, { action: 'screen-share-state', value: true });
+  const cameraCommands = camera.messages.length;
+  app.api.saveAv({ ssQ: '1440', ssFps: 60, ssBr: 16000, ssHint: 'detail' });
+  const config = screenQualityConfig(screen);
+  assert.strictEqual(config.operation, 'apply');
+  assert.strictEqual(config.ssFps, 60);
+  assert.strictEqual(app.api.myState().sb, 8000, 'Unacknowledged bitrate must not be advertised');
+  assert.strictEqual(screen.src, initialUrl, 'Live controls must preserve the existing capture iframe');
+  assert.strictEqual(camera.messages.length, cameraCommands, 'Screen quality must not interrupt camera/microphone');
+  app.emit(camera, { dischordScreenQuality: { requestId: config.requestId, ok: true } });
+  app.emit(screen, { dischordScreenQuality: { requestId: config.requestId, ok: true } }, 'https://untrusted.example');
+  assert.strictEqual(app.api.myState().sb, 8000, 'Unrelated frames/origins cannot acknowledge an update');
+  app.emit(screen, { dischordScreenQuality: { requestId: config.requestId, ok: true, active: true, mode: 'hot' } });
+  assert.strictEqual(app.api.myState().sb, 16000);
+  assert.strictEqual(app.api.voice.ssSettings.ssFps, 60);
+  assert.strictEqual(app.api.voice.ssSettings.ssQ, '1440');
+  assert.strictEqual(app.api.voice.iframe, camera);
+  assert.strictEqual(app.api.voice.ssFrame, screen);
+});
+
+test('rapid quality changes serialize requests and ignore acknowledgements for superseded requests', () => {
+  const app = createApp(); app.join(); app.api.toggleShare();
+  const screen = app.api.voice.ssFrame;
+  app.emit(screen, { action: 'screen-share-state', value: true });
+  app.api.saveAv({ ssBr: 16000 });
+  const first = screenQualityConfig(screen), count = screen.messages.length;
+  app.api.saveAv({ ssBr: 20000, ssFps: 30 });
+  assert.strictEqual(screen.messages.length, count, 'Only one update may be in flight');
+  app.emit(screen, { dischordScreenQuality: { requestId: first.requestId, ok: true, active: true, mode: 'hot' } });
+  const second = screenQualityConfig(screen);
+  assert.notStrictEqual(second.requestId, first.requestId);
+  assert.strictEqual(second.ssBr, 20000);
+  assert.strictEqual(second.ssFps, 30);
+  assert.strictEqual(app.api.myState().sb, 16000);
+  app.emit(screen, { dischordScreenQuality: { requestId: first.requestId, ok: false, active: false } });
+  assert.strictEqual(app.api.voice.ssFrame, screen, 'A stale acknowledgement must not stop the newer request');
+  app.emit(screen, { dischordScreenQuality: { requestId: second.requestId, ok: true, active: true, mode: 'hot' } });
+  assert.strictEqual(app.api.myState().sb, 20000);
+  assert.strictEqual(app.api.voice.ssSettings.ssFps, 30);
+});
+
+test('desktop fallback prepares a same-source restart before asking the host to run it', () => {
+  const app = createApp(); app.document.documentElement.classList.add('desktop-client');
+  const events = [];
+  for (const type of ['dischord-screen-quality-restart', 'dischord-screen-quality-restart-run']) {
+    app.window.addEventListener(type, (event) => events.push({ type, detail: event.detail }));
+  }
+  app.join(); app.api.toggleShare(); const screen = app.api.voice.ssFrame;
+  app.emit(screen, { action: 'screen-share-state', value: true });
+  app.api.saveAv({ ssQ: '2160' }); const config = screenQualityConfig(screen);
+  app.emit(screen, { dischordScreenQuality: { requestId: config.requestId, ok: false, active: true, needsRestart: true } });
+  assert.strictEqual(events[0].type, 'dischord-screen-quality-restart');
+  app.window.dispatchEvent({ type: 'dischord-screen-quality-restart-ready', detail: { streamId: app.api.voice.ssVs, requestId: config.requestId, ok: true } });
+  assert.strictEqual(screenQualityConfig(screen).operation, 'prepareRestart');
+  assert.strictEqual(events.length, 1, 'Native capture may start only after the iframe prepares its restart');
+  app.emit(screen, { dischordScreenQuality: { requestId: config.requestId, ok: true, prepared: true, mode: 'prepared', active: true } });
+  assert.strictEqual(events[1].type, 'dischord-screen-quality-restart-run');
+  app.emit(screen, { action: 'screen-share-state', value: false });
+  assert.strictEqual(app.api.voice.ssFrame, screen, 'A temporary capture-end notification during restart must await its result');
+  app.emit(screen, { dischordScreenQuality: { requestId: config.requestId, ok: false, active: true, error: 'The encoder refused the replacement.' } });
+  assert.strictEqual(app.api.voice.ssFrame, screen, 'Failed replacement with a live original must retain sharing');
+  assert.strictEqual(app.api.voice.ssSettings.ssQ, '1080');
+});
+
+test('camera rejoin preserves a pending quality request and manual stop ignores its late result', () => {
+  const app = createApp(); app.join(); app.api.toggleShare(); const screen = app.api.voice.ssFrame;
+  app.emit(screen, { action: 'screen-share-state', value: true });
+  app.api.saveAv({ ssFps: 30 }); const config = screenQualityConfig(screen);
+  app.api.toggleCam(); app.clock.advance(500);
+  app.emit(screen, { dischordScreenQuality: { requestId: config.requestId, ok: true, active: true, mode: 'hot' } });
+  assert.strictEqual(app.api.voice.ssSettings.ssFps, 30);
+  app.api.saveAv({ ssBr: 20000 }); const stoppedConfig = screenQualityConfig(screen);
+  app.api.stopShare();
+  app.emit(screen, { dischordScreenQuality: { requestId: stoppedConfig.requestId, ok: true, active: true, mode: 'restart' } });
+  app.clock.advance(45000);
+  assert.strictEqual(app.api.voice.ssFrame, null, 'A late result must never resurrect a manually stopped capture');
+  assert.strictEqual(app.api.voice.ss, false);
 });
 
 test('stopping a screen share clears its picker timeout', () => {

@@ -31,6 +31,7 @@ jobs:
           node --check app.js
           node --check file-transfer.js
           node --check image-preview.js
+          node --check screen-quality.js
           node tests/media.test.js
           node tests/files.test.js
           node tests/chat.test.js
@@ -38,7 +39,7 @@ jobs:
       - name: Prepare static site
         run: |
           mkdir _site
-          cp index.html app.js file-transfer.js image-preview.js style.css icon.svg _site/
+          cp index.html app.js file-transfer.js image-preview.js screen-quality.js style.css icon.svg _site/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

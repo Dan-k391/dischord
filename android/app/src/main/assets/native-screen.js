@@ -60,17 +60,24 @@
       applyConstraints: {
         configurable: true,
         value: constraints => {
-          if (session.stopped) return Promise.reject(exception('Screen sharing has ended.', 'InvalidStateError'));
-          const video = { ...session.video, ...(constraints || {}) };
-          const requestId = String(++sequence);
-          return new Promise((resolve, reject) => {
-            const timer = setTimeout(() => {
-              session.requests.delete(requestId);
-              reject(exception('The screen-capture setting could not be applied.'));
-            }, 10000);
-            session.requests.set(requestId, { resolve: () => { session.video = video; resolve(); }, reject, timer });
-            send(session, 'screen-constraints', { video, requestId });
+          // VDO and the app can both change capture settings. Build each request from
+          // the latest acknowledged configuration rather than overlapping stale copies.
+          const requested = { ...(constraints || {}) };
+          const result = session.constraintQueue.then(() => {
+            if (session.stopped) throw exception('Screen sharing has ended.', 'InvalidStateError');
+            const video = { ...session.video, ...requested };
+            const requestId = String(++sequence);
+            return new Promise((resolve, reject) => {
+              const timer = setTimeout(() => {
+                session.requests.delete(requestId);
+                reject(exception('The screen-capture setting could not be applied.'));
+              }, 10000);
+              session.requests.set(requestId, { resolve: () => { session.video = video; resolve(); }, reject, timer });
+              send(session, 'screen-constraints', { video, requestId });
+            });
           });
+          session.constraintQueue = result.catch(() => {});
+          return result;
         }
       }
     });
@@ -99,9 +106,15 @@
         if (session.peer.remoteDescription) await session.peer.addIceCandidate(message.candidate);
         else if (session.candidates.length < 128) session.candidates.push(message.candidate);
       } else if (message.type === 'screen-config') {
-        session.settings = {
-          width: message.width, height: message.height, frameRate: message.frameRate, displaySurface: 'monitor'
-        };
+        const revision = Number(message.revision) || 0;
+        // A display rotation or startup callback may precede an in-flight update.
+        // Never let its delayed acknowledgment replace newer reported settings.
+        if (revision >= session.configRevision) {
+          session.configRevision = revision;
+          session.settings = {
+            width: message.width, height: message.height, frameRate: message.frameRate, displaySurface: 'monitor'
+          };
+        }
         const pending = session.requests.get(message.requestId);
         if (pending) {
           clearTimeout(pending.timer);
@@ -137,14 +150,17 @@
       if (vp8.length) transceiver.setCodecPreferences(vp8);
     }
     const video = typeof constraints.video === 'object' && constraints.video ? { ...constraints.video } : {};
-    video.bitrate = Number(new URLSearchParams(location.search).get('outboundvideobitrate')) || 12000;
+    const query = new URLSearchParams(location.search);
+    video.bitrate = Number(query.get('outboundvideobitrate')) || 12000;
+    video.contentHint = query.get('screensharecontenthint') || query.get('contenthint') || 'motion';
     const id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}_${Math.random().toString(36).slice(2)}`;
     let resolve;
     let reject;
     const result = new Promise((success, failure) => { resolve = success; reject = failure; });
     const session = {
       id, peer, video, resolve, reject, stopped: false, resolved: false, track: null,
-      originalStop: null, requests: new Map(), candidates: [], outboundCandidates: [], settings: {}, sentStart: false
+      originalStop: null, requests: new Map(), candidates: [], outboundCandidates: [], settings: {}, sentStart: false,
+      configRevision: 0, constraintQueue: Promise.resolve()
     };
     active = session;
     session.timer = setTimeout(() => end(session, true, exception('Screen sharing timed out. Please try again.')), 120000);

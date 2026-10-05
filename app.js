@@ -54,6 +54,9 @@
   const mbps = (k) => (k >= 1000 ? (k / 1000).toFixed(k % 1000 ? 1 : 0) + ' Mbps' : k + ' kbps');
   const CAM_Q = { '360': 2, '720': 1, '1080': 0, '1440': -3, '2160': -2 };
   const SS_Q = { '720': 1, '1080': 0, '1440': -3, '2160': -2, source: -1 };
+  const SHARE_KEYS = ['ssQ', 'ssFps', 'ssBr', 'ssHint'];
+  const shareSettings = (settings) => Object.fromEntries(SHARE_KEYS.map((key) => [key, settings[key]]));
+  const sameShareSettings = (a, b) => !!a && !!b && SHARE_KEYS.every((key) => String(a[key]) === String(b[key]));
 
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1254,7 +1257,7 @@
     const s = server(sid), c = channel(s, cid);
     if (!s || !c || c.type !== 'voice') return;
     const rejoin = voice && voice.sid === sid && voice.cid === cid;
-    const keepShare = rejoin ? { ssFrame: voice.ssFrame, ss: voice.ss, ssVs: voice.ssVs, ssTimer: voice.ssTimer, ssSettings: voice.ssSettings } : null;
+    const keepShare = rejoin ? { ssFrame: voice.ssFrame, ss: voice.ss, ssVs: voice.ssVs, ssTimer: voice.ssTimer, ssSettings: voice.ssSettings, ssQuality: voice.ssQuality } : null;
     if (voice) { dropVoiceFrame(); if (!rejoin) stopShare(true); }
     const vs = 'dc' + me.id.slice(0, 10) + rid(5);
     const f = document.createElement('iframe');
@@ -1453,6 +1456,7 @@
     f.src = screenUrl(ssVs);
     $('pubHost').appendChild(f);
     voice.ssFrame = f; voice.ssVs = ssVs; voice.ss = false; voice.ssSettings = { ...av };
+    voice.ssQuality = { frame: f, streamId: ssVs, origin: new URL(VDO, location.href).origin, desired: shareSettings(av), pending: null, closed: false };
     clearTimeout(voice.ssTimer);
     voice.ssTimer = setTimeout(() => { if (voice && voice.ssFrame === f && !voice.ss) stopShare(true); }, 120000);
     renderControls();
@@ -1461,17 +1465,122 @@
   function stopShare(silent) {
     if (!voice || !voice.ssFrame) return;
     const f = voice.ssFrame;
+    const quality = voice.ssQuality;
+    if (quality) {
+      quality.closed = true;
+      if (quality.pending) {
+        clearTimeout(quality.pending.timer);
+        cancelShareRestart(quality, quality.pending.requestId);
+        quality.pending = null;
+      }
+    }
+    window.dispatchEvent(new CustomEvent('dischord-screen-share-stopped', { detail: { streamId: voice.ssVs } }));
     clearTimeout(voice.ssTimer);
     voice.ssTimer = null;
     try { f.contentWindow.postMessage({ close: true }, '*'); } catch { }
     setTimeout(() => f.remove(), 300);
-    voice.ssFrame = null; voice.ss = false; voice.ssSettings = null;
+    voice.ssFrame = null; voice.ss = false; voice.ssSettings = null; voice.ssQuality = null;
     if (!silent) { broadcastState(); renderControls(); renderPresence(); }
   }
   window.addEventListener('dischord-screen-share-cancelled', (e) => {
     if (voice && voice.ssFrame && !voice.ss && e.detail?.streamId === voice.ssVs) stopShare();
   });
   window.addEventListener('dischord-android-call-stop', () => leaveVoice());
+
+  function currentShareQuality(state) {
+    return !state.closed && voice && voice.ssFrame === state.frame && voice.ssQuality === state;
+  }
+  function screenPublisherOrigin(origin) {
+    try {
+      const configured = new URL(VDO, location.href), candidate = new URL(origin);
+      return candidate.origin === configured.origin || (configured.hostname === 'vdo.ninja' && candidate.protocol === 'https:' && candidate.hostname.endsWith('.vdo.ninja'));
+    } catch { return false; }
+  }
+  function cancelShareRestart(state, requestId) {
+    window.dispatchEvent(new CustomEvent('dischord-screen-quality-restart-cancel', { detail: { streamId: state.streamId, requestId } }));
+  }
+  function sendShareQuality(state, pending, operation) {
+    if (!currentShareQuality(state) || state.pending !== pending) return;
+    const bridge = window.DischordScreenQuality && window.DischordScreenQuality.bridge;
+    if (typeof bridge !== 'function') return finishShareQuality(state, { ok: false, error: 'Refresh Dischord to load screen-share controls.' });
+    pending.operation = operation;
+    clearTimeout(pending.timer);
+    pending.timer = setTimeout(() => {
+      if (!currentShareQuality(state) || state.pending !== pending) return;
+      finishShareQuality(state, { ok: false, error: 'The screen-share update did not finish. Your current share has been kept.' });
+    }, 45000);
+    const config = { ...pending.settings, requestId: pending.requestId, operation };
+    try {
+      state.frame.contentWindow.postMessage({ function: 'eval', value: '(' + bridge.toString() + ')(' + JSON.stringify(config) + ');' }, state.origin);
+    } catch { finishShareQuality(state, { ok: false, error: 'Could not reach the active screen share.' }); }
+  }
+  function updateScreenShareQuality() {
+    if (!voice || !voice.ssFrame || !voice.ssQuality) return;
+    const state = voice.ssQuality;
+    state.desired = shareSettings(av);
+    if (!voice.ss || state.pending || state.closed || sameShareSettings(state.desired, voice.ssSettings)) return;
+    const pending = { requestId: rid(16), settings: { ...state.desired }, operation: 'apply', timer: null, stoppedDuringRestart: false };
+    state.pending = pending;
+    sendShareQuality(state, pending, 'apply');
+  }
+  function finishShareQuality(state, result) {
+    if (!currentShareQuality(state) || !state.pending) return;
+    const pending = state.pending;
+    if (result.prepared && result.ok && pending.operation === 'prepareRestart') {
+      pending.operation = 'restart';
+      window.dispatchEvent(new CustomEvent('dischord-screen-quality-restart-run', { detail: { streamId: state.streamId, requestId: pending.requestId } }));
+      return;
+    }
+    clearTimeout(pending.timer);
+    cancelShareRestart(state, pending.requestId);
+    const superseded = !sameShareSettings(state.desired, pending.settings);
+    if (!result.ok && result.needsRestart && pending.operation === 'apply' && !superseded && document.documentElement.classList.contains('desktop-client')) {
+      pending.operation = 'arming';
+      pending.timer = setTimeout(() => {
+        if (currentShareQuality(state) && state.pending === pending) finishShareQuality(state, {
+          ok: false, error: 'Update the Windows app to restart sharing with the same source automatically.'
+        });
+      }, 3500);
+      window.dispatchEvent(new CustomEvent('dischord-screen-quality-restart', { detail: { streamId: state.streamId, requestId: pending.requestId } }));
+      return;
+    }
+    state.pending = null;
+    if (result.ok) {
+      voice.ssSettings = { ...voice.ssSettings, ...pending.settings };
+      broadcastState();
+      renderStage();
+      if (!superseded) toast(result.mode === 'restart' ? 'Screen share restarted with the same source.' : 'Screen share settings updated.');
+    } else if (result.active === false || (pending.stoppedDuringRestart && result.active !== true)) {
+      stopShare();
+      if (!superseded) toast(result.error || 'The shared source is no longer available.', 7000);
+    } else if (!superseded) toast(result.needsRestart && !document.documentElement.classList.contains('desktop-client')
+      ? (document.documentElement.classList.contains('android-client') ? 'This phone could not apply that setting. Your current share is still running.'
+        : 'This browser needs you to choose the source again for that setting. Your current share is still running.')
+      : result.error || 'This setting could not be applied. Your current share is still running.', 7000);
+    if (superseded && currentShareQuality(state)) updateScreenShareQuality();
+  }
+  window.addEventListener('dischord-screen-quality-restart-ready', (event) => {
+    const state = voice && voice.ssQuality, pending = state && state.pending, detail = event.detail;
+    if (!state || !pending || pending.operation !== 'arming' || detail?.streamId !== state.streamId || detail.requestId !== pending.requestId) return;
+    if (!detail.ok) return finishShareQuality(state, { ok: false, error: detail.error || 'The previous screen or window is no longer available.' });
+    if (!sameShareSettings(state.desired, pending.settings)) {
+      clearTimeout(pending.timer); cancelShareRestart(state, pending.requestId); state.pending = null;
+      return updateScreenShareQuality();
+    }
+    sendShareQuality(state, pending, 'prepareRestart');
+  });
+  window.addEventListener('dischord-screen-quality-restart-ran', (event) => {
+    const state = voice && voice.ssQuality, pending = state && state.pending, detail = event.detail;
+    if (state && pending && pending.operation === 'restart' && detail?.streamId === state.streamId && detail.requestId === pending.requestId && detail.ok === false) {
+      finishShareQuality(state, { ok: false, error: detail.error || 'Could not restart sharing with the previous source.' });
+    }
+  });
+  window.addEventListener('dischord-screen-quality-restart-failed', (event) => {
+    const state = voice && voice.ssQuality, pending = state && state.pending, detail = event.detail;
+    if (state && pending && detail?.streamId === state.streamId && detail.requestId === pending.requestId) {
+      finishShareQuality(state, { ok: false, error: detail.error || 'Could not reuse the selected screen or window.' });
+    }
+  });
   function showVoice() { if (voice) { if (cur.sid !== voice.sid) selectServer(voice.sid); selectChannel(voice.cid); } }
 
   let audioCtx;
@@ -1535,11 +1644,20 @@
       return;
     }
     if (voice && voice.ssFrame && e.source === voice.ssFrame.contentWindow) {
+      const state = voice.ssQuality;
+      if (d.dischordScreenQuality && state && state.pending && d.dischordScreenQuality.requestId === state.pending.requestId && e.origin === state.origin) {
+        finishShareQuality(state, d.dischordScreenQuality);
+        return;
+      }
       if (d.action === 'screen-share-state') {
         if (d.value) {
           clearTimeout(voice.ssTimer); voice.ssTimer = null;
+          if (state && screenPublisherOrigin(e.origin)) state.origin = e.origin;
+          if (state && state.pending) state.pending.stoppedDuringRestart = false;
           voice.ss = true; broadcastState(); renderControls(); renderPresence();
+          updateScreenShareQuality();
         }
+        else if (state && state.pending && state.pending.operation === 'restart') state.pending.stoppedDuringRestart = true;
         else stopShare(); // cancelled the picker, or hit Chrome's "Stop sharing"
       }
       if (d.stats) onSendStats(true, d.stats);
@@ -2299,7 +2417,11 @@
   const CAM_RES = [['360', '360p'], ['720', '720p'], ['1080', '1080p'], ['1440', '1440p'], ['2160', '4K']];
   const SS_RES = [['source', 'Source (native)'], ['2160', '4K'], ['1440', '1440p'], ['1080', '1080p'], ['720', '720p']];
   const fpsOpts = (list) => list.map((f) => [f, f + ' fps']);
-  function saveAv(patch) { av = { ...av, ...patch }; store.set('av', av); broadcastState(); }
+  function saveAv(patch) {
+    const shareChanged = SHARE_KEYS.some((key) => key in patch && String(patch[key]) !== String(av[key]));
+    av = { ...av, ...patch }; store.set('av', av); broadcastState();
+    if (shareChanged) updateScreenShareQuality();
+  }
   function deviceMenu(anchor, kind, devicesOnly = false) { // kind: 'audioinput' | 'audiooutput' | 'videoinput'
     closeCtx();
     const info = DEV[kind];
@@ -2390,12 +2512,12 @@
     if (voice) h += ctxItem('share', 'screen', sharing ? 'Stop sharing' : 'Share your screen', sharing ? 'danger' : '');
     else h += '<div class="ctx-note">Join a voice channel to share your screen.</div>';
     h += '<div class="ctx-sep"></div>' + ctxSelect('ssQ', 'Resolution', av.ssQ, SS_RES) + ctxSelect('ssFps', 'Frame rate', av.ssFps, fpsOpts([5, 15, 30, 60])) +
-      ctxSelect('ssHint', 'Optimize for', av.ssHint, [['motion', 'Smoothness'], ['detail', 'Clarity']]);
-    if (sharing) h += '<div class="ctx-note">Changes apply the next time you share.</div>';
+      ctxSelect('ssBr', 'Bitrate', av.ssBr, SS_BRS.map((k) => [k, mbps(k)])) + ctxSelect('ssHint', 'Optimize for', av.ssHint, [['motion', 'Smoothness'], ['detail', 'Clarity']]);
+    if (sharing) h += '<div class="ctx-note">Changes apply to your current share.</div>';
     h += ctxItem('avset', 'gear', 'Voice & video settings');
     openAnchored(anchor, h, (menu) => {
       menu.querySelectorAll('[data-sel]').forEach((sel) => {
-        sel.onchange = () => saveAv({ [sel.dataset.sel]: sel.dataset.sel === 'ssFps' ? +sel.value : sel.value });
+        sel.onchange = () => saveAv({ [sel.dataset.sel]: ['ssFps', 'ssBr'].includes(sel.dataset.sel) ? +sel.value : sel.value });
       });
       menu.onclick = (e) => {
         const b = e.target.closest('[data-act]');
@@ -3144,7 +3266,7 @@
           <div style="grid-column: span 3"><label>Max download per stream</label><select id="aRecv">${opt(0, av.recvCap, 'No limit (use each sender\'s setting)')}${VIEW_BRS.map((k) => opt(k, av.recvCap, 'Up to ' + mbps(k))).join('')}</select></div>
         </div>
         <label class="inline-check"><input type="checkbox" id="aStats" ${av.showStats ? 'checked' : ''}> Always show stream stats (resolution · fps · bitrate · codec) on video tiles</label>
-        <p class="hint">Higher bitrate improves detail, and every viewer needs that much upload bandwidth. Change any stream's quality from its tile. ${voice ? 'Camera changes reconnect your call. Screen share changes apply after you stop and share again.' : ''}</p>
+        <p class="hint">Higher bitrate improves detail, and every viewer needs that much upload bandwidth. Change any stream's quality from its tile. ${voice ? 'Camera changes reconnect your call. Screen share changes apply to your current share.' : ''}</p>
         ${voice ? '<button class="btn" id="aDevices">Choose camera…</button><p class="hint">Use the small arrows beside the microphone and headphones buttons to choose your input and output devices.</p>' : '<p class="hint">Join a voice channel to pick your camera. Use the small arrows beside the microphone and headphones buttons to choose your input and output devices.</p>'}
       </div>
       </div>
@@ -3191,9 +3313,8 @@
           ssQ: $('aSsQ').value, ssFps: +$('aSsFps').value, ssBr: +$('aSsBr').value, ssHint: $('aSsHint').value, recvCap: +$('aRecv').value, codec: $('aCodec').value, selfPreview: $('aSelf').value, showStats: $('aStats').checked, v8: 1, v9: 1,
         };
         const sendKeys = ['camQ', 'camFps', 'camBr'];
-        const shareKeys = ['ssQ', 'ssFps', 'ssBr', 'ssHint'];
         const viewKeys = ['codec', 'selfPreview'];
-        const shareChanged = shareKeys.some((k) => String(next[k]) !== String(av[k]));
+        const shareChanged = SHARE_KEYS.some((k) => String(next[k]) !== String(av[k]));
         const viewChanged = viewKeys.some((k) => String(next[k]) !== String(av[k]));
         const avChanged = sendKeys.some((k) => String(next[k]) !== String(av[k]));
         av = next;
@@ -3206,7 +3327,7 @@
         }
         if (voice && (avChanged || nameChanged)) joinVoice(voice.sid, voice.cid, voice.cam);
         else if (voice) applyVolumes(true);
-        if (voice && shareChanged && voice.ssFrame) toast('Stop sharing, then share again to apply the new resolution, FPS, bitrate and smoothness settings.', 8000);
+        if (voice && shareChanged && voice.ssFrame) updateScreenShareQuality();
         if (viewChanged) { tileEls.forEach((el) => { el.dataset.vs = '__reload'; }); } // reconnect viewers with the new codec
         render();
         renderStage();
