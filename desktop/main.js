@@ -198,6 +198,10 @@ function createWindow(destination) {
   retryDestination = destination;
   queuedInvite = null;
   const ses = session.fromPartition('persist:dischord');
+  // VDO's Electron detection expects its own Node IPC capture bridge. This
+  // sandboxed client uses Chromium's getDisplayMedia and our native chooser.
+  // Keep the actual browser/platform version while selecting that web path.
+  ses.setUserAgent(ses.getUserAgent().replace(/\sElectron\/\S+/gi, ''));
   configurePermissions(ses);
   mainWindow = new BrowserWindow({
     width: 1280, height: 800, minWidth: 720, minHeight: 500,
