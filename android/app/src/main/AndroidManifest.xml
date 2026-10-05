@@ -27,7 +27,7 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="https" android:host="zjj-2785.github.io" android:pathPrefix="/dischord/" />
+                <data android:scheme="https" android:host="dan-k391.github.io" android:pathPrefix="/dischord/" />
             </intent-filter>
         </activity>
         <service android:name=".ProjectionService" android:exported="false" android:foregroundServiceType="mediaProjection" />

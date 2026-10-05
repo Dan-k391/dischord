@@ -1,4 +1,4 @@
-package io.github.zjj2785.dischord;
+package io.github.dank391.dischord;
 
 import android.Manifest;
 import android.app.Activity;
@@ -44,7 +44,7 @@ import java.util.HashSet;
 import java.util.Map;
 
 public final class MainActivity extends Activity {
-    private static final String SITE = "https://zjj-2785.github.io/dischord/";
+    private static final String SITE = "https://dan-k391.github.io/dischord/";
     private static final int PICK_FILES = 45001, MEDIA_PERMISSIONS = 45004;
     private WebView webView;
     private FrameLayout root;
@@ -122,7 +122,7 @@ public final class MainActivity extends Activity {
     }
 
     private static boolean isSite(Uri url) {
-        if (url == null || !"https".equals(url.getScheme()) || !"zjj-2785.github.io".equals(url.getHost()) || url.getUserInfo() != null) return false;
+        if (url == null || !"https".equals(url.getScheme()) || !"dan-k391.github.io".equals(url.getHost()) || url.getUserInfo() != null) return false;
         return Arrays.asList("/dischord/", "/dischord", "/dischord/index.html").contains(url.getPath()) && (url.getPort() == -1 || url.getPort() == 443);
     }
     private static boolean origin(Uri url, String host) {
@@ -142,7 +142,7 @@ public final class MainActivity extends Activity {
             Toast.makeText(this, "Update Android System WebView to enable native screen sharing and downloads.", Toast.LENGTH_LONG).show();
             return;
         }
-        WebViewCompat.addWebMessageListener(webView, "DischordNative", new HashSet<>(Arrays.asList("https://zjj-2785.github.io", "https://vdo.ninja")),
+        WebViewCompat.addWebMessageListener(webView, "DischordNative", new HashSet<>(Arrays.asList("https://dan-k391.github.io", "https://vdo.ninja")),
             (view, message, sourceOrigin, mainFrame, reply) -> {
                 if (!hosted()) return;
                 String raw = message.getData();
@@ -150,7 +150,7 @@ public final class MainActivity extends Activity {
                 try {
                     JSONObject request = new JSONObject(raw);
                     String type = request.optString("type");
-                    if (mainFrame && origin(sourceOrigin, "zjj-2785.github.io") && type.startsWith("file-")) files.handle(request, reply);
+                    if (mainFrame && origin(sourceOrigin, "dan-k391.github.io") && type.startsWith("file-")) files.handle(request, reply);
                     else if (!mainFrame && origin(sourceOrigin, "vdo.ninja") && type.startsWith("screen-")) screens.handle(request, reply);
                     else if (!mainFrame && origin(sourceOrigin, "vdo.ninja") && "media-state".equals(type)) {
                         String scope = request.optString("scope");
@@ -162,7 +162,7 @@ public final class MainActivity extends Activity {
                 } catch (Exception ignored) { }
             });
         try {
-            WebViewCompat.addDocumentStartJavaScript(webView, asset("native-app.js") + "\n" + asset("native-files.js"), new HashSet<>(Arrays.asList("https://zjj-2785.github.io")));
+            WebViewCompat.addDocumentStartJavaScript(webView, asset("native-app.js") + "\n" + asset("native-files.js"), new HashSet<>(Arrays.asList("https://dan-k391.github.io")));
             WebViewCompat.addDocumentStartJavaScript(webView, asset("native-media.js") + "\n" + asset("native-screen.js"), new HashSet<>(Arrays.asList("https://vdo.ninja")));
         } catch (IOException error) { throw new IllegalStateException("Missing Android adapter assets", error); }
     }
@@ -205,7 +205,7 @@ public final class MainActivity extends Activity {
         webView.setWebChromeClient(new WebChromeClient() {
             @Override public void onPermissionRequest(PermissionRequest request) {
                 runOnUiThread(() -> {
-                    if (!hosted() || !(origin(request.getOrigin(), "vdo.ninja") || origin(request.getOrigin(), "zjj-2785.github.io"))) { request.deny(); return; }
+                    if (!hosted() || !(origin(request.getOrigin(), "vdo.ninja") || origin(request.getOrigin(), "dan-k391.github.io"))) { request.deny(); return; }
                     mediaQueue.add(request); processMediaPermission();
                 });
             }

@@ -21,12 +21,12 @@ A Discord-style chat app built on [VDO.Ninja](https://vdo.ninja). No accounts, n
 - **Phone layout**: server/channel and member drawers, touch message actions, a Send button, safe-area spacing and keyboard-aware chat sizing
 
 ## Phones
-Open [Dischord](https://zjj-2785.github.io/dischord/) in your phone browser and join the same invite as desktop users. Use **Channels** to open server/channel navigation, the member button to see participants, and the call button to return to an active call. Chat, replies, image previews, explicit downloads, microphone controls and camera use the same rooms and protocol as the desktop app.
+Open [Dischord](https://dan-k391.github.io/dischord/) in your phone browser and join the same invite as desktop users. Use **Channels** to open server/channel navigation, the member button to see participants, and the call button to return to an active call. Chat, replies, image previews, explicit downloads, microphone controls and camera use the same rooms and protocol as the desktop app.
 
 On phones, Enter adds a new line; tap **Send** to send the message. Tap a message's three-dot button for reply and other actions. Press and hold a server or channel for its menu. Camera/microphone access still requires browser permission. Phone browsers that do not provide screen capture can watch shared screens; attempting to share shows an availability message. Large file downloads may be constrained by browser memory and storage.
 
 ## Android app
-Download [Dischord-Android.apk](https://github.com/ZJJ-2785/dischord/releases/download/android-v1.0.2/Dischord-Android.apk) from the [Android v1.0.2 release](https://github.com/ZJJ-2785/dischord/releases/tag/android-v1.0.2). It requires **Android 8.0 or newer** and a current **Android System WebView**. Open the APK on your phone and allow installation from the browser or file manager you used to download it. Install the signed release APK; the unsigned GitHub Actions artifact cannot be installed directly. Version 1.0.2 installs over earlier Android releases with the same signing key, retaining your local profile and settings.
+There is no published APK yet: an installable Android build has to be signed with a private key that only the project owner holds. Until one is published on the [releases page](https://github.com/Dan-k391/dischord/releases), build it yourself with the steps below, or sign the unsigned APK that the **Build Android APK** workflow uploads. It requires **Android 8.0 or newer** and a current **Android System WebView**. Open the APK on your phone and allow installation from the browser or file manager you used to download it. Install the signed release APK; the unsigned GitHub Actions artifact cannot be installed directly. Version 1.0.2 installs over earlier Android releases with the same signing key, retaining your local profile and settings.
 
 The Android app loads the same live website and VDO.Ninja rooms as Windows and web users. Open an existing invite in Dischord, or paste it in the app's join-server form. Chat, replies, reactions, files, image previews, audio boosts, camera and quality controls share the existing protocol. Website updates arrive when the app reloads. Each installation keeps its own identity, settings and preview cache, so join your server invites on first use. An internet connection is required.
 
@@ -58,9 +58,9 @@ java -jar apksigner.jar verify --verbose --print-certs Dischord-Android.apk
 The signing tool prompts for the keystore password. Publish the verified signed APK, never the private key. Android release tags use `android-v<dischordVersionName>` from `android/gradle.properties`.
 
 ## Windows app
-Download the [portable Dischord.exe](https://github.com/ZJJ-2785/dischord/releases/download/desktop-v1.0.5/Dischord.exe), [Windows installer](https://github.com/ZJJ-2785/dischord/releases/download/desktop-v1.0.5/Dischord-Setup.exe), or [Windows ZIP](https://github.com/ZJJ-2785/dischord/releases/download/desktop-v1.0.5/Dischord-Windows.zip). The app requires **Windows 10/11, 64-bit** and includes its Chromium runtime. For the ZIP, extract the whole folder before running `Dischord.exe`.
+Download the [portable Dischord.exe](https://github.com/Dan-k391/dischord/releases/download/desktop-v1.1.0/Dischord.exe), [Windows installer](https://github.com/Dan-k391/dischord/releases/download/desktop-v1.1.0/Dischord-Setup.exe), or [Windows ZIP](https://github.com/Dan-k391/dischord/releases/download/desktop-v1.1.0/Dischord-Windows.zip). The app requires **Windows 10/11, 64-bit** and includes its Chromium runtime. For the ZIP, extract the whole folder before running `Dischord.exe`.
 
-It loads [the live Dischord website](https://zjj-2785.github.io/dischord/) in a native desktop window. Chat, voice, camera, screen sharing, configurable FPS, audio boosts, replies, previews and explicit file downloads use the same web app and VDO.Ninja rooms. Website updates arrive when you open or refresh it. Join the same server invite as your web friends to share channels and communicate.
+It loads [the live Dischord website](https://dan-k391.github.io/dischord/) in a native desktop window. Chat, voice, camera, screen sharing, configurable FPS, audio boosts, replies, previews and explicit file downloads use the same web app and VDO.Ninja rooms. Website updates arrive when you open or refresh it. Join the same server invite as your web friends to share channels and communicate.
 
 The desktop app keeps its own persistent profile, settings and image-preview cache. Set your profile and join your existing server invites on first use; browser identities and saved local history are not automatically imported. Original files remain unpersisted offers, so keep the sending window open while recipients download them. An internet connection is required.
 
@@ -70,7 +70,7 @@ The Windows title bar uses the app's dark theme, with a round Dischord icon and 
 
 You can open a quoted invite directly:
 ```powershell
-.\Dischord.exe "https://zjj-2785.github.io/dischord/#invite=..."
+.\Dischord.exe "https://dan-k391.github.io/dischord/#invite=..."
 ```
 
 To build the desktop app with Node.js 24 or newer:

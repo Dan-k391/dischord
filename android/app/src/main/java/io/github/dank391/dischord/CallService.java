@@ -1,4 +1,4 @@
-package io.github.zjj2785.dischord;
+package io.github.dank391.dischord;
 
 import android.Manifest;
 import android.app.Notification;

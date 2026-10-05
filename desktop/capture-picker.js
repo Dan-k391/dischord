@@ -78,13 +78,21 @@
       tab.classList.toggle('active', active);
       tab.setAttribute('aria-selected', String(active));
       tab.tabIndex = active ? 0 : -1;
-      tab.textContent = (tab.dataset.kind === 'screen' ? 'Screens' : 'Windows') + (hasLoaded ? ' (' + count + ')' : '');
+      const label = document.createElement('span');
+      label.textContent = tab.dataset.kind === 'screen' ? 'Screens' : 'Applications';
+      tab.replaceChildren(label);
+      if (hasLoaded) {
+        const badge = document.createElement('span');
+        badge.className = 'tab-count';
+        badge.textContent = String(count);
+        tab.appendChild(badge);
+      }
       if (active) panel.setAttribute('aria-labelledby', tab.id);
     });
     const visible = sources.filter((source) => source.kind === kind);
     listStatus.hidden = !loading && visible.length > 0;
     listStatus.textContent = loading ? 'Finding screens and windows…' : visible.length ? '' :
-      'No ' + (kind === 'screen' ? 'screens' : 'windows') + ' are available. Refresh to try again.';
+      'No ' + (kind === 'screen' ? 'screens' : 'application windows') + ' are available. Refresh to try again.';
 
     visible.forEach((source) => {
       const item = document.createElement('div');
@@ -134,6 +142,8 @@
         showError('');
         updateSelection();
       });
+      // double-click (or Enter on an already selected card) shares it straight away
+      card.addEventListener('dblclick', () => { if (selectedId === source.id && !share.disabled) share.click(); });
       card.addEventListener('keydown', moveSourceFocus);
       item.appendChild(card);
       grid.appendChild(item);

@@ -1,4 +1,4 @@
-package io.github.zjj2785.dischord;
+package io.github.dank391.dischord;
 
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -16,8 +16,8 @@ import java.lang.ref.WeakReference;
 /** Android requires an ongoing media-projection foreground notification during screen sharing. */
 public final class ProjectionService extends Service {
     private static final String CHANNEL = "dischord-screen-sharing";
-    private static final String START = "io.github.zjj2785.dischord.START_PROJECTION";
-    private static final String STOP = "io.github.zjj2785.dischord.STOP_PROJECTION";
+    private static final String START = "io.github.dank391.dischord.START_PROJECTION";
+    private static final String STOP = "io.github.dank391.dischord.STOP_PROJECTION";
     private static final String SESSION = "session";
     private static final int NOTIFICATION = 45002;
     private static WeakReference<ScreenCaptureBridge> bridge = new WeakReference<>(null);

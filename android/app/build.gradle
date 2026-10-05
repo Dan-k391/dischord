@@ -11,12 +11,12 @@ def signingEnvironment = [
 def releaseSigningAvailable = signingEnvironment.values().every { it != null && !it.isEmpty() }
 
 android {
-    namespace 'io.github.zjj2785.dischord'
+    namespace 'io.github.dank391.dischord'
     compileSdk 35
     buildToolsVersion '35.0.0'
 
     defaultConfig {
-        applicationId 'io.github.zjj2785.dischord'
+        applicationId 'io.github.dank391.dischord'
         minSdk 26
         targetSdk 35
         versionCode providers.gradleProperty('dischordVersionCode').get().toInteger()

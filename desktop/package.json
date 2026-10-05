@@ -1,13 +1,14 @@
 {
   "name": "dischord-desktop",
-  "version": "1.0.5",
+  "version": "1.1.0",
   "private": true,
   "description": "Dischord desktop client for the hosted peer-to-peer chat app.",
-  "author": "ZJJ-2785",
-  "homepage": "https://zjj-2785.github.io/dischord/",
+  "author": "Dan-k391",
+  "contributors": ["ZJJ-2785"],
+  "homepage": "https://dan-k391.github.io/dischord/",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ZJJ-2785/dischord.git"
+    "url": "https://github.com/Dan-k391/dischord.git"
   },
   "main": "main.js",
   "scripts": {
@@ -22,7 +23,7 @@
     "electron-builder": "26.15.3"
   },
   "build": {
-    "appId": "io.github.zjj2785.dischord",
+    "appId": "io.github.dank391.dischord",
     "productName": "Dischord",
     "asar": true,
     "directories": {

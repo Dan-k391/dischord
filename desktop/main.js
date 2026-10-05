@@ -4,7 +4,7 @@ const { app, BrowserWindow, Menu, WebContentsView, desktopCapturer, dialog, ipcM
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 
-const SITE = new URL('https://zjj-2785.github.io/dischord/');
+const SITE = new URL('https://dan-k391.github.io/dischord/');
 const MEDIA_ORIGIN = 'https://vdo.ninja';
 const PICKER_URL = pathToFileURL(path.join(__dirname, 'capture-picker.html')).href;
 const OFFLINE_URL = pathToFileURL(path.join(__dirname, 'offline.html')).href;
@@ -21,7 +21,7 @@ let retryDestination = SITE;
 let queuedInvite = null;
 
 app.setName('Dischord');
-app.setAppUserModelId('io.github.zjj2785.dischord');
+app.setAppUserModelId('io.github.dank391.dischord');
 nativeTheme.themeSource = 'dark';
 
 function siteURL(value) {

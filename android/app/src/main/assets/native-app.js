@@ -1,6 +1,6 @@
 (() => {
   'use strict';
-  if (location.origin !== 'https://zjj-2785.github.io' || window !== window.top) return;
+  if (location.origin !== 'https://dan-k391.github.io' || window !== window.top) return;
   const mark = () => {
     if (!document.documentElement) return false;
     // Native layout consumes status/navigation bars, display cutouts and IME.

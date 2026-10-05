@@ -1,4 +1,4 @@
-package io.github.zjj2785.dischord;
+package io.github.dank391.dischord;
 
 import android.app.Activity;
 import android.content.ContentResolver;
