@@ -1188,7 +1188,7 @@
     const f = document.createElement('iframe');
     f.allow = 'autoplay; camera; microphone; display-capture; fullscreen; picture-in-picture; clipboard-write';
     f.title = 'Voice connection';
-    const call = { sid, cid, iframe: f, cam: !!withCam, ss: false, vs, ssFrame: null, ssVs: vs + 's', timers: new Set(), ...(keepShare || {}) };
+    const call = { sid, cid, iframe: f, cam: !!withCam, ss: false, vs, ssFrame: null, ssVs: vs + 's', timers: new Set(), since: rejoin && voice.since ? voice.since : now(), ...(keepShare || {}) };
     voice = call;
     for (const k in sentVol) delete sentVol[k];
     f.addEventListener('load', () => {
@@ -1763,6 +1763,31 @@
     a.onfinish = a.oncancel = () => { if (morphStage.running === a) morphStage.running = null; };
   }
 
+  // ---- zoom into a stream: scroll to zoom at the cursor, drag to move, double-click to reset.
+  // State is in fractions of the picture (s = scale, u/v = top-left of the visible part), so it survives
+  // layout changes; the little map shows which part is on screen.
+  const zooms = new Map(); // tile key -> { s, u, v }
+  function paintZoom(key) {
+    const el = tileEls.get(key);
+    if (!el) return;
+    const z = zooms.get(key), media = el.querySelector('.tile-media'), map = el.querySelector('.tile-zoom');
+    el.classList.toggle('zoomed', !!z);
+    if (media) media.style.transform = z ? `translate(${-z.u * z.s * 100}%, ${-z.v * z.s * 100}%) scale(${z.s})` : '';
+    if (!map) return;
+    map.classList.toggle('hidden', !z);
+    if (!z) return;
+    const box = map.querySelector('i');
+    box.style.left = z.u * 100 + '%'; box.style.top = z.v * 100 + '%';
+    box.style.width = 100 / z.s + '%'; box.style.height = 100 / z.s + '%';
+    map.querySelector('b').textContent = z.s.toFixed(1) + '×';
+  }
+  function setZoom(key, s, u, v) {
+    s = Math.max(1, Math.min(8, s));
+    if (s <= 1.01) zooms.delete(key);
+    else zooms.set(key, { s, u: Math.max(0, Math.min(1 - 1 / s, u)), v: Math.max(0, Math.min(1 - 1 / s, v)) });
+    paintZoom(key);
+  }
+
   // While I'm in a call but looking elsewhere, keep one stream visible as a small click-to-return preview.
   function updateMini() {
     const stage = $('voiceStage');
@@ -1807,7 +1832,7 @@
         el.className = 'tile';
         el.dataset.key = t.key;
         if (!t.screen) el.dataset.uid = t.uid; // speaking ring is for people, not screens
-        el.innerHTML = '<div class="tile-media"></div><div class="tile-name"></div><div class="tile-tools"></div><div class="tile-stats"></div><div class="tile-fx"></div>';
+        el.innerHTML = '<div class="tile-media"></div><div class="tile-name"></div><div class="tile-tools"></div><div class="tile-stats"></div><div class="tile-zoom hidden"><i></i><b></b></div><div class="tile-fx"></div>';
         host.appendChild(el);
         tileEls.set(t.key, el);
       }
@@ -1853,7 +1878,8 @@
       // someone else's new screen share takes the stage once (click away any time)
       if (t.screen && !t.self && hasVid && !autoFocused.has(t.vs)) { autoFocused.add(t.vs); focusUid = t.key; }
     }
-    for (const [key, el] of tileEls) if (!seen.has(key)) { el.remove(); tileEls.delete(key); }
+    for (const [key, el] of tileEls) if (!seen.has(key)) { el.remove(); tileEls.delete(key); zooms.delete(key); }
+    tileEls.forEach((el, key) => { if (zooms.has(key) && !el.classList.contains('video')) { zooms.delete(key); paintZoom(key); } });
     if (focusUid && !(tileEls.get(focusUid) && tileEls.get(focusUid).classList.contains('video'))) focusUid = null;
     if (winFs && !(tileEls.get(winFs) && tileEls.get(winFs).classList.contains('video'))) winFs = null;
     $('voiceStage').classList.toggle('winfs', !!winFs);
@@ -2705,7 +2731,18 @@
     if (voice) {
       const s = server(voice.sid), c = channel(s, voice.cid);
       $('voiceWhere').textContent = c ? `${c.name} / ${s.name}` : '';
+      paintCallTime();
     }
+  }
+
+  // how long I have been in this call (survives camera on/off, which reconnects)
+  function paintCallTime() {
+    const el = $('vsTime');
+    if (!el) return;
+    if (!voice || !voice.since) { el.textContent = ''; return; }
+    const t = Math.max(0, Math.floor((now() - voice.since) / 1000));
+    const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, s = t % 60;
+    el.textContent = (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s).padStart(2, '0');
   }
 
   function renderControls() {
@@ -3201,7 +3238,43 @@
     if (wa) return setWatching(wa.dataset.watch, true);
     if (winFs) return; // a click on the picture shouldn't change the layout underneath
     const t = e.target.closest('.tile.video');
+    if (t && panned) { panned = false; return; } // that was a drag across a zoomed stream
     if (t) { focusUid = focusUid === t.dataset.key ? null : t.dataset.key; renderStage(); }
+  });
+  let pan = null, panned = false;
+  $('tiles').addEventListener('wheel', (e) => {
+    if ($('voiceStage').classList.contains('mini')) return; // the preview resizes itself instead
+    const t = e.target.closest('.tile.video');
+    if (!t || e.target.closest('.tile-tools')) return;
+    e.preventDefault();
+    const r = t.getBoundingClientRect(), key = t.dataset.key, z = zooms.get(key) || { s: 1, u: 0, v: 0 };
+    const px = (e.clientX - r.left) / r.width, py = (e.clientY - r.top) / r.height;
+    const s = Math.max(1, Math.min(8, z.s * Math.pow(1.0018, -e.deltaY)));
+    // keep the point under the cursor where it is
+    setZoom(key, s, z.u + px / z.s - px / s, z.v + py / z.s - py / s);
+  }, { passive: false });
+  $('tiles').addEventListener('pointerdown', (e) => {
+    const t = e.target.closest('.tile.zoomed');
+    panned = false;
+    if (!t || e.button || e.target.closest('.tile-tools') || $('voiceStage').classList.contains('mini')) return;
+    const z = zooms.get(t.dataset.key), r = t.getBoundingClientRect();
+    pan = { key: t.dataset.key, el: t, x: e.clientX, y: e.clientY, u: z.u, v: z.v, w: r.width, h: r.height };
+    try { t.setPointerCapture(e.pointerId); } catch { }
+  });
+  $('tiles').addEventListener('pointermove', (e) => {
+    if (!pan) return;
+    const z = zooms.get(pan.key);
+    if (!z) { pan = null; return; }
+    const dx = e.clientX - pan.x, dy = e.clientY - pan.y;
+    if (!panned && Math.hypot(dx, dy) < 4) return;
+    panned = true;
+    pan.el.classList.add('panning');
+    setZoom(pan.key, z.s, pan.u - dx / pan.w / z.s, pan.v - dy / pan.h / z.s);
+  });
+  for (const type of ['pointerup', 'pointercancel']) $('tiles').addEventListener(type, () => { if (pan) pan.el.classList.remove('panning'); pan = null; });
+  $('tiles').addEventListener('dblclick', (e) => {
+    const t = e.target.closest('.tile.zoomed');
+    if (t) { e.preventDefault(); setZoom(t.dataset.key, 1, 0, 0); }
   });
   document.addEventListener('click', (e) => { if (!e.target.closest('#qMenu')) $('qMenu').classList.add('hidden'); });
   document.addEventListener('fullscreenchange', () => {
@@ -3360,6 +3433,7 @@
     if (cur.sid) renderPresence();
   }, 3000);
   setInterval(paintSpeaking, 250);
+  setInterval(paintCallTime, 1000);
   setInterval(pollStats, 2000);
   setInterval(() => applyVolumes(true), 4000);
   setInterval(paintImages, 15000); // retry visible uncached previews when a provider returns

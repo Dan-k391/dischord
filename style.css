@@ -393,7 +393,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .tile:fullscreen .tile-tools { bottom: 16px; right: 16px; opacity: .45; z-index: 2; }
 .tile:fullscreen .tile-tools:hover { opacity: 1; }
 .tile:fullscreen .q-btn { display: none; }
-.tile:fullscreen .tile-media iframe { pointer-events: auto; }
+.tile:fullscreen .tile-media iframe { pointer-events: none; }
 
 /* focus mode: one big tile, everyone else in a strip */
 #tiles.focus-mode { display: block; --tw: min(192px, calc((100cqw - 24px - (max(var(--sn, 1), 1) - 1) * 12px) / max(var(--sn, 1), 1))); }
@@ -690,3 +690,14 @@ body.resizing iframe { pointer-events: none !important; }
 .rail-btn.home img { width: 100%; height: 100%; display: block; }
 .welcome-logo img { width: 100%; height: 100%; display: block; border-radius: 22%; }
 #userPanel .avatar, #userPanel .me-info { cursor: pointer; }
+
+/* ---------- v32: scroll to zoom a stream (with a map of where you are), time in call ---------- */
+.tile-media { transform-origin: 0 0; will-change: transform; }
+.tile.zoomed { cursor: grab; }
+.tile.zoomed.panning { cursor: grabbing; }
+.tile-zoom { position: absolute; right: 10px; bottom: 48px; width: 132px; aspect-ratio: 16 / 9; background: rgba(0,0,0,.6); border: 1px solid rgba(255,255,255,.35); border-radius: 6px; overflow: hidden; pointer-events: none; z-index: 2; }
+.tile-zoom i { position: absolute; border: 2px solid var(--accent); background: rgba(88,101,242,.3); border-radius: 2px; box-sizing: border-box; }
+.tile-zoom b { position: absolute; left: 5px; top: 3px; font: 700 10px/1.2 ui-monospace, Consolas, monospace; color: #fff; }
+.tile:fullscreen .tile-zoom, #voiceStage.winfs .tile.winfull .tile-zoom { right: 16px; bottom: 60px; width: 176px; }
+#tiles.focus-mode .tile:not(.focused) .tile-zoom { display: none; }
+#vsTime { margin-left: 6px; font: 600 12px/1 ui-monospace, Consolas, monospace; color: var(--text-muted); }
