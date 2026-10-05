@@ -655,6 +655,7 @@
     const d = composerDrafts.get(key);
     composerDrafts.delete(key); // the active composer owns these references until navigation
     $('msgInput').value = d ? d.text : '';
+    syncComposer(); closeMention();
     pending.splice(0, pending.length, ...(d ? d.pending : []));
     replyTarget = d ? d.replyTarget : null;
     renderReplyBar(); renderAttachBar();
@@ -1745,6 +1746,12 @@
         vids.find(([, el]) => !el.classList.contains('self')) || vids[0];
       if (pick) key = pick[0];
     }
+    if (key && !stage.classList.contains('mini')) {
+      // appearing: come in from the edge it is docked to
+      const pos = store.get('miniPos', null), main = $('main');
+      const left = !!(pos && main && main.clientWidth && pos.r > (main.clientWidth - 320) / 2);
+      stage.style.setProperty('--mini-from', left ? '-130%' : '130%');
+    }
     stage.classList.toggle('mini', !!key);
     tileEls.forEach((el, k) => el.classList.toggle('mini-main', k === key));
   }
@@ -2312,7 +2319,7 @@
           case 'mention': {
             closeCtx();
             const inp = $('msgInput');
-            if (!$('textView').classList.contains('hidden')) { inp.value += (inp.value && !/\s$/.test(inp.value) ? ' ' : '') + '@' + user.name.replace(/\s+/g, '') + ' '; inp.focus(); }
+            if (!$('textView').classList.contains('hidden')) { inp.value += (inp.value && !/\s$/.test(inp.value) ? ' ' : '') + '@' + mentionTag(user.name) + ' '; inp.focus(); syncComposer(); }
             else toast('Open a text channel to mention someone.');
             return;
           }
@@ -2347,7 +2354,7 @@
           case 'openimg': return openImage(cur.sid, m.cid, m.id);
           case 'copyimg': return copyImage(cur.sid, m.cid, m.id);
           case 'saveimg': return saveImage(cur.sid, m.cid, m.id);
-          case 'mention': { const inp = $('msgInput'); inp.value += '@' + m.a.name.replace(/\s+/g, '') + ' '; return inp.focus(); }
+          case 'mention': { const inp = $('msgInput'); inp.value += (inp.value && !/\s$/.test(inp.value) ? ' ' : '') + '@' + mentionTag(liveUser(m.a).name) + ' '; syncComposer(); return inp.focus(); }
           case 'edit': return editMessage(mid);
           case 'del': return deleteMessage(mid);
         }
@@ -2395,6 +2402,27 @@
     return d.toLocaleDateString() + ' ' + fmtTime(ts);
   }
 
+  // a mention is "@" + the name without spaces or punctuation; resolve it back to a person in this server
+  const mentionTag = (name) => String(name || '').replace(/[^\p{L}\p{N}_.-]+/gu, '').slice(0, 32);
+  function serverPeople(sid) {
+    const k = getKnown(sid), ms = members[sid] || {};
+    const out = [];
+    for (const id of new Set([...Object.keys(k), ...Object.keys(ms)])) {
+      if (id === me.id) continue;
+      const user = (ms[id] && ms[id].user) || k[id];
+      if (user && user.name) out.push({ user, on: isOnline(ms[id]) });
+    }
+    return out;
+  }
+  function mentionTarget(tag) {
+    const want = tag.replace(/^@/, '').toLowerCase();
+    if (!want) return null;
+    if (mentionTag(me.name).toLowerCase() === want) return me;
+    const hit = serverPeople(cur.sid).find((p) => mentionTag(p.user.name).toLowerCase() === want);
+    return hit ? hit.user : null;
+  }
+  const mentionsMe = (text) => !!text && (text.match(/(^|\s)@[\p{L}\p{N}_.-]{1,32}/gu) || []).some((t) => { const u = mentionTarget(t.trim()); return u && u.id === me.id; });
+
   function formatText(raw) {
     const blocks = [];
     let t = esc(raw).replace(/```(?:[a-z0-9]+\n)?([\s\S]*?)```/gi, (_, code) => { blocks.push(`<pre>${code}</pre>`); return `\u0000${blocks.length - 1}\u0000`; });
@@ -2405,7 +2433,10 @@
       .replace(/__([^_\n]+)__/g, '<u>$1</u>')
       .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<i>$2</i>')
       .replace(/~~([^~\n]+)~~/g, '<s>$1</s>')
-      .replace(/(^|\s)(@[\p{L}\p{N}_.-]{1,32})/gu, '$1<span class="mention">$2</span>');
+      .replace(/(^|\s)(@[\p{L}\p{N}_.-]{1,32})/gu, (all, pre, tag) => {
+        const u = mentionTarget(tag);
+        return pre + (u ? `<span class="mention ${u.id === me.id ? 'me' : ''}" data-mention="${esc(u.id)}">@${esc(u.name)}</span>` : `<span class="mention">${tag}</span>`);
+      });
     return t.replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[+i]);
   }
 
@@ -2463,11 +2494,11 @@
       const text = m.text ? `<div class="text">${formatText(m.text)}${edited}</div>` : '';
       const re = renderRe(m);
       if (head) {
-        h += `<div class="msg head" data-mid="${esc(m.id)}"><div class="gutter" data-uid="${esc(m.a.id)}" data-ctx="user">${avatar(a)}</div><div class="body">
+        h += `<div class="msg head ${mentionsMe(m.text) ? 'mentions-me' : ''}" data-mid="${esc(m.id)}"><div class="gutter" data-uid="${esc(m.a.id)}" data-ctx="user">${avatar(a)}</div><div class="body">
           <div class="meta"><span class="author" data-uid="${esc(m.a.id)}" data-ctx="user" style="color:${esc(a.color)}">${esc(a.name)}</span><span class="time" title="${esc(new Date(m.ts).toLocaleString())}">${esc(fmtStamp(m.ts))}</span></div>
           ${reply}${text}${file}${img}${re}</div>${acts}</div>`;
       } else {
-        h += `<div class="msg" data-mid="${esc(m.id)}"><div class="gutter time-side">${esc(fmtTime(m.ts))}</div><div class="body">${reply}${text}${file}${img}${re}</div>${acts}</div>`;
+        h += `<div class="msg ${mentionsMe(m.text) ? 'mentions-me' : ''}" data-mid="${esc(m.id)}"><div class="gutter time-side">${esc(fmtTime(m.ts))}</div><div class="body">${reply}${text}${file}${img}${re}</div>${acts}</div>`;
       }
       prev = m;
     }
@@ -2500,6 +2531,67 @@
     m.style.left = Math.max(8, r.left + mw <= window.innerWidth - 8 ? r.left : r.right - mw) + 'px';
     m.style.top = Math.max(8, Math.min(window.innerHeight - mh - 8, r.top - mh - 6 > 8 ? r.top - mh - 6 : r.bottom + 6)) + 'px';
     m.onclick = (e) => { const b = e.target.closest('[data-emo]'); if (!b) return; m.classList.add('hidden'); onPick(b.dataset.emo); };
+  }
+
+  // show a person: open the member list at them, flash their row, and open their menu
+  function jumpToPerson(uid, x, y) {
+    if (!membersOpen) { membersOpen = true; store.set('membersOpen', true); }
+    renderMembers();
+    const row = [...document.querySelectorAll('#members .mem')].find((el) => el.dataset.uid === uid);
+    if (row) {
+      row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      row.classList.remove('flash'); void row.offsetWidth; row.classList.add('flash');
+    }
+    userMenu(uid, x, y);
+  }
+
+  // ---- message box: coloured copy of the text under the (transparent) textarea, and the @ picker
+  function composerHtml(text) {
+    let t = esc(text)
+      .replace(/`[^`\n]+`/g, (m) => `<span class="hl-code">${m}</span>`)
+      .replace(/\bhttps?:\/\/[^\s<]+/g, (m) => `<span class="hl-link">${m}</span>`)
+      .replace(/\*\*[^*\n]+\*\*|~~[^~\n]+~~|__[^_\n]+__/g, (m) => `<span class="hl-mark">${m}</span>`)
+      .replace(/(^|\s)(@[\p{L}\p{N}_.-]{1,32})/gu, (all, pre, tag) => pre + `<span class="${mentionTarget(tag) ? 'hl-mention' : 'hl-at'}">${tag}</span>`);
+    return t + (text.endsWith('\n') ? ' ' : ''); // a trailing newline needs something on its line to take height
+  }
+  function syncComposer() {
+    const inp = $('msgInput'), mirror = $('msgMirror');
+    if (!inp || !mirror) return;
+    const html = composerHtml(inp.value || '');
+    if (mirror.innerHTML !== html) mirror.innerHTML = html;
+    mirror.scrollTop = inp.scrollTop;
+  }
+  let mention = null; // { start, items, sel } while the @ picker is open
+  function closeMention() { mention = null; $('mentionMenu').classList.add('hidden'); }
+  function updateMention() {
+    const inp = $('msgInput');
+    const caret = inp.selectionStart ?? (inp.value || '').length;
+    const m = /(^|\s)@([\p{L}\p{N}_.-]{0,32})$/u.exec((inp.value || '').slice(0, caret));
+    if (!m || !server(cur.sid)) return closeMention();
+    const q = m[2].toLowerCase();
+    const items = serverPeople(cur.sid).map((p) => ({ ...p, tag: mentionTag(p.user.name) }))
+      .filter((p) => p.tag && p.tag.toLowerCase().includes(q))
+      .sort((a, b) => (b.tag.toLowerCase().startsWith(q) - a.tag.toLowerCase().startsWith(q)) || (b.on - a.on) || a.user.name.localeCompare(b.user.name))
+      .slice(0, 8);
+    if (!items.length) return closeMention();
+    mention = { start: caret - m[2].length - 1, items, sel: mention && mention.sel < items.length ? mention.sel : 0 };
+    paintMention();
+  }
+  function paintMention() {
+    const el = $('mentionMenu');
+    el.innerHTML = '<div class="mm-head">Members</div>' + mention.items.map((p, i) =>
+      `<button type="button" class="mm-item ${i === mention.sel ? 'sel' : ''}" data-i="${i}" role="option">${avatar(p.user)}<span class="mm-name" style="color:${esc(p.user.color)}">${esc(p.user.name)}</span><span class="mm-sub">${p.on ? 'online' : 'offline'}</span></button>`).join('');
+    el.classList.remove('hidden');
+  }
+  function acceptMention(i) {
+    const inp = $('msgInput'), p = mention && mention.items[i];
+    if (!p) return closeMention();
+    const caret = inp.selectionStart ?? inp.value.length, ins = '@' + p.tag + ' ';
+    inp.value = inp.value.slice(0, mention.start) + ins + inp.value.slice(caret);
+    inp.selectionStart = inp.selectionEnd = mention.start + ins.length;
+    closeMention();
+    inp.focus();
+    inp.dispatchEvent(new Event('input'));
   }
 
   function renderIfCurrent(sid, cid) { if (sid === cur.sid && cid === cur.cid) renderMessages(); }
@@ -2862,6 +2954,8 @@
   $('messages').onclick = (e) => {
     const save = e.target.closest('[data-image-save]');
     if (save) { e.stopPropagation(); return saveImage(cur.sid, cur.cid, save.dataset.imageSave); }
+    const at = e.target.closest('[data-mention]');
+    if (at) { e.stopPropagation(); return jumpToPerson(at.dataset.mention, e.clientX, e.clientY); }
     const image = e.target.closest('[data-image-open]');
     if (image) return openImage(cur.sid, cur.cid, image.dataset.imageOpen);
     const rp = e.target.closest('[data-reply]');
@@ -2883,8 +2977,28 @@
   };
 
   const input = $('msgInput');
-  const autosize = () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, window.innerHeight * 0.4) + 'px'; };
-  input.addEventListener('input', () => { autosize(); if (input.value.trim()) sendTyping(); });
+  const autosize = () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, window.innerHeight * 0.4) + 'px'; syncComposer(); };
+  input.addEventListener('input', () => { autosize(); updateMention(); if (input.value.trim()) sendTyping(); });
+  input.addEventListener('scroll', () => { $('msgMirror').scrollTop = input.scrollTop; });
+  input.addEventListener('click', updateMention);
+  input.addEventListener('blur', () => setTimeout(closeMention, 150)); // let a click on the list land first
+  // while the @ picker is open the arrow keys, Enter, Tab and Escape belong to it
+  input.addEventListener('keydown', (e) => {
+    if (!mention) return;
+    const n = mention.items.length;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { mention.sel = (mention.sel + (e.key === 'ArrowDown' ? 1 : n - 1)) % n; paintMention(); }
+    else if ((e.key === 'Enter' && !e.isComposing) || e.key === 'Tab') acceptMention(mention.sel);
+    else if (e.key === 'Escape') closeMention();
+    else return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  });
+  $('mentionMenu').addEventListener('mousedown', (e) => {
+    const b = e.target.closest('[data-i]');
+    if (!b) return;
+    e.preventDefault(); // keep the caret in the message box
+    acceptMention(+b.dataset.i);
+  });
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
@@ -2925,13 +3039,17 @@
   (function miniPreview() {
     const stage = $('voiceStage');
     let drag = null, moved = false;
-    const place = (r, b) => { stage.style.setProperty('--mini-r', r + 'px'); stage.style.setProperty('--mini-b', b + 'px'); };
+    const at = { r: 16, b: 84 }; // where the preview is, as offsets from the right / bottom of the chat area
+    const place = (r, b) => { at.r = r; at.b = b; stage.style.setProperty('--mini-r', r + 'px'); stage.style.setProperty('--mini-b', b + 'px'); };
     const saved = store.get('miniPos', null);
     if (saved && Number.isFinite(saved.r) && Number.isFinite(saved.b)) place(saved.r, saved.b);
+    let spring = 0;
     stage.addEventListener('pointerdown', (e) => {
       if (!stage.classList.contains('mini') || e.button) return;
-      const box = stage.getBoundingClientRect(), main = $('main').getBoundingClientRect();
-      drag = { x: e.clientX, y: e.clientY, r: main.right - box.right, b: main.bottom - box.bottom, maxR: main.width - box.width, maxB: main.height - box.height };
+      cancelAnimationFrame(spring); // catch it mid-flight
+      const main = $('main').getBoundingClientRect();
+      // start from the tracked position, not the drawn box: the box may be mid-animation or scaled
+      drag = { x: e.clientX, y: e.clientY, r: at.r, b: at.b, maxR: main.width - stage.offsetWidth, maxB: main.height - stage.offsetHeight, trail: [] };
       moved = false;
       try { stage.setPointerCapture(e.pointerId); } catch { }
     });
@@ -2941,17 +3059,40 @@
       if (!moved && Math.hypot(dx, dy) < 5) return;
       moved = true;
       stage.classList.add('dragging');
-      drag.pos = { r: Math.max(0, Math.min(drag.maxR, Math.round(drag.r - dx))), b: Math.max(0, Math.min(drag.maxB, Math.round(drag.b - dy))) };
+      drag.pos = { r: drag.r - dx, b: drag.b - dy };
+      drag.trail.push({ t: performance.now(), r: drag.pos.r, b: drag.pos.b });
+      if (drag.trail.length > 6) drag.trail.shift();
       place(drag.pos.r, drag.pos.b);
     });
+    // Released: keep the speed it was thrown with, aim for the corner it is heading to, and settle there
+    // on a slightly under-damped spring so it overshoots and bounces back.
+    const fling = (pos, v, maxR, maxB) => {
+      const rs = [16, Math.max(16, maxR - 16)], bs = [84, Math.max(84, maxB - 64)];
+      const near = (x, list) => list.reduce((a, c) => (Math.abs(c - x) < Math.abs(a - x) ? c : a));
+      const target = { r: near(pos.r + v.r * 0.3, rs), b: near(pos.b + v.b * 0.3, bs) }; // where it would coast to in ~1/3 s
+      store.set('miniPos', target);
+      if (document.hidden || typeof requestAnimationFrame !== 'function') return place(target.r, target.b);
+      const K = 150, C = 13; // stiffness and damping (critical damping would be ~24.5, so this bounces)
+      let last = performance.now();
+      const step = (now) => {
+        const dt = Math.min(0.032, (now - last) / 1000); last = now;
+        for (const k of ['r', 'b']) {
+          v[k] += (-K * (pos[k] - target[k]) - C * v[k]) * dt;
+          pos[k] += v[k] * dt;
+        }
+        if (Math.abs(pos.r - target.r) < 0.5 && Math.abs(pos.b - target.b) < 0.5 && Math.hypot(v.r, v.b) < 8) return place(target.r, target.b);
+        place(Math.round(pos.r * 10) / 10, Math.round(pos.b * 10) / 10);
+        spring = requestAnimationFrame(step);
+      };
+      spring = requestAnimationFrame(step);
+    };
     const end = () => {
       if (drag && drag.pos) {
-        // spring into the nearest corner (clear of the header and the message box)
-        const rs = [16, Math.max(16, drag.maxR - 16)], bs = [84, Math.max(84, drag.maxB - 64)];
-        const near = (v, list) => list.reduce((a, c) => (Math.abs(c - v) < Math.abs(a - v) ? c : a));
-        drag.pos = { r: near(drag.pos.r, rs), b: near(drag.pos.b, bs) };
-        place(drag.pos.r, drag.pos.b);
-        store.set('miniPos', drag.pos);
+        const a = drag.trail[0], z = drag.trail[drag.trail.length - 1];
+        const dt = a && z && z.t > a.t && performance.now() - z.t < 120 ? (z.t - a.t) / 1000 : 0; // a pause before letting go means no throw
+        const cap = (x) => Math.max(-6000, Math.min(6000, x));
+        const v = dt ? { r: cap((z.r - a.r) / dt), b: cap((z.b - a.b) / dt) } : { r: 0, b: 0 };
+        fling({ ...drag.pos }, v, drag.maxR, drag.maxB);
       }
       drag = null;
       stage.classList.remove('dragging');
