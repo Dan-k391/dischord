@@ -1575,12 +1575,45 @@
   let mobilePane = null;
   let mobileViewportBaseline = window.innerHeight;
   let mobileFocusFrame = null;
+  const reducedMotion = typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+  const mobileAnimations = new WeakMap();
+  const activeMobileAnimations = new Set();
+  function cancelMobileAnimation(el) {
+    const animation = mobileAnimations.get(el);
+    if (animation) animation.cancel();
+    mobileAnimations.delete(el);
+  }
+  function animateMobile(el, frames, duration = 180) {
+    if (!el) return null;
+    cancelMobileAnimation(el);
+    if (!mobileLayout() || reducedMotion?.matches || typeof el.animate !== 'function') return null;
+    const animation = el.animate(frames, { duration, easing: 'cubic-bezier(.2,.8,.2,1)' });
+    mobileAnimations.set(el, animation);
+    activeMobileAnimations.add(animation);
+    const done = () => {
+      activeMobileAnimations.delete(animation);
+      if (mobileAnimations.get(el) === animation) mobileAnimations.delete(el);
+    };
+    animation.finished.then(done, done);
+    return animation;
+  }
+  reducedMotion?.addEventListener?.('change', () => {
+    if (reducedMotion.matches) activeMobileAnimations.forEach((animation) => animation.finish());
+  });
+  function animateMobileView() {
+    const c = channel(server(cur.sid), cur.cid);
+    if (c?.type === 'voice' && voice && voice.sid === cur.sid && voice.cid === c.id) return;
+    const content = $(c ? c.type === 'text' ? 'messages' : 'voiceIdle' : 'welcome');
+    animateMobile(content, [{ opacity: .35, transform: 'translateY(10px)' }, { opacity: 1, transform: 'none' }]);
+  }
   function renderMobileNavigation() {
     const narrow = mobileLayout();
     if (!narrow) mobilePane = null;
     document.body.classList.toggle('channels-open', narrow && mobilePane === 'channels');
     document.body.classList.toggle('members-open', narrow && mobilePane === 'members');
     $('mobileBackdrop').classList.toggle('hidden', !narrow || !mobilePane);
+    $('mobileBackdrop').inert = !narrow || !mobilePane;
+    $('mobileBackdrop').setAttribute('aria-hidden', String(!narrow || !mobilePane));
     $('mobileChannels').setAttribute('aria-expanded', String(narrow && !!mobilePane));
     $('mobileChannels').setAttribute('aria-label', mobilePane ? 'Close navigation' : 'Open servers and channels');
     $('mobileChannelsLabel').textContent = mobilePane ? 'Close' : 'Channels';
@@ -1629,6 +1662,7 @@
     }
   }
   function selectServer(sid) {
+    const changed = cur.sid !== sid;
     saveComposerDraft();
     cur.sid = sid;
     store.set('lastSid', sid);
@@ -1641,8 +1675,10 @@
     restoreComposerDraft();
     render();
     if (cur.cid) afterChannelSelect();
+    if (changed) animateMobileView();
   }
   function selectChannel(cid) {
+    const changed = cur.cid !== cid;
     setMobilePane(null);
     saveComposerDraft();
     cur.cid = cid;
@@ -1651,6 +1687,7 @@
     store.set('lastChan', lastChan);
     render();
     afterChannelSelect();
+    if (changed) animateMobileView();
   }
   function afterChannelSelect() {
     const c = channel(server(cur.sid), cur.cid);
@@ -2949,7 +2986,14 @@
   }
 
   // ---------------------------------------------------------------- modals
+  let modalGeneration = 0;
+  let modalClosing = false;
   function modal(html, mount, dismissable = true, wide = false) {
+    modalGeneration++;
+    modalClosing = false;
+    cancelMobileAnimation($('modal'));
+    cancelMobileAnimation($('modalBack'));
+    $('modal').inert = false;
     if (mobileLayout() && document.activeElement && typeof document.activeElement.blur === 'function') document.activeElement.blur();
     setMobilePane(null);
     closeCtx();
@@ -2964,13 +3008,31 @@
     paintIcons($('modal'));
     if (mount) mount();
     updateMobileViewport();
+    animateMobile($('modal'), [{ opacity: 0, transform: 'translateY(20px) scale(.985)' }, { opacity: 1, transform: 'none' }], 200);
+    animateMobile($('modalBack'), [{ backgroundColor: 'rgba(0,0,0,0)' }, { backgroundColor: 'rgba(0,0,0,.7)' }], 180);
   }
   function closeModal() {
+    if (modalClosing || $('modalBack').classList.contains('hidden')) return;
+    modalClosing = true;
+    const generation = ++modalGeneration;
     if (mobileLayout() && $('modal').contains(document.activeElement) && typeof document.activeElement.blur === 'function') document.activeElement.blur();
     closeCtx();
     clearTimeout(devWait && devWait.timer); devWait = null;
-    $('modalBack').classList.add('hidden'); $('modalBack').dataset.dismiss = '';
-    $('modal').innerHTML = ''; $('modal').className = '';
+    $('modalBack').dataset.dismiss = '';
+    $('modal').inert = true;
+    const finish = () => {
+      if (generation !== modalGeneration) return;
+      $('modalBack').classList.add('hidden');
+      $('modal').innerHTML = ''; $('modal').className = ''; $('modal').inert = false;
+      modalClosing = false;
+      updateMobileViewport();
+    };
+    const animations = [
+      animateMobile($('modal'), [{}, { opacity: 0, transform: 'translateY(16px) scale(.985)' }], 140),
+      animateMobile($('modalBack'), [{}, { backgroundColor: 'rgba(0,0,0,0)' }], 140)
+    ].filter(Boolean);
+    if (animations.length) Promise.allSettled(animations.map((animation) => animation.finished)).then(finish);
+    else finish();
     updateMobileViewport();
   }
   $('modalBack').addEventListener('mousedown', (e) => { if (e.target === $('modalBack') && $('modalBack').dataset.dismiss) closeModal(); });
@@ -3091,6 +3153,7 @@
       const positions = { profile: 0, av: 0 };
       let currentTab = null;
       const show = (t) => {
+        const changed = currentTab !== null && currentTab !== t;
         if (content && currentTab) positions[currentTab] = content.scrollTop;
         $('modal').querySelectorAll('[data-tab]').forEach((b) => {
           b.classList.toggle('sel', b.dataset.tab === t);
@@ -3102,6 +3165,7 @@
         });
         currentTab = t;
         if (content) content.scrollTop = positions[t] || 0;
+        if (changed) animateMobile($(t === 'profile' ? 'settingsProfile' : 'settingsAv'), [{ opacity: .4, transform: 'translateY(6px)' }, { opacity: 1, transform: 'none' }], 150);
       };
       $('modal').querySelectorAll('[data-tab]').forEach((b) => (b.onclick = () => show(b.dataset.tab)));
       show(tab);
