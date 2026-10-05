@@ -10,6 +10,7 @@ const PICKER_URL = pathToFileURL(path.join(__dirname, 'capture-picker.html')).hr
 const OFFLINE_URL = pathToFileURL(path.join(__dirname, 'offline.html')).href;
 const TITLE_BAR_HEIGHT = 32;
 const pickers = new Map();
+const cancelledCaptureFrames = new WeakSet();
 const grants = new Set();
 const permissionDialogs = new Map();
 let mainWindow = null;
@@ -114,7 +115,18 @@ ipcMain.handle('dischord:capture-select', (event, selection) => {
 });
 ipcMain.handle('dischord:capture-cancel', (event) => {
   const pending = pendingPicker(event);
-  if (pending) finishCapture(pending);
+  if (pending && !pending.finished) {
+    if (captureFrameLive(pending)) {
+      // VDO retries AbortError once without audio. A deliberate Cancel must not
+      // immediately reopen the chooser for this same iframe's fallback request.
+      cancelledCaptureFrames.add(pending.request.frame);
+      const streamId = new URL(pending.request.frame.url).searchParams.get('push');
+      if (streamId && streamId.length <= 256) {
+        pending.owner.webContents.send('dischord:screen-share-cancelled', { streamId });
+      }
+    }
+    finishCapture(pending);
+  }
   return { ok: true };
 });
 
@@ -124,7 +136,12 @@ function chooseCapture(request, callback) {
     frameIsOurs = appContents(mainWindow?.webContents) && request.frame &&
       request.frame.top === mainWindow.webContents.mainFrame && trustedFrame(mainWindow.webContents, request.frame.url);
   } catch { }
-  if (!frameIsOurs || !request.videoRequested || pickers.size) { callback({}); return; }
+  if (!frameIsOurs || !request.videoRequested || pickers.size || cancelledCaptureFrames.has(request.frame)) {
+    // Electron also reports this denial to the requesting renderer as an error.
+    // Its callback can throw while validating the intentionally empty streams.
+    try { callback({}); } catch { }
+    return;
+  }
   const owner = mainWindow;
   const pickerSession = session.fromPartition('capture-picker');
   pickerSession.setPermissionCheckHandler(() => false);
@@ -218,10 +235,13 @@ function createWindow(destination) {
   retryDestination = destination;
   queuedInvite = null;
   const ses = session.fromPartition('persist:dischord');
-  // VDO's Electron detection expects its own Node IPC capture bridge. This
-  // sandboxed client uses Chromium's getDisplayMedia and our native chooser.
-  // Keep the actual browser/platform version while selecting that web path.
-  ses.setUserAgent(ses.getUserAgent().replace(/\sElectron\/\S+/gi, ''));
+  // VDO's Electron detection expects its own Node IPC capture bridge. Select
+  // its Chromium getDisplayMedia path while keeping the real browser version.
+  // Cross-site iframe renderers also need the app/WebContents UA: Electron can
+  // override a session-only UA when it creates the window or an iframe process.
+  const browserUserAgent = ses.getUserAgent().replace(/\sElectron\/\S+/gi, '');
+  app.userAgentFallback = browserUserAgent;
+  ses.setUserAgent(browserUserAgent);
   configurePermissions(ses);
   mainWindow = new BrowserWindow({
     width: 1280, height: 800, minWidth: 720, minHeight: 500,
@@ -238,6 +258,7 @@ function createWindow(destination) {
       backgroundThrottling: false, autoplayPolicy: 'no-user-gesture-required'
     }
   });
+  mainWindow.webContents.setUserAgent(browserUserAgent);
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     const invite = siteURL(url);
     if (invite) acceptInvite(invite); else openExternal(url);

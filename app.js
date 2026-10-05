@@ -1468,6 +1468,9 @@
     voice.ssFrame = null; voice.ss = false; voice.ssSettings = null;
     if (!silent) { broadcastState(); renderControls(); renderPresence(); }
   }
+  window.addEventListener('dischord-screen-share-cancelled', (e) => {
+    if (voice && voice.ssFrame && !voice.ss && e.detail?.streamId === voice.ssVs) stopShare();
+  });
   function showVoice() { if (voice) { if (cur.sid !== voice.sid) selectServer(voice.sid); selectChannel(voice.cid); } }
 
   let audioCtx;
