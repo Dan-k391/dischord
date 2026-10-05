@@ -43,7 +43,7 @@
   const IMG_CHUNK = 14000;        // chars per image chunk over the data channel
   const IMG_MAX = 4500000;        // max data-URL length (~3.3 MB image)
 
-  const AV_DEFAULTS = { camQ: '720', camFps: 30, camBr: 2500, ssQ: '1080', ssFps: 60, ssBr: 12000, ssHint: 'motion', recvCap: 0, codec: 'h264', selfPreview: 'low', showStats: false, micGain: 100 };
+  const AV_DEFAULTS = { camQ: '720', camFps: 30, camBr: 2500, ssQ: '1080', ssFps: 60, ssBr: 12000, ssHint: 'motion', recvCap: 0, codec: 'h264', selfPreview: 'low', showStats: false, micGain: 100, ssAudio: false };
   function audioPercent(value) {
     const n = typeof value === 'number' || (typeof value === 'string' && value.trim()) ? Number(value) : NaN;
     return Number.isFinite(n) ? Math.max(0, Math.min(200, Math.round(n))) : 100;
@@ -1260,7 +1260,11 @@
     // The target bitrate is separate from the publisher cap; motion lets encoding favor the selected FPS.
     return VDO + '?' + p.toString() + `&screenshare&autostart&noaudio&novideo&nopreview&nocontrolbar&hideheader&chatbutton=false&nohangupbutton` +
       `&quality=${q}&screensharequality=${q}&maxframerate=${av.ssFps}&screensharefps=${av.ssFps}` +
-      `&outboundvideobitrate=${av.ssBr}&maxvideobitrate=${av.ssBr}&screensharecontenthint=${hint}&contenthint=${hint}`;
+      `&outboundvideobitrate=${av.ssBr}&maxvideobitrate=${av.ssBr}&screensharecontenthint=${hint}&contenthint=${hint}` +
+      // Whole-computer sound includes the voices of this call, which everyone then hears a second time.
+      // Unless the sharer asks for it, the browser is told not to offer it (a shared tab keeps its own sound).
+      // When it is on, echo cancellation is requested on the captured sound as a best effort.
+      (av.ssAudio ? '&aec=1' : '&systemaudio=exclude');
   }
 
   // Each video/screen on the stage is its own view-only connection, so we control layout + bitrate.
@@ -2572,7 +2576,9 @@
     else h += '<div class="ctx-note">Join a voice channel to share your screen.</div>';
     h += '<div class="ctx-sep"></div>' + ctxSelect('ssQ', 'Resolution', av.ssQ, SS_RES) + ctxSelect('ssFps', 'Frame rate', av.ssFps, fpsOpts([5, 15, 30, 60])) +
       ctxSelect('ssBr', 'Bitrate', av.ssBr, SS_BRS.map((k) => [k, mbps(k)])) + ctxSelect('ssHint', 'Optimize for', av.ssHint, [['motion', 'Smoothness'], ['detail', 'Clarity']]);
-    if (sharing) h += '<div class="ctx-note">Changes apply to your current share.</div>';
+    h += ctxCheck('ssAudio', 'Share computer sound', !!av.ssAudio);
+    h += `<div class="ctx-note">${av.ssAudio ? 'When you share your whole screen, people in the call may hear their own voices come back. Sharing a browser tab avoids that.' : 'Off: a shared browser tab still shares its own sound, without echo.'}</div>`;
+    if (sharing) h += '<div class="ctx-note">Picture settings apply to your current share. Sound applies the next time you share.</div>';
     h += ctxItem('avset', 'gear', 'Voice & video settings');
     openAnchored(anchor, h, (menu) => {
       menu.querySelectorAll('[data-sel]').forEach((sel) => {
@@ -2584,6 +2590,7 @@
         closeCtx();
         if (b.dataset.act === 'share') return toggleShare();
         if (b.dataset.act === 'avset') return settingsModal('av');
+        if (b.dataset.act === 'ssAudio') { saveAv({ ssAudio: !av.ssAudio }); return shareMenu(anchor); }
       };
     });
   }
@@ -3367,6 +3374,7 @@
         me = { ...me, name, color };
         store.set('me', me);
         const next = {
+          ssAudio: !!av.ssAudio, // set from the screen share menu, not this form
           micGain: audioPercent($('aMicGain').value),
           camQ: $('aCamQ').value, camFps: +$('aCamFps').value, camBr: +$('aCamBr').value,
           ssQ: $('aSsQ').value, ssFps: +$('aSsFps').value, ssBr: +$('aSsBr').value, ssHint: $('aSsHint').value, recvCap: +$('aRecv').value, codec: $('aCodec').value, selfPreview: $('aSelf').value, showStats: $('aStats').checked, v8: 1, v9: 1,
