@@ -16,6 +16,27 @@ A Discord-style chat app built on [VDO.Ninja](https://vdo.ninja). No accounts, n
 - **Quality controls**: resolution (up to 4K / native source), frame rate and bitrate (up to 40 Mbps) for camera and screen share; per-stream bitrate picker; live stats (resolution · fps · bitrate · codec) on every video
 - **Presence**: member list, online/offline, who's in which voice channel
 
+## Windows app
+Download the [portable Dischord.exe](https://github.com/ZJJ-2785/dischord/releases/latest/download/Dischord.exe), [Windows installer](https://github.com/ZJJ-2785/dischord/releases/latest/download/Dischord-Setup.exe), or [Windows ZIP](https://github.com/ZJJ-2785/dischord/releases/latest/download/Dischord-Windows.zip). The app requires **Windows 10/11, 64-bit** and includes its Chromium runtime. For the ZIP, extract the whole folder before running `Dischord.exe`.
+
+It loads [the live Dischord website](https://zjj-2785.github.io/dischord/) in a native desktop window. Chat, voice, camera, screen sharing, configurable FPS, audio boosts, replies, previews and explicit file downloads use the same web app and VDO.Ninja rooms. Website updates arrive when you open or refresh it. Join the same server invite as your web friends to share channels and communicate.
+
+The desktop app keeps its own persistent profile, settings and image-preview cache. Set your profile and join your existing server invites on first use; browser identities and saved local history are not automatically imported. Original files remain unpersisted offers, so keep the sending window open while recipients download them. An internet connection is required.
+
+Screen sharing uses an explicit screen/window thumbnail picker inside the desktop app. Chrome/Edge's floating sharing banner is not part of this client. Sharing remains visible in Dischord and stops through its Screen button or when you close the app. The web version's browser sharing banner is controlled by the browser.
+
+You can open a quoted invite directly:
+```powershell
+.\Dischord.exe "https://zjj-2785.github.io/dischord/#invite=..."
+```
+
+To build the desktop app with Node.js 24 or newer:
+```powershell
+cd desktop
+npm ci
+npm run build:win
+```
+
 ## Run it
 Camera/mic need a secure origin, so serve the folder rather than double-clicking `index.html`:
 
@@ -83,3 +104,6 @@ Add this before `app.js` in `index.html`:
 - `app.js` – all app logic (servers, mesh protocol, rendering, voice)
 - `file-transfer.js` – explicit-download file transfers with bounded chunks and no persistent file cache
 - `image-preview.js` – automatic bounded raster previews without a limit on original image sizes
+- `desktop/main.js` – native Windows client loading the live website, permissions and screen capture
+- `desktop/capture-picker.*` – explicit desktop screen/window chooser
+- `desktop/package.json` – portable EXE, installer and ZIP packaging

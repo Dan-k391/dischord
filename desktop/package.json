@@ -1,0 +1,58 @@
+{
+  "name": "dischord-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Dischord desktop client for the hosted peer-to-peer chat app.",
+  "author": "ZJJ-2785",
+  "homepage": "https://zjj-2785.github.io/dischord/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ZJJ-2785/dischord.git"
+  },
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build:win": "electron-builder --win --x64 --publish never"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "electron": "44.5.1",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "io.github.zjj2785.dischord",
+    "productName": "Dischord",
+    "asar": true,
+    "directories": {
+      "output": "../dist"
+    },
+    "files": [
+      "*.js",
+      "*.html",
+      "*.css"
+    ],
+    "artifactName": "Dischord-Windows.${ext}",
+    "win": {
+      "target": [
+        { "target": "portable", "arch": ["x64"] },
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "zip", "arch": ["x64"] }
+      ]
+    },
+    "portable": {
+      "artifactName": "Dischord.exe"
+    },
+    "nsis": {
+      "artifactName": "Dischord-Setup.exe",
+      "oneClick": false,
+      "perMachine": false,
+      "selectPerMachineByDefault": false,
+      "allowElevation": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}
