@@ -520,3 +520,14 @@ button { font: inherit; color: inherit; cursor: pointer; }
 #voiceStage.winfs .tile.winfull .tile-tools { bottom: 16px; right: 16px; z-index: 2; }
 #voiceStage.winfs #callBar { left: 50%; right: auto; transform: translateX(-50%); padding: 0 24px; background: none; opacity: 0; }
 #voiceStage.winfs #callBar:hover { opacity: 1; }
+
+/* ---------- v11: show / hide the member strip in focus mode ---------- */
+#stripToggle {
+  position: absolute; left: 50%; bottom: 228px; transform: translateX(-50%); z-index: 2;
+  display: flex; align-items: center; gap: 6px; height: 36px; padding: 0 12px; border: 0; border-radius: 18px;
+  background: rgba(30,31,34,.85); color: #fff; box-shadow: 0 2px 8px rgba(0,0,0,.4);
+}
+#stripToggle:hover { background: #404249; }
+#stripToggle.off { bottom: 96px; }
+#stripToggle .ico-svg { width: 20px; height: 20px; }
+#tiles.focus-mode.strip-off .tile:not(.focused) { visibility: hidden; pointer-events: none; }

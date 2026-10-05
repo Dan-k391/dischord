@@ -95,8 +95,9 @@
     expand: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
     collapse: '<path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/>',
     winfs: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7.5 12V9h3M16.5 12v3h-3"/>',
-    person: '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.5-6 8-6s8 2 8 6"/>',
-    personOff: '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.5-6 8-6s8 2 8 6M3 3l18 18"/>',
+    chevUp: '<path d="M6 15l6-6 6 6"/>',
+    chevDown: '<path d="M6 9l6 6 6-6"/>',
+    people: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.5 3-5.5 6.5-5.5s6.5 2 6.5 5.5"/><circle cx="17" cy="9" r="2.5"/><path d="M17.5 14.5c2.5.2 4 1.8 4 4.5"/>',
     live: '<rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><circle cx="12" cy="10.5" r="2" fill="currentColor"/>',
   };
   const icon = (name, cls = '') => `<svg class="ico-svg ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[name] || ''}</svg>`;
@@ -1082,7 +1083,7 @@
   const autoFocused = new Set();
   let focusUid = null;
   let winFs = null;            // tile key filling the whole app window, or null
-  let hideAvatars = store.get('hideAv', false); // only show people who have video on
+  let hideStrip = store.get('hideStrip', false); // focus mode: hide the row of other people under the big tile
 
   function wantedBr(t) {
     // own preview: by default exactly what others receive (your own send bitrate, full resolution)
@@ -1105,7 +1106,6 @@
       out.push({ key: o.user.id, uid: o.user.id, user: o.user, st, self: !!o.self, screen: false, vs: st.c && o.vs && !hideSelf && !hideCam ? o.vs : '' });
       if (st.s && o.vss) out.push({ key: o.user.id + ':s', uid: o.user.id, user: o.user, st, self: !!o.self, screen: true, vs: hideSelf ? '' : o.vss });
     }
-    if (hideAvatars && out.some((t) => t.vs)) return out.filter((t) => t.vs); // nothing to watch: keep the avatars
     return out;
   }
 
@@ -1187,13 +1187,19 @@
         el.classList.toggle('focused', key === focusUid);
         if (key !== focusUid) el.style.setProperty('--i', i++);
       });
-      host.classList.toggle('no-strip', others === 0);
+      host.classList.toggle('no-strip', others === 0 || hideStrip);
+      host.classList.toggle('strip-off', hideStrip);
     } else {
       const cols = Math.ceil(Math.sqrt(n || 1));
       host.style.setProperty('--cols', cols);
       host.style.setProperty('--rows', Math.ceil((n || 1) / cols));
       tileEls.forEach((el) => el.classList.remove('focused'));
     }
+    const st = $('stripToggle'), canStrip = !!focusUid && n > 1 && !winFs;
+    st.classList.toggle('hidden', !canStrip);
+    st.classList.toggle('off', hideStrip);
+    st.title = hideStrip ? 'Show members' : 'Hide members';
+    setIcon(st, hideStrip ? 'chevUp' : 'chevDown');
     $('tiles').classList.toggle('show-stats', !!av.showStats);
     paintSpeaking();
     applyVolumes();
@@ -1618,8 +1624,6 @@
     const cam = !!(voice && voice.cam), ss = !!(voice && voice.ss);
     setIcon($('cbCam'), cam ? 'camera' : 'cameraOff');
     $('cbCam').classList.toggle('on', cam); $('cbCam').title = cam ? 'Turn off camera' : 'Turn on camera';
-    setIcon($('cbAvatars'), hideAvatars ? 'personOff' : 'person');
-    $('cbAvatars').classList.toggle('off', hideAvatars); $('cbAvatars').title = hideAvatars ? 'Show people without video' : 'Hide people without video';
     const pending = !!(voice && voice.ssFrame && !voice.ss);
     $('cbShare').classList.toggle('on', ss); $('cbShare').classList.toggle('pending', pending);
     $('cbShare').title = ss ? 'Stop sharing' : pending ? 'Waiting for you to pick a screen… (click to cancel)' : 'Share your screen';
@@ -2012,7 +2016,7 @@
   $('attachBar').onclick = (e) => { const b = e.target.closest('[data-rm]'); if (b) { pending.splice(+b.dataset.rm, 1); renderAttachBar(); } };
 
   // in-call reactions
-  $('cbAvatars').onclick = () => { hideAvatars = !hideAvatars; store.set('hideAv', hideAvatars); renderControls(); renderStage(); };
+  $('stripToggle').onclick = () => { hideStrip = !hideStrip; store.set('hideStrip', hideStrip); renderStage(); };
   $('cbReact').onclick = (e) => { e.stopPropagation(); emojiPicker($('cbReact'), sendCallReaction); };
 
   window.addEventListener('hashchange', checkInviteHash);
