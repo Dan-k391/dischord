@@ -7,10 +7,13 @@ const { pathToFileURL } = require('node:url');
 const SITE = new URL('https://zjj-2785.github.io/dischord/');
 const MEDIA_ORIGIN = 'https://vdo.ninja';
 const PICKER_URL = pathToFileURL(path.join(__dirname, 'capture-picker.html')).href;
+const OFFLINE_URL = pathToFileURL(path.join(__dirname, 'offline.html')).href;
 const pickers = new Map();
 const grants = new Set();
 const permissionDialogs = new Map();
 let mainWindow = null;
+let retryDestination = SITE;
+let queuedInvite = null;
 
 app.setName('Dischord');
 app.setAppUserModelId('io.github.zjj2785.dischord');
@@ -57,6 +60,7 @@ function captureFrameLive(pending) {
 function finishCapture(pending, source, includeAudio = false) {
   if (pending.finished) return;
   pending.finished = true;
+  clearInterval(pending.lifetimeTimer);
   pickers.delete(pending.id);
   const streams = source && captureFrameLive(pending) ? { video: source } : {};
   if (streams.video && pending.request.audioRequested && includeAudio && process.platform === 'win32') {
@@ -68,11 +72,17 @@ function finishCapture(pending, source, includeAudio = false) {
 
 ipcMain.handle('dischord:capture-list', async (event) => {
   const pending = pendingPicker(event);
-  if (!pending || !captureFrameLive(pending)) throw new Error('This sharing request has ended.');
+  if (!pending || !captureFrameLive(pending)) {
+    if (pending) finishCapture(pending);
+    throw new Error('This sharing request has ended.');
+  }
   const sources = await desktopCapturer.getSources({
     types: ['screen', 'window'], thumbnailSize: { width: 320, height: 180 }, fetchWindowIcons: true
   });
-  if (pending.finished || !captureFrameLive(pending)) throw new Error('This sharing request has ended.');
+  if (pending.finished || !captureFrameLive(pending)) {
+    finishCapture(pending);
+    throw new Error('This sharing request has ended.');
+  }
   // The chooser itself is never a shareable source.
   const chooserHandle = pending.window.getNativeWindowHandle();
   const chooserId = chooserHandle.length >= 8 ? chooserHandle.readBigUInt64LE().toString() : chooserHandle.readUInt32LE().toString();
@@ -87,8 +97,12 @@ ipcMain.handle('dischord:capture-list', async (event) => {
 });
 ipcMain.handle('dischord:capture-select', (event, selection) => {
   const pending = pendingPicker(event);
+  if (pending && !captureFrameLive(pending)) {
+    finishCapture(pending);
+    return { ok: false, error: 'This sharing request has ended.' };
+  }
   const source = pending && typeof selection?.sourceId === 'string' && pending.sources.get(selection.sourceId);
-  if (!pending || !source || !captureFrameLive(pending)) return { ok: false, error: 'That source is no longer available. Refresh the list.' };
+  if (!pending || !source) return { ok: false, error: 'That source is no longer available. Refresh the list.' };
   finishCapture(pending, source, selection.includeAudio === true);
   return { ok: true };
 });
@@ -117,6 +131,10 @@ function chooseCapture(request, callback) {
   picker.setMenu(null);
   const pending = { id: picker.webContents.id, window: picker, request, callback, sources: new Map(), finished: false };
   pickers.set(picker.webContents.id, pending);
+  // VDO can cancel its request or remove its iframe while the chooser is open.
+  pending.lifetimeTimer = setInterval(() => {
+    if (!captureFrameLive(pending)) finishCapture(pending);
+  }, 1000);
   picker.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   picker.webContents.on('will-navigate', (event) => event.preventDefault());
   picker.once('ready-to-show', () => { if (!picker.isDestroyed()) picker.show(); });
@@ -177,6 +195,8 @@ function configurePermissions(ses) {
 }
 
 function createWindow(destination) {
+  retryDestination = destination;
+  queuedInvite = null;
   const ses = session.fromPartition('persist:dischord');
   configurePermissions(ses);
   mainWindow = new BrowserWindow({
@@ -194,7 +214,10 @@ function createWindow(destination) {
     return { action: 'deny' };
   });
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (!siteURL(url)) { event.preventDefault(); openExternal(url); }
+    if (mainWindow.webContents.getURL() === OFFLINE_URL && siteURL(url)) {
+      event.preventDefault();
+      loadHosted(queuedInvite || retryDestination);
+    } else if (!siteURL(url)) { event.preventDefault(); openExternal(url); }
   });
   mainWindow.webContents.on('will-redirect', (event, url, _inPlace, isMainFrame) => {
     if (isMainFrame && !siteURL(url)) event.preventDefault();
@@ -205,6 +228,18 @@ function createWindow(destination) {
       mainWindow.show();
     }
   });
+  mainWindow.webContents.on('did-finish-load', () => {
+    const loaded = siteURL(mainWindow.webContents.getURL());
+    if (!loaded) return;
+    retryDestination = loaded;
+    // Initial URL hashes are consumed by the web app during boot. Only deliver
+    // a newer invite that arrived while that page was still loading.
+    if (queuedInvite) {
+      const invite = queuedInvite;
+      queuedInvite = null;
+      deliverInvite(invite);
+    }
+  });
   mainWindow.on('close', () => {
     for (const pending of [...pickers.values()]) finishCapture(pending);
   });
@@ -213,13 +248,29 @@ function createWindow(destination) {
   mainWindow.loadURL(destination.href).catch(() => {});
 }
 
+function loadHosted(destination) {
+  retryDestination = destination;
+  queuedInvite = null;
+  mainWindow.loadURL(destination.href).catch(() => {});
+}
+function deliverInvite(destination) {
+  if (!destination.hash) return;
+  const contents = mainWindow.webContents;
+  contents.executeJavaScript('location.hash = ' + JSON.stringify(destination.hash)).catch(() => {
+    if (!contents.isDestroyed() && !queuedInvite) queuedInvite = destination;
+  });
+}
 function acceptInvite(destination) {
   if (!mainWindow || mainWindow.isDestroyed()) { createWindow(destination); return; }
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show(); mainWindow.focus();
   // Adding an invite to an open client must not reload and interrupt a call.
-  if (destination.hash && siteURL(mainWindow.webContents.getURL())) {
-    mainWindow.webContents.executeJavaScript('location.hash = ' + JSON.stringify(destination.hash)).catch(() => {});
+  if (siteURL(mainWindow.webContents.getURL()) && !mainWindow.webContents.isLoadingMainFrame()) {
+    deliverInvite(destination);
+  } else if (mainWindow.webContents.isLoadingMainFrame()) {
+    if (destination.hash) queuedInvite = destination;
+  } else {
+    loadHosted(destination.hash ? destination : (queuedInvite || retryDestination));
   }
 }
 
