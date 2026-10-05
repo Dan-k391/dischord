@@ -30,7 +30,7 @@
   const IMG_CHUNK = 14000;        // chars per image chunk over the data channel
   const IMG_MAX = 4500000;        // max data-URL length (~3.3 MB image)
 
-  const AV_DEFAULTS = { camQ: '720', camFps: 30, camBr: 2500, ssQ: '1080', ssFps: 30, ssBr: 6000, ssHint: 'detail', recvCap: 0, codec: '', selfPreview: 'full', showStats: false };
+  const AV_DEFAULTS = { camQ: '720', camFps: 30, camBr: 2500, ssQ: '1080', ssFps: 30, ssBr: 6000, ssHint: 'detail', recvCap: 0, codec: 'h264', selfPreview: 'full', showStats: false };
   const CAM_BRS = [300, 600, 1000, 1500, 2500, 4000, 6000, 8000];
   const SS_BRS = [1000, 2500, 4000, 6000, 8000, 12000, 16000, 20000, 30000, 40000];
   const VIEW_BRS = [300, 800, 1500, 2500, 4000, 6000, 8000, 12000, 20000, 30000, 40000];
@@ -113,6 +113,7 @@
   if (av.sendBr && !store.get('av', {}).camBr) av.camBr = av.sendBr; // migrate v4 settings
   delete av.sendBr; delete av.recvBr;
   if (!av.v8) { av.ssQ = 'source'; if (av.ssBr < 8000) av.ssBr = 8000; av.v8 = 1; store.set('av', av); } // v8: native-res screen share by default
+  if (!av.v9) { if (!av.codec) av.codec = 'h264'; av.v9 = 1; store.set('av', av); } // v9: H.264 by default so the GPU does the encoding
   const cur = { sid: store.get('lastSid', null), cid: null };
   const msgs = {};       // sid -> { cid: [msg] }
   const known = {};      // sid -> { userId: user }   (persisted)
@@ -696,10 +697,11 @@
   }
 
   // Each video/screen on the stage is its own view-only connection, so we control layout + bitrate.
-  function viewUrl(vs, br) {
+  function viewUrl(vs, br, scale) {
     const p = new URLSearchParams({ view: vs, room: roomFor(server(voice.sid), 'v' + voice.cid), password: server(voice.sid).key });
     // &scale=100: don't let VDO.Ninja downscale to the tile size (that was the blur)
-    return VDO + '?' + p.toString() + '&solo&noaudio&cleanoutput&nocontrolbar&hideheader&scale=100&sharperscreen' +
+    // a scale below 100 asks the sender to encode a smaller copy for this viewer (cheap self preview)
+    return VDO + '?' + p.toString() + '&solo&noaudio&cleanoutput&nocontrolbar&hideheader' + (scale && scale < 100 ? `&scale=${scale}` : '&scale=100&sharperscreen') +
       (br ? `&bitrate=${br}` : '') + (av.codec ? `&codec=${av.codec}` : '');
   }
 
@@ -843,6 +845,7 @@
 
     if (voice && e.source === voice.iframe.contentWindow) {
       if (d.loudness) onLoudness(d.loudness);
+      if (d.stats) onSendStats(false, d.stats);
       return;
     }
     if (voice && voice.ssFrame && e.source === voice.ssFrame.contentWindow) {
@@ -850,6 +853,7 @@
         if (d.value) { voice.ss = true; broadcastState(); renderControls(); renderPresence(); }
         else stopShare(); // cancelled the picker, or hit Chrome's "Stop sharing"
       }
+      if (d.stats) onSendStats(true, d.stats);
       return;
     }
 
@@ -1128,7 +1132,7 @@
         if (hasVid) {
           const f = document.createElement('iframe');
           f.allow = 'autoplay; fullscreen; picture-in-picture';
-          f.src = viewUrl(t.vs, br);
+          f.src = viewUrl(t.vs, br, t.self && av.selfPreview === 'low' ? 35 : 100);
           media.innerHTML = '';
           media.appendChild(f);
         } else if (t.screen) media.innerHTML = `<div class="share-ph">${icon('screen')}<span>You're sharing your screen</span></div>`;
@@ -1139,7 +1143,7 @@
         if (f && f.contentWindow) f.contentWindow.postMessage({ bitrate: br }, '*');
       }
       el.classList.toggle('video', hasVid);
-      if (!hasVid) el.querySelector('.tile-stats').textContent = '';
+      if (!hasVid) el.querySelector('.tile-stats').textContent = sendNote[t.key] || '';
       el.classList.toggle('screen', t.screen);
       el.classList.toggle('self', t.self);
       const st = t.st;
@@ -1218,6 +1222,46 @@
       const f = el.classList.contains('video') && el.querySelector('.tile-media iframe');
       if (f && f.contentWindow) f.contentWindow.postMessage({ getStats: true }, '*');
     });
+    if (voice && voice.cam) voicePost({ getStats: true }); else setSendNote(false, '');
+    if (voice && voice.ss && voice.ssFrame.contentWindow) voice.ssFrame.contentWindow.postMessage({ getStats: true }, '*'); else setSendNote(true, '');
+  }
+
+  // ---- what is throttling my own stream: the browser lowers fps / resolution / bitrate by itself
+  // when the encoder runs out of CPU or the uplink can't carry the bitrate. Shown on my own tiles.
+  const sendNote = {};         // tile key -> text
+  const limitRuns = {};        // 'cam' | 'ss' -> { why, n, told }
+  function setSendNote(screen, text) {
+    if (!me) return;
+    const key = me.id + (screen ? ':s' : '');
+    if ((sendNote[key] || '') === text) return;
+    sendNote[key] = text;
+    const el = tileEls.get(key);
+    if (el && !el.classList.contains('video')) el.querySelector('.tile-stats').textContent = text;
+  }
+  function onSendStats(screen, stats) {
+    const pcs = Object.values((stats && stats.outbound) || {}).filter((o) => o && typeof o === 'object' && (o.quality_limitation_reason !== undefined || o.video_encoder));
+    if (!pcs.length) return setSendNote(screen, '');
+    const reasons = pcs.map((o) => o.quality_limitation_reason).filter((r) => r && r !== 'none');
+    const why = reasons.includes('cpu') ? 'cpu' : reasons.includes('bandwidth') ? 'bandwidth' : '';
+    const up = Math.min(...pcs.map((o) => +o.available_outgoing_bitrate_kbps || Infinity));
+    const enc = pcs.map((o) => o.video_encoder).find(Boolean) || '';
+    const hw = /MediaFoundation|VideoToolbox|Vaapi|V4L2|D3D|Nv|Amf|Qsv|External/i.test(enc);
+    const parts = [];
+    if (why) parts.push(why === 'cpu' ? 'CPU-limited' : 'uplink-limited');
+    parts.push(pcs.length + (pcs.length === 1 ? ' encode' : ' encodes'));
+    if (enc) parts.push(hw ? 'hardware' : 'software');
+    if (isFinite(up)) parts.push('uplink ' + mbps(Math.round(up)));
+    setSendNote(screen, 'sending: ' + parts.join(' · '));
+
+    const run = limitRuns[screen ? 'ss' : 'cam'] || (limitRuns[screen ? 'ss' : 'cam'] = { why: '', n: 0, told: {} });
+    if (why !== run.why) { run.why = why; run.n = 0; }
+    if (why && ++run.n === 4 && !run.told[why]) { // ~8s in a row, once per reason
+      run.told[why] = 1;
+      const what = screen ? 'screen share' : 'camera';
+      toast(why === 'cpu'
+        ? `Your ${what} is being throttled: this PC can't encode it fast enough (${pcs.length} ${hw ? 'hardware' : 'software'} encode${pcs.length === 1 ? '' : 's'}). Try a lower resolution, the H.264 codec, or a Low / Hidden own preview.`
+        : `Your ${what} is being throttled: your upload can't carry the bitrate${isFinite(up) ? ' (about ' + mbps(Math.round(up)) + ' available)' : ''}. Pick a bitrate below that for a steady stream.`, 12000);
+    }
   }
   function onTileStats(el, stats) {
     const inbound = stats && stats.inbound;
@@ -1239,6 +1283,7 @@
     if (codec) parts.push(String(codec).replace(/^video\//i, '').toUpperCase());
     if (loss >= 1) parts.push(loss.toFixed(1) + '% loss');
     if (p2p.candidateType_remote === 'relay') parts.push('relayed');
+    if (sendNote[el.dataset.key]) parts.push(sendNote[el.dataset.key]);
     el.querySelector('.tile-stats').textContent = parts.join(' · ');
   }
 
@@ -1573,12 +1618,12 @@
   $('modalBack').addEventListener('mousedown', (e) => { if (e.target === $('modalBack') && $('modalBack').dataset.dismiss) closeModal(); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('modalBack').dataset.dismiss) closeModal(); });
 
-  function toast(text) {
+  function toast(text, ms) {
     const t = $('toast');
     t.textContent = text;
     t.classList.remove('hidden');
     clearTimeout(toast.tm);
-    toast.tm = setTimeout(() => t.classList.add('hidden'), 3000);
+    toast.tm = setTimeout(() => t.classList.add('hidden'), ms || 3000);
     return false;
   }
 
@@ -1667,7 +1712,7 @@
         </div>
         <h3>Watching others</h3>
         <div class="grid3">
-          <div><label>Video codec</label><select id="aCodec">${opt('', av.codec, 'Auto')}${opt('vp9', av.codec, 'VP9 (sharper)')}${opt('av1', av.codec, 'AV1 (sharpest, more CPU)')}${opt('h264', av.codec, 'H.264 (hardware, low CPU)')}</select></div>
+          <div><label>Video codec</label><select id="aCodec">${opt('h264', av.codec, 'H.264 (GPU encoding, recommended)')}${opt('', av.codec, 'Auto (usually VP8, CPU)')}${opt('vp9', av.codec, 'VP9 (sharper, CPU)')}${opt('av1', av.codec, 'AV1 (sharpest, most CPU)')}</select></div>
           <div><label>Your own preview</label><select id="aSelf">${opt('full', av.selfPreview, 'Full quality')}${opt('low', av.selfPreview, 'Low (saves CPU)')}${opt('off', av.selfPreview, 'Hidden')}</select></div>
           <div style="grid-column: span 3"><label>Max download per stream</label><select id="aRecv">${opt(0, av.recvCap, 'No limit (use each sender\'s setting)')}${VIEW_BRS.map((k) => opt(k, av.recvCap, 'Up to ' + mbps(k))).join('')}</select></div>
         </div>
@@ -1694,7 +1739,7 @@
         store.set('me', me);
         const next = {
           camQ: $('aCamQ').value, camFps: +$('aCamFps').value, camBr: +$('aCamBr').value,
-          ssQ: $('aSsQ').value, ssFps: +$('aSsFps').value, ssBr: +$('aSsBr').value, ssHint: $('aSsHint').value, recvCap: +$('aRecv').value, codec: $('aCodec').value, selfPreview: $('aSelf').value, showStats: $('aStats').checked, v8: 1,
+          ssQ: $('aSsQ').value, ssFps: +$('aSsFps').value, ssBr: +$('aSsBr').value, ssHint: $('aSsHint').value, recvCap: +$('aRecv').value, codec: $('aCodec').value, selfPreview: $('aSelf').value, showStats: $('aStats').checked, v8: 1, v9: 1,
         };
         const sendKeys = ['camQ', 'camFps', 'camBr'];
         const shareKeys = ['ssQ', 'ssFps', 'ssBr', 'ssHint'];

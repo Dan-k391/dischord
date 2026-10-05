@@ -376,7 +376,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
   background: rgba(0,0,0,.6); color: #fff; padding: 3px 8px; border-radius: 6px; font-size: 13px; font-weight: 600;
 }
 .tile-name span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tile-tools { position: absolute; top: 8px; right: 8px; display: flex; gap: 6px; opacity: 0; transition: opacity .15s; }
+.tile-tools { position: absolute; bottom: 8px; right: 8px; display: flex; gap: 6px; opacity: 0; transition: opacity .15s; }
 .tile:hover .tile-tools { opacity: 1; }
 .tool-btn {
   border: 0; border-radius: 6px; background: rgba(0,0,0,.65); color: #fff; height: 30px; padding: 0 8px;
@@ -480,7 +480,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .ctx-emojis button:hover { background: #404249; }
 
 /* ---------- v8: stream stats ---------- */
-.tile-stats { position: absolute; right: 10px; bottom: 10px; padding: 3px 8px; border-radius: 6px; background: rgba(0,0,0,.6); color: #e3e5e8; font: 600 11px/1.4 ui-monospace, Consolas, monospace; opacity: 0; transition: opacity .15s; pointer-events: none; }
+.tile-stats { position: absolute; right: 10px; top: 10px; max-width: calc(100% - 20px); padding: 3px 8px; border-radius: 6px; background: rgba(0,0,0,.6); color: #e3e5e8; font: 600 11px/1.4 ui-monospace, Consolas, monospace; opacity: 0; transition: opacity .15s; pointer-events: none; }
 .tile-stats:empty { display: none; }
 .tile:hover .tile-stats, #tiles.show-stats .tile-stats { opacity: 1; }
 #tiles.focus-mode .tile:not(.focused) .tile-stats { display: none; }
