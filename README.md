@@ -39,6 +39,7 @@ To use it with friends over the internet, host the folder on any static host
 ## Limits (by design, since there's no server)
 - File contents are never automatically transferred, previewed, or saved by Dischord. Recipients only save files after clicking **Download**. Only file names, sizes and types are included in local chat history.
 - Downloads are assembled in browser memory before saving, so practical file sizes depend on available memory and the connection.
+- File transfers keep up to 32 small chunks in flight, allowing newer peers to send continuously while confirmations return. An older peer falls back to one chunk at a time; both participants should refresh after an update for faster transfers.
 - Keep the original sender tab open for downloads. Reloading or closing it removes its file offers; files cannot be recovered from other recipients or chat history. A recipient can cancel a transfer, and incomplete downloads are discarded from memory.
 - If nobody else is online, messages you send are only delivered when someone who has them
   comes back online alongside the recipient.

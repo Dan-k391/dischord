@@ -94,9 +94,19 @@ function createHarness() {
     const connections = new Map();
     const protocolContext = {
       send(sid, payload, target) {
-        const packet = { sid, payload: copy({ ...payload, u: { id: uid } }), from: uuid, to: target };
+        // Earlier consent and lifecycle tests deliberately use the legacy
+        // one-chunk receiver. Throughput tests opt into the native/new window.
+        if (payload.t === 'f-request' && options.requestWindow !== 'native') {
+          payload = { ...payload };
+          if (options.requestWindow === 'legacy') delete payload.window;
+          else payload.window = options.requestWindow === undefined ? 1 : options.requestWindow;
+        }
+        const packet = { sid, payload: copy({ ...payload, u: { id: uid } }), from: uuid, to: target, sentAt: clock.now() };
         packets.push(packet);
-        queue.push(packet);
+        if (options.synchronous) {
+          const recipient = peers.get(target);
+          if (recipient) recipient.api.onPacket(sid, packet.payload, uuid, uid);
+        } else queue.push(packet);
       },
       getMessage: (sid, cid, mid) => messages.get(messageKey(sid, cid, mid)) || null,
       resolvePeer: (sid, author) => resolve.has(author) ? resolve.get(author) : null,
@@ -549,7 +559,7 @@ test('an unacknowledged sender times out, frees its slot, and accepts a fresh re
   assert.strictEqual(file.reads.length, 3, 'Fresh transfer reads both chunks after the abandoned first read');
 }));
 
-test('one active receiver bounds RAM usage across different file messages', () => withHarness(async (h) => {
+test('one active receiver prevents concurrent download buffers for different file messages', () => withHarness(async (h) => {
   const alice = h.endpoint('alice'), bob = h.endpoint('bob');
   const file = trackedFile(Buffer.from('bounded receiver'));
   const meta = offer(h, alice, file);
@@ -637,6 +647,193 @@ test('exact peer membership prevents a disconnected tab from reading the next ch
   assert.strictEqual(h.queue.length, 0);
   assert.strictEqual(h.saves.length, 0);
 }));
+
+test('native receivers request a bounded pipeline and cumulative ACKs release only sent chunks', () => withHarness(async (h) => {
+  const alice = h.endpoint('alice'), bob = h.endpoint('bob', { requestWindow: 'native' }), eve = h.endpoint('eve');
+  const limit = h.module.MAX_WINDOW;
+  assert.strictEqual(limit, 32);
+  const file = trackedFile(Buffer.alloc(h.module.CHUNK_BYTES * (limit * 2 + 3), 0xb7));
+  offer(h, alice, file);
+  assert.strictEqual(bob.api.download(sid, cid, mid), true);
+  const request = h.queue.shift();
+  assert.strictEqual(request.payload.window, limit);
+  assert.deepStrictEqual(file.reads, [], 'Only an offer/request remains unread until the sender receives consent');
+  await h.deliver(request);
+  const initial = h.queue.splice(0);
+  assert.strictEqual(initial.length, limit, 'Fill the window before waiting for a network round trip');
+  assert.strictEqual(file.reads.length, limit);
+  assert.deepStrictEqual(initial.map((p) => p.payload.index), Array.from({ length: limit }, (_, i) => i));
+  await flush();
+  assert.strictEqual(file.reads.length, limit, 'The sender must never read beyond its outstanding capacity');
+  for (const chunk of initial) await h.deliver(chunk);
+  const earlyAcks = h.queue.splice(0);
+  assert.strictEqual(earlyAcks.length, limit);
+  assert(earlyAcks.every((p) => p.payload.t === 'f-ack'));
+  const cumulative = earlyAcks[7];
+  for (const index of [-1, limit, limit + 100, 1.5, Number.MAX_SAFE_INTEGER]) {
+    alice.api.onPacket(sid, { ...cumulative.payload, index }, bob.uuid, bob.uid);
+  }
+  alice.api.onPacket(sid, cumulative.payload, eve.uuid, eve.uid);
+  alice.api.onPacket(sid, { ...cumulative.payload, token: 'wrongtoken' }, bob.uuid, bob.uid);
+  await flush();
+  assert.strictEqual(file.reads.length, limit, 'Future, malformed, wrong-peer, and wrong-token ACKs release no capacity');
+  await h.deliver(cumulative);
+  assert.strictEqual(file.reads.length, limit + 8, 'ACK 7 acknowledges the contiguous first eight chunks');
+  assert.deepStrictEqual(h.queue.map((p) => p.payload.index), Array.from({ length: 8 }, (_, i) => limit + i));
+  for (const index of [7, 6, 0]) alice.api.onPacket(sid, { ...cumulative.payload, index }, bob.uuid, bob.uid);
+  await flush();
+  assert.strictEqual(file.reads.length, limit + 8, 'Duplicate and older ACKs cannot free the same slots twice');
+  // ACK 31 follows receipt of that prefix, even if ACK 0..30 were lost/delayed.
+  await h.deliver(earlyAcks[limit - 1]);
+  assert.strictEqual(file.reads.length, limit * 2);
+  assert.strictEqual(h.queue.length, limit, 'Unacknowledged chunks remain capped at the window size');
+  await h.drain();
+  assert.strictEqual(h.saves.length, 1);
+  assert.strictEqual(state(bob).state, 'complete');
+  assert.deepStrictEqual(Buffer.from(await h.saves[0].blob.arrayBuffer()), Buffer.alloc(file.size, 0xb7));
+}));
+
+test('legacy or invalid requested windows use one chunk, and oversized valid windows are capped', async () => {
+  const requests = [
+    { value: 'legacy', expected: 1 }, { value: 0, expected: 1 }, { value: -1, expected: 1 },
+    { value: 1.5, expected: 1 }, { value: null, expected: 1 }, { value: '32', expected: 1 },
+    { value: Number.MAX_SAFE_INTEGER + 1, expected: 1 }, { value: 4, expected: 4 },
+    { value: 99, expected: 32 },
+  ];
+  for (const { value, expected } of requests) await withHarness(async (h) => {
+    const alice = h.endpoint('alice'), bob = h.endpoint('bob', { requestWindow: value });
+    const file = trackedFile(Buffer.alloc(h.module.CHUNK_BYTES * 40));
+    offer(h, alice, file);
+    bob.api.download(sid, cid, mid);
+    await h.deliver(h.queue.shift());
+    assert.strictEqual(file.reads.length, expected, 'Requested window ' + value + ' must negotiate ' + expected);
+    assert.strictEqual(h.queue.length, expected);
+  });
+});
+
+test('an ACK for a chunk still being read cannot advance or duplicate the read pump', () => withHarness(async (h) => {
+  const alice = h.endpoint('alice'), bob = h.endpoint('bob', { requestWindow: 'native' });
+  const limit = h.module.MAX_WINDOW, bytes = Buffer.alloc(h.module.CHUNK_BYTES * (limit + 2), 0x4e);
+  const reads = [], pending = [];
+  const file = { name: 'slow-window.bin', type: '', size: bytes.length,
+    slice(start, end) {
+      reads.push([start, end]);
+      return { arrayBuffer: () => new Promise((resolve) => pending.push(() =>
+        resolve(Uint8Array.from(bytes.subarray(start, end)).buffer))) };
+    },
+  };
+  offer(h, alice, file);
+  bob.api.download(sid, cid, mid);
+  const request = h.queue.shift();
+  await h.deliver(request);
+  assert.strictEqual(reads.length, 1);
+  alice.api.onPacket(sid, { ...request.payload, t: 'f-ack', index: 0 }, bob.uuid, bob.uid);
+  await flush();
+  assert.strictEqual(reads.length, 1, 'A pending read has not yet sent chunk zero');
+  pending.shift()();
+  await flush();
+  assert.strictEqual(reads.length, 2);
+  assert.strictEqual(h.queue.length, 1);
+  alice.api.onPacket(sid, { ...request.payload, t: 'f-ack', index: 1 }, bob.uuid, bob.uid);
+  await flush();
+  assert.strictEqual(reads.length, 2, 'A future/read-pending ACK must not create another read');
+  for (let index = 1; index < limit; index++) { pending.shift()(); await flush(); }
+  assert.strictEqual(reads.length, limit, 'Each read is sequential and only the bounded initial window is sent');
+  assert.strictEqual(pending.length, 0);
+  assert.strictEqual(h.queue.length, limit);
+  await h.deliver(h.queue.shift());
+  // Delivering one valid ACK starts exactly one new read, rather than the two
+  // slots a forged/read-pending acknowledgement would have incorrectly freed.
+  const ack = h.queue.pop();
+  assert.strictEqual(ack.payload.t, 'f-ack');
+  await h.deliver(ack);
+  assert.strictEqual(reads.length, limit + 1);
+  assert.strictEqual(pending.length, 1);
+  bob.api.cancel(sid, cid, mid);
+  const cancel = h.queue.pop();
+  assert.strictEqual(cancel.payload.t, 'f-cancel');
+  await h.deliver(cancel);
+  pending.shift()();
+  await flush();
+  assert.strictEqual(reads.length, limit + 1);
+  assert.strictEqual(h.queue.length, limit - 1, 'The late read after cancellation adds no chunk');
+  assert.strictEqual(h.saves.length, 0);
+}));
+
+test('pumping unacknowledged slow reads does not extend the sender inactivity timeout', () => withHarness(async (h) => {
+  const alice = h.endpoint('alice'), bob = h.endpoint('bob', { requestWindow: 'native' });
+  const pending = [], file = { name: 'stalled-acks.bin', type: '', size: h.module.CHUNK_BYTES * 40,
+    slice(start, end) { return { arrayBuffer: () => new Promise((resolve) =>
+      pending.push(() => resolve(new Uint8Array(end - start).buffer))) }; },
+  };
+  offer(h, alice, file);
+  bob.api.download(sid, cid, mid);
+  await h.deliver(h.queue.shift());
+  for (let elapsed = 1000; elapsed < h.module.TIMEOUT_MS; elapsed += 1000) {
+    h.clock.advance(1000);
+    pending.shift()();
+    await flush();
+  }
+  const chunkCount = h.packets.filter((p) => p.payload.t === 'f-chunk').length;
+  assert(chunkCount > 1);
+  h.clock.advance(1001);
+  assert(h.packets.some((p) => p.payload.t === 'f-error' && p.from === alice.uuid),
+    'Sending without ACK progress must expire at the original inactivity deadline');
+  pending.shift()();
+  await flush();
+  assert.strictEqual(h.packets.filter((p) => p.payload.t === 'f-chunk').length, chunkCount,
+    'A read that finishes after timeout cannot send another chunk');
+  assert.strictEqual(h.saves.length, 0);
+  assert.strictEqual(h.clock.count(), 0);
+}));
+
+test('a synchronous transport ACK can complete while the guarded read pump is running', () => withHarness(async (h) => {
+  const alice = h.endpoint('alice', { synchronous: true });
+  const bob = h.endpoint('bob', { requestWindow: 'native', synchronous: true });
+  const bytes = Buffer.alloc(h.module.CHUNK_BYTES * 2 + 3, 0x96), file = trackedFile(bytes);
+  offer(h, alice, file);
+  assert.strictEqual(bob.api.download(sid, cid, mid), true);
+  await flush();
+  assert.strictEqual(file.reads.length, 3);
+  assert.strictEqual(h.saves.length, 1);
+  assert.strictEqual(state(bob).state, 'complete');
+  assert.deepStrictEqual(Buffer.from(await h.saves[0].blob.arrayBuffer()), bytes);
+  assert.strictEqual(h.queue.length, 0);
+  assert.strictEqual(h.clock.count(), 0);
+}));
+
+test('a 100 ms RTT simulation pipelines downloads faster while preserving every byte', async () => {
+  async function transfer(requestWindow) {
+    let result;
+    await withHarness(async (h) => {
+      const alice = h.endpoint('alice'), bob = h.endpoint('bob', { requestWindow });
+      const bytes = Buffer.alloc(h.module.CHUNK_BYTES * 65 + 7);
+      for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 167 + 83) % 256;
+      offer(h, alice, trackedFile(bytes));
+      const started = h.clock.now();
+      bob.api.download(sid, cid, mid);
+      let steps = 0;
+      while (h.queue.length) {
+        assert(++steps < 200, 'The simulated transport must settle');
+        h.queue.sort((a, b) => a.sentAt - b.sentAt);
+        const packet = h.queue.shift();
+        // Each direction costs 50 ms, producing a 100 ms chunk/ACK RTT.
+        h.clock.advance(Math.max(0, packet.sentAt + 50 - h.clock.now()));
+        await h.deliver(packet);
+      }
+      assert.strictEqual(h.saves.length, 1);
+      assert.strictEqual(state(bob).state, 'complete');
+      assert.deepStrictEqual(Buffer.from(await h.saves[0].blob.arrayBuffer()), bytes);
+      assert.strictEqual(h.clock.count(), 0);
+      result = { elapsed: h.clock.now() - started, bytes: bytes.length };
+    });
+    return result;
+  }
+  const legacy = await transfer('legacy'), pipelined = await transfer('native');
+  assert.strictEqual(pipelined.bytes, legacy.bytes);
+  assert(pipelined.elapsed * 10 <= legacy.elapsed,
+    `Pipelining should improve latency-bound throughput: ${legacy.elapsed} ms legacy versus ${pipelined.elapsed} ms windowed`);
+});
 
 (async () => {
   let failed = 0;

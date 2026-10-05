@@ -8,6 +8,7 @@
   'use strict';
 
   const CHUNK_BYTES = 12 * 1024;
+  const MAX_WINDOW = 32;
   const TIMEOUT_MS = 15000;
   const MAX_SENDERS = 3;
   const MAX_RECEIVERS = 1;
@@ -71,6 +72,9 @@
 
     function change(sid, cid, mid, state, progress = 0, message = '') {
       const k = keyOf(sid, cid, mid);
+      const previous = states.get(k);
+      if (state === 'receiving' && previous && previous.state === state &&
+          previous.progress === progress && previous.message === message) return;
       states.delete(k);
       states.set(k, { state, progress, message });
       // Status is disposable UI state; it must not grow with indefinite chat history.
@@ -108,7 +112,7 @@
       const message = messageFor(t.sid, t.cid, t.mid);
       const offer = offers.get(t.offerKey);
       const connected = typeof context.isPeer === 'function' ? context.isPeer(t.sid, t.uid, t.uuid) :
-        validPeer(context.resolvePeer(t.sid, t.uid));
+        context.resolvePeer(t.sid, t.uid) === t.uuid;
       return message && message.author === context.userId() && sameMeta(message.meta, t.meta) &&
         offer && offer.file === t.file && sameMeta(offer.meta, t.meta) && connected;
     }
@@ -134,28 +138,36 @@
     }
 
     async function pump(t) {
+      // Keep one read in flight while filling a bounded window of unacknowledged chunks.
+      if (t.pumping) return;
       if (!aliveSender(t)) { stopSender(t); return; }
-      // A single chunk is read at a time. Even slow/unresolved reads expire.
-      const index = t.index;
-      armSender(t);
+      t.pumping = true;
       try {
-        const start = index * CHUNK_BYTES;
-        const end = Math.min(start + CHUNK_BYTES, t.meta.size);
-        const buffer = await t.file.slice(start, end).arrayBuffer();
-        // Deletion, cancellation and disconnect can all happen while reading.
-        if (!aliveSender(t) || t.index !== index) { stopSender(t); return; }
-        const bytes = new Uint8Array(buffer);
-        if (bytes.length !== end - start) throw new Error('Invalid file read.');
-        const data = encode(bytes);
-        t.waiting = index;
-        armSender(t);
-        if (!sendPacket(t.sid, envelope(t, 'f-chunk', { index, data }), t.uuid)) {
-          stopSender(t);
+        while (t.next < t.count && t.next - t.acked - 1 < t.window) {
+          if (!aliveSender(t)) { stopSender(t); return; }
+          const index = t.next;
+          const start = index * CHUNK_BYTES;
+          const end = Math.min(start + CHUNK_BYTES, t.meta.size);
+          const buffer = await t.file.slice(start, end).arrayBuffer();
+          // Deletion, cancellation and disconnect can all happen while reading.
+          if (!aliveSender(t) || t.next !== index) { stopSender(t); return; }
+          const bytes = new Uint8Array(buffer);
+          if (bytes.length !== end - start) throw new Error('Invalid file read.');
+          const data = encode(bytes);
+          // Mark it sent first so even a synchronous ACK cannot reserve this index twice.
+          t.next++;
+          if (!sendPacket(t.sid, envelope(t, 'f-chunk', { index, data }), t.uuid)) {
+            stopSender(t);
+            return;
+          }
+          if (senders.get(t.key) !== t) return;
         }
       } catch {
         if (senders.get(t.key) !== t) return;
         sendPacket(t.sid, envelope(t, 'f-error', { message: 'The sender could not read this file.' }), t.uuid);
         stopSender(t);
+      } finally {
+        t.pumping = false;
       }
     }
 
@@ -209,7 +221,7 @@
       receivers.set(k, t);
       armReceiver(t);
       change(sid, cid, mid, 'receiving', 0);
-      if (!sendPacket(sid, envelope(t, 'f-request'), uuid)) {
+      if (!sendPacket(sid, envelope(t, 'f-request', { window: MAX_WINDOW }), uuid)) {
         stopReceiver(t, 'error', 'Unable to contact the sender.', false);
         return false;
       }
@@ -232,9 +244,14 @@
         return;
       }
       if (senders.size >= MAX_SENDERS) { error('The sender is busy. Try Download again shortly.'); return; }
+      // Older receivers request no window and retain their one-chunk pacing.
+      const window = Number.isSafeInteger(p.window) && p.window >= 1 ? Math.min(p.window, MAX_WINDOW) : 1;
       const t = { sid, cid: p.cid, mid: p.mid, key, offerKey: k, meta: offer.meta, file: offer.file,
-        token: p.token, uuid, uid, index: 0, waiting: -1, count: Math.max(1, Math.ceil(offer.meta.size / CHUNK_BYTES)), timer: null };
+        token: p.token, uuid, uid, next: 0, acked: -1, window, pumping: false,
+        count: Math.max(1, Math.ceil(offer.meta.size / CHUNK_BYTES)), timer: null };
       senders.set(key, t);
+      // Only acknowledged progress extends this deadline; reads and queued sends do not.
+      armSender(t);
       void pump(t);
     }
 
@@ -290,12 +307,14 @@
       const t = senders.get(senderKey(sid, p, uuid));
       if (t && t.uid === senderUid) {
         if (p.t === 'f-cancel' || p.t === 'f-error') stopSender(t);
-        else if (p.t === 'f-ack' && Number.isSafeInteger(p.index) && p.index === t.waiting && p.index === t.index) {
-          clearTimeout(t.timer);
-          t.waiting = -1;
-          t.index++;
-          if (t.index >= t.count) stopSender(t);
-          else void pump(t);
+        else if (p.t === 'f-ack' && Number.isSafeInteger(p.index) && p.index > t.acked && p.index < t.next) {
+          // Ordered receivers make ACKs cumulative. Duplicates and unsent indices add no capacity.
+          t.acked = p.index;
+          if (t.acked + 1 >= t.count) stopSender(t);
+          else {
+            armSender(t);
+            void pump(t);
+          }
         }
       }
       if (p.t === 'f-error' || p.t === 'f-cancel') {
@@ -359,5 +378,5 @@
     };
   }
 
-  window.DischordFiles = Object.freeze({ cleanMeta, formatSize, create, CHUNK_BYTES, TIMEOUT_MS });
+  window.DischordFiles = Object.freeze({ cleanMeta, formatSize, create, CHUNK_BYTES, MAX_WINDOW, TIMEOUT_MS });
 })();

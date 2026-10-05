@@ -244,12 +244,13 @@
   // Every payload carries who I am and my voice state, so presence is never stale.
   function send(sid, payload, uuid) {
     const m = meshes[sid];
-    if (!m || !m.iframe.contentWindow) return;
+    if (!m || !m.iframe.contentWindow) return false;
     const inV = myVoiceIn(sid);
     const body = { v: PROTO, u: me, vc: inV, vs: inV ? voice.vs : null, vss: inV && voice.ss ? voice.ssVs : null, st: myState(), ...payload };
     const o = { sendData: { dischord: body } };
     if (uuid) o.UUID = uuid;
     m.iframe.contentWindow.postMessage(o, '*');
+    return true;
   }
   const broadcastState = () => { for (const sid in meshes) send(sid, { t: 'ping' }); };
 
@@ -647,6 +648,28 @@
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
+  const filePaints = new Map();
+  let filePaintTimer = null;
+  function queueFileCardPaint(sid, cid, mid) {
+    if (sid !== cur.sid || cid !== cur.cid) return;
+    const key = sid + '/' + cid + '/' + mid;
+    const status = fileTransfers.status(sid, cid, mid);
+    if (status.state !== 'receiving' || status.progress === 0) {
+      filePaints.delete(key);
+      paintFileCards(mid); // start, completion and errors are shown immediately
+      return;
+    }
+    filePaints.set(key, { sid, cid, mid });
+    if (filePaintTimer !== null) return;
+    filePaintTimer = setTimeout(() => {
+      filePaintTimer = null;
+      const updates = [...filePaints.values()];
+      filePaints.clear();
+      for (const update of updates) {
+        if (update.sid === cur.sid && update.cid === cur.cid) paintFileCards(update.mid);
+      }
+    }, 100);
+  }
   const fileTransfers = window.DischordFiles.create({
     send,
     getMessage: (sid, cid, mid) => channel(server(sid), cid)?.type === 'text' ? (getMsgs(sid)[cid] || []).find((m) => m.id === mid) : undefined,
@@ -659,7 +682,7 @@
     },
     userId: () => me && me.id,
     randomId: () => rid(20),
-    onChange: (sid, cid) => { if (sid === cur.sid && cid === cur.cid) paintFileCards(); },
+    onChange: queueFileCardPaint,
     saveDownload: saveFileDownload,
   });
 
@@ -771,10 +794,14 @@
     return `${icon('copy')}<div class="file-info"><strong>${esc(m.file.name)}</strong><span>${esc(window.DischordFiles.formatSize(m.file.size))}</span><small role="status">${esc(label)}</small></div>` +
       (active ? `<button type="button" class="btn" data-file-cancel="${esc(m.id)}">Cancel</button>` : `<button type="button" class="btn" data-file-download="${esc(m.id)}" ${unavailable ? 'disabled' : ''}>${status.state === 'error' ? 'Retry download' : 'Download'}</button>`);
   }
-  function paintFileCards() {
+  function paintFileCards(mid) {
     document.querySelectorAll('[data-file-card]').forEach((el) => {
+      if (el.dataset.fileCard !== mid) return;
       const m = (getMsgs(cur.sid)[cur.cid] || []).find((x) => x.id === el.dataset.fileCard);
-      if (m && !m.del && m.file) el.innerHTML = fileCardContent(cur.sid, m);
+      if (m && !m.del && m.file) {
+        const html = fileCardContent(cur.sid, m);
+        if (el.innerHTML !== html) el.innerHTML = html;
+      }
     });
   }
 
@@ -2214,7 +2241,7 @@
     broadcastState();
     if (cur.sid && cur.cid) { markRead(cur.sid, cur.cid); renderRail(); renderChannels(); }
   });
-  window.addEventListener('pagehide', () => { fileTransfers.close(); for (const sid in meshes) send(sid, { t: 'bye' }); });
+  window.addEventListener('pagehide', () => { clearTimeout(filePaintTimer); filePaints.clear(); fileTransfers.close(); for (const sid in meshes) send(sid, { t: 'bye' }); });
 
   function checkInviteHash() {
     const m = location.hash.match(/invite=([A-Za-z0-9_-]+)/);
