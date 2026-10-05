@@ -398,8 +398,27 @@
     return now() - m.seen < (m.uuids && m.uuids.size ? STALE_CONNECTED : m.vc ? STALE_VOICE : STALE_LOOSE);
   }
 
+  // The same person open twice in one call (two tabs, or the app plus a tab) would hear their own
+  // microphone come back from the other copy. Remember those streams so they are played at zero volume.
+  const ownStreams = new Map(); // connection -> { sid, vc, ids: [stream ids], seen }
+  function noteOwnInstance(sid, body, uuid) {
+    const vc = isId(body.vc) ? body.vc : null;
+    const ids = vc ? [body.vs, body.vss].filter((x) => isId(x)) : [];
+    const key = sid + '/' + (uuid || '_');
+    if (ids.length) ownStreams.set(key, { sid, vc, ids, seen: now() }); else ownStreams.delete(key);
+  }
+  function ownStreamsHere() {
+    const out = [];
+    for (const [key, o] of ownStreams) {
+      if (now() - o.seen > STALE_VOICE) { ownStreams.delete(key); continue; }
+      if (voice && o.sid === voice.sid && o.vc === voice.cid) out.push(...o.ids.filter((id) => id !== voice.vs && id !== voice.ssVs));
+    }
+    return out;
+  }
+
   function touch(sid, body, uuid) {
     const user = cleanUser(body.u);
+    if (user && user.id === me.id) noteOwnInstance(sid, body, uuid);
     if (!user || user.id === me.id) return null;
     const ms = (members[sid] = members[sid] || {});
     const prev = ms[user.id];
@@ -1443,6 +1462,38 @@
     if (!voice) return;
     joinVoice(voice.sid, voice.cid, !voice.cam); // rejoin so the camera is truly released when off
   }
+  // Sharing a screen with system audio captures everything the computer plays, including the voices of
+  // this call, and sends them back to the people speaking: that is the echo. Ask the browser to leave
+  // this page's own audio out of the capture (restrictOwnAudio); game and video sound is still shared.
+  // The publisher frame is another origin, so the request is added through VDO's eval API, repeated
+  // until the frame confirms it, which happens before it asks for the screen.
+  function shareOwnAudioPatch() {
+    if (window.__dischordOwnAudio) return;
+    var media = navigator.mediaDevices;
+    if (!media || typeof media.getDisplayMedia !== 'function') return;
+    var original = media.getDisplayMedia.bind(media);
+    media.getDisplayMedia = function (constraints) {
+      try {
+        if (constraints && constraints.audio) {
+          var audio = constraints.audio === true ? {} : Object.assign({}, constraints.audio);
+          audio.restrictOwnAudio = true;
+          constraints = Object.assign({}, constraints, { audio: audio });
+        }
+      } catch (_) { }
+      return original(constraints);
+    };
+    window.__dischordOwnAudio = true;
+    try { window.parent.postMessage({ dischordOwnAudio: 'ready' }, '*'); } catch (_) { }
+  }
+  function protectShareAudio(frame, origin) {
+    const code = '(' + shareOwnAudioPatch.toString() + ')();';
+    let tries = 0;
+    const timer = setInterval(() => {
+      if (!voice || voice.ssFrame !== frame || frame.dataset.ownAudio === 'ready' || ++tries > 250) return clearInterval(timer);
+      try { frame.contentWindow.postMessage({ function: 'eval', value: code }, origin); } catch { }
+    }, 60);
+  }
+
   function toggleShare() {
     if (!voice) return;
     if (voice.ssFrame) return stopShare();
@@ -1457,6 +1508,7 @@
     $('pubHost').appendChild(f);
     voice.ssFrame = f; voice.ssVs = ssVs; voice.ss = false; voice.ssSettings = { ...av };
     voice.ssQuality = { frame: f, streamId: ssVs, origin: new URL(VDO, location.href).origin, desired: shareSettings(av), pending: null, closed: false };
+    protectShareAudio(f, voice.ssQuality.origin);
     clearTimeout(voice.ssTimer);
     voice.ssTimer = setTimeout(() => { if (voice && voice.ssFrame === f && !voice.ss) stopShare(true); }, 120000);
     renderControls();
@@ -1644,6 +1696,7 @@
       return;
     }
     if (voice && voice.ssFrame && e.source === voice.ssFrame.contentWindow) {
+      if (d.dischordOwnAudio === 'ready') { voice.ssFrame.dataset.ownAudio = 'ready'; return; }
       const state = voice.ssQuality;
       if (d.dischordScreenQuality && state && state.pending && d.dischordScreenQuality.requestId === state.pending.requestId && e.origin === state.origin) {
         finishShareQuality(state, d.dischordScreenQuality);
@@ -2269,6 +2322,12 @@
         // Set only this stream's media element, keeping later joiners audible.
         voicePost({ target: vs, settings: { volume: Math.min(1, v) } });
       }
+    }
+    for (const vs of ownStreamsHere()) {
+      streams[vs] = 0;
+      if (!force && sentVol[vs] === 0) continue;
+      sentVol[vs] = 0;
+      voicePost({ target: vs, settings: { volume: 0 } });
     }
     voicePost({ function: 'eval', value: '(' + vdoAudioGainBridge.toString() + ')(' + JSON.stringify({ micGain: audioPercent(av.micGain), deaf, streams }) + ');' });
   }
