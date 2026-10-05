@@ -199,7 +199,7 @@ function createApp(windowOverrides = {}) {
       cleanMsg, cleanReply, replyToMessage, cancelReply, sendMessage, addAttachments,
       getMsgs, addMsg, renderMessages, renderReplyBar, renderAttachBar,
       selectChannel, deleteMessage, pending, cur, peers, fileCardContent,
-      onImgChunk, imgCache, incoming, onPeerData, mergeServer, leaveServer, composerDrafts, fileProviders,
+      onImgChunk, imgCache, incoming, onPeerData, voiceOccupants, peerGone, members, mergeServer, leaveServer, composerDrafts, fileProviders,
       requestImg, paintImages, prepareImagePreview, imageKey, requested, imagePreparing, imageErrors,
       get replyTarget() { return replyTarget; },
       get fileTransfers() { return fileTransfers; },
@@ -452,6 +452,36 @@ test('images are saved from their preview while other files keep the download ca
   assert(html.includes('class="msg-file"') && html.includes('recording.mp4'));
   assert(!html.includes('picture.png</div>'), 'No file card for the image');
   assert(!/data-legacy-download|Download original/.test(html));
+});
+
+test('presence: an idle second tab of the same person never removes them from their call', () => {
+  const app = createApp();
+  const u = { id: 'bob', name: 'Bob', color: '#57f287' };
+  const inCall = () => app.api.voiceOccupants('testserver', 'lounge').map((o) => o.user.id).join();
+  app.api.onPeerData('testserver', { u, t: 'ping', vc: 'lounge', vs: 'dcbob1', st: {} }, 'tabA');
+  assert.strictEqual(inCall(), 'bob');
+  app.api.onPeerData('testserver', { u, t: 'ping', vc: null, st: {} }, 'tabB');
+  assert.strictEqual(inCall(), 'bob', 'A ping from an idle tab must not overwrite the tab that is in voice');
+  app.api.onPeerData('testserver', { u, t: 'bye', vc: null, st: {} }, 'tabB');
+  assert.strictEqual(inCall(), 'bob', 'Closing the idle tab must not take the person offline');
+  app.api.peerGone('testserver', 'tabB');
+  assert.strictEqual(inCall(), 'bob');
+  app.api.onPeerData('testserver', { u, t: 'ping', vc: null, st: {} }, 'tabA');
+  assert.strictEqual(inCall(), '', 'Leaving the call in the tab that was in it is still reflected');
+  app.api.onPeerData('testserver', { u, t: 'ping', vc: 'lounge', vs: 'dcbob2', st: {} }, 'tabA');
+  app.api.onPeerData('testserver', { u, t: 'bye', vc: 'lounge', st: {} }, 'tabA');
+  assert.strictEqual(inCall(), '', 'Closing the only connection removes them at once');
+});
+
+test('presence: answered pings measure the round trip to a person', () => {
+  const app = createApp();
+  const u = { id: 'bob', name: 'Bob', color: '#57f287' };
+  app.api.onPeerData('testserver', { u, t: 'ping', pt: 12345, vc: 'lounge', vs: 'dcbob1', st: {} }, 'tabA');
+  const pong = app.sent.find((item) => item.packet.t === 'pong');
+  assert(pong && pong.packet.pt === 12345 && pong.uuid === 'tabA', 'A ping is echoed back to its sender only');
+  app.advance(40);
+  app.api.onPeerData('testserver', { u, t: 'pong', pt: 1000, vc: 'lounge', vs: 'dcbob1', st: {} }, 'tabA');
+  assert.strictEqual(app.api.members.testserver.bob.rtt, 40, 'Round trip on the fixture clock, which starts at 1000');
 });
 
 test('image preview: unsolicited legacy chunks cannot cache or save bytes', () => {

@@ -29,6 +29,12 @@
   const PEER_GRACE = 20000;       // a dropped mesh connection may just be reconnecting: wait this long for the next ping
   const COLORS = ['#5865f2', '#7b61ff', '#9b59b6', '#eb459e', '#ed4245', '#f47b67', '#e67e22', '#faa61a',
     '#f1c40f', '#57f287', '#3ba55c', '#1abc9c', '#00a8fc', '#3498db', '#607d8b', '#99aab5'];
+  const EMOJIS = ['😀', '😁', '😂', '🤣', '😊', '😇', '🙂', '😉', '😍', '🥰', '😘', '😋', '😛', '😜', '🤪', '🤨',
+    '😎', '🤩', '🥳', '😏', '😒', '😞', '😔', '😟', '😕', '🙁', '😣', '😫', '😩', '🥺', '😢', '😭',
+    '😤', '😠', '😡', '🤬', '🤯', '😳', '🥵', '🥶', '😱', '😨', '😰', '😥', '🤗', '🤔', '🤭', '🤫',
+    '😶', '😐', '😑', '😬', '🙄', '😯', '😮', '😲', '🥱', '😴', '🤤', '😵', '🤐', '🥴', '🤢', '🤮',
+    '👍', '👎', '👌', '✌️', '🤞', '🤟', '🤙', '👋', '👏', '🙌', '🙏', '💪', '👀', '🧠', '💀', '👻',
+    '❤️', '🧡', '💛', '💚', '💙', '💜', '🖤', '💔', '💯', '🔥', '✨', '🎉', '🎮', '🎧', '✅', '❌'];
   const REACTS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '🎉', '👀', '💯', '😎', '🙏', '🤔', '👏', '😡', '✅', '❌'];
   const IMG_CHUNK = 14000;        // chars per image chunk over the data channel
   const IMG_MAX = 4500000;        // max data-URL length (~3.3 MB image)
@@ -273,7 +279,7 @@
     m.iframe.contentWindow.postMessage(o, '*');
     return true;
   }
-  const broadcastState = () => { for (const sid in meshes) send(sid, { t: 'ping' }); };
+  const broadcastState = () => { for (const sid in meshes) send(sid, { t: 'ping', pt: now() }); };
 
   function hello(sid, uuid, want) {
     const s = server(sid);
@@ -302,8 +308,10 @@
     const m = p && p.uid && members[sid] && members[sid][p.uid];
     if (m) {
       m.uuids.delete(uuid);
-      // Not offline at once: the connection may be reconnecting. The next ping revives them; silence expires them.
-      if (!m.uuids.size) m.seen = Math.min(m.seen, now() - (m.vc ? STALE_VOICE : STALE_LOOSE) + PEER_GRACE);
+      // Not offline at once: the connection may be reconnecting. The next ping revives it; silence expires it.
+      const c = m.conns && m.conns.get(uuid);
+      if (c) c.seen = Math.min(c.seen, now() - (c.vc ? STALE_VOICE : STALE_LOOSE) + PEER_GRACE);
+      else if (!m.conns && !m.uuids.size) m.seen = Math.min(m.seen, now() - (m.vc ? STALE_VOICE : STALE_LOOSE) + PEER_GRACE);
     }
     if (sid === cur.sid) renderPresence();
   }
@@ -316,8 +324,27 @@
     }
   }
 
+  // A person can have several connections at once (two tabs, or the desktop window plus a browser tab).
+  // Each reports its own state, so one idle tab must never overwrite or end the presence of the tab that
+  // is in a call: keep state per connection and show the one that is in voice (else the most recent).
+  function settle(m) {
+    if (!m || !m.conns) return;
+    const t = now();
+    let best = null, seen = 0;
+    for (const [key, c] of m.conns) {
+      const limit = m.uuids.has(key) ? STALE_CONNECTED : c.vc ? STALE_VOICE : STALE_LOOSE;
+      if (t - c.seen >= limit) { m.conns.delete(key); continue; }
+      seen = Math.max(seen, c.seen);
+      if (!best || (!!c.vc !== !!best.vc ? !!c.vc : c.seen > best.seen)) best = c;
+    }
+    m.seen = seen;
+    if (best) { m.vc = best.vc; m.vs = best.vs; m.vss = best.vss; m.st = best.st; }
+    else { m.vc = m.vs = m.vss = null; }
+  }
   function isOnline(m) {
-    if (!m || !m.seen) return false;
+    if (!m) return false;
+    if (m.conns) { settle(m); return m.conns.size > 0; }
+    if (!m.seen) return false;
     return now() - m.seen < (m.uuids && m.uuids.size ? STALE_CONNECTED : m.vc ? STALE_VOICE : STALE_LOOSE);
   }
 
@@ -329,12 +356,11 @@
     const wasOnline = isOnline(prev);
     const m = prev || { uuids: new Set() };
     m.user = user;
-    m.vc = isId(body.vc) ? body.vc : null;
-    m.vs = m.vc && isId(body.vs) ? body.vs : null;
-    m.vss = m.vc && isId(body.vss) ? body.vss : null;
-    m.st = cleanState(body.st);
-    m.seen = now();
+    const vc = isId(body.vc) ? body.vc : null;
+    if (!m.conns) m.conns = new Map();
+    m.conns.set(uuid || '_', { vc, vs: vc && isId(body.vs) ? body.vs : null, vss: vc && isId(body.vss) ? body.vss : null, st: cleanState(body.st), seen: now() });
     if (uuid) m.uuids.add(uuid);
+    settle(m);
     ms[user.id] = m;
     const k = getKnown(sid);
     if (!k[user.id] || k[user.id].name !== user.name || k[user.id].color !== user.color) {
@@ -431,7 +457,16 @@
         break;
       case 'bye': {
         const m = members[sid][t.user.id];
-        if (m) { m.seen = 0; m.uuids.clear(); }
+        // only this connection is leaving; the same person may still be here in another tab
+        if (m) { if (m.conns) m.conns.delete(uuid || '_'); m.uuids.delete(uuid); settle(m); if (!m.conns || !m.conns.size) m.seen = 0; }
+        break;
+      }
+      case 'ping':
+        if (Number.isFinite(p.pt) && uuid) send(sid, { t: 'pong', pt: p.pt }, uuid);
+        break;
+      case 'pong': {
+        const m = members[sid][t.user.id], rtt = now() - p.pt;
+        if (m && Number.isFinite(rtt) && rtt >= 0 && rtt < 60000) { m.rtt = m.rtt ? m.rtt * 0.6 + rtt * 0.4 : rtt; m.rttAt = now(); }
         break;
       }
     }
@@ -1515,8 +1550,15 @@
     const out = [];
     if (voice && voice.sid === sid && voice.cid === cid) out.push({ user: me, st: myState(), vs: voice.vs, vss: voice.ss ? voice.ssVs : null, self: true });
     const ms = members[sid] || {};
-    for (const id in ms) if (isOnline(ms[id]) && ms[id].vc === cid) out.push({ user: ms[id].user, st: ms[id].st, vs: ms[id].vs, vss: ms[id].vss });
+    for (const id in ms) if (isOnline(ms[id]) && ms[id].vc === cid) out.push({ user: ms[id].user, st: ms[id].st, vs: ms[id].vs, vss: ms[id].vss, rtt: now() - (ms[id].rttAt || 0) < 30000 ? Math.round(ms[id].rtt) : null });
     return out;
+  }
+
+  // round-trip time of my chat connection to that person (answered pings); blank for me and for old versions
+  function pingTag(o) {
+    if (o.self) return '';
+    if (o.rtt == null) return `<span class="vu-ping" title="No ping reply from ${esc(o.user.name)} yet">···</span>`;
+    return `<span class="vu-ping ${o.rtt < 120 ? 'good' : o.rtt < 300 ? 'ok' : 'bad'}" title="Ping to ${esc(o.user.name)}: ${o.rtt} ms">${o.rtt}ms</span>`;
   }
 
   function renderChannels() {
@@ -1548,7 +1590,7 @@
         ${who.length ? `<span class="count">${who.length}</span>` : ''}
         <button class="icon-btn del" data-delc="${esc(c.id)}" title="Delete channel">${icon('trash')}</button></div>`;
       if (who.length) {
-        h += `<div class="voice-users">${who.map((o) => `<div class="voice-user" data-uid="${esc(o.self ? me.id : o.user.id)}">${avatar(o.user)}<span class="vu-name">${esc(o.user.name)}</span><span class="vu-icons">${stateIcons(o.st)}</span></div>`).join('')}</div>`;
+        h += `<div class="voice-users">${who.map((o) => `<div class="voice-user" data-uid="${esc(o.self ? me.id : o.user.id)}">${avatar(o.user)}<span class="vu-name">${esc(o.user.name)}</span>${pingTag(o)}<span class="vu-icons">${stateIcons(o.st)}</span></div>`).join('')}</div>`;
       }
     }
     el.innerHTML = h;
@@ -1563,6 +1605,7 @@
     $('voiceView').classList.toggle('hidden', !c || c.type !== 'voice');
     const inThisVoice = !!(voice && c && voice.sid === cur.sid && voice.cid === c.id);
     $('voiceStage').classList.toggle('offstage', !inThisVoice);
+    updateMini();
     $('voiceStage').classList.toggle('hidden', !voice);
     $('mainHeader').classList.toggle('hidden', !c);
     $('voiceView').classList.toggle('behind', inThisVoice);
@@ -1613,6 +1656,20 @@
       if (st.s && o.vss) out.push({ key: o.user.id + ':s', uid: o.user.id, user: o.user, st, self: !!o.self, screen: true, vs: hideSelf ? '' : o.vss });
     }
     return out;
+  }
+
+  // While I'm in a call but looking elsewhere, keep one stream visible as a small click-to-return preview.
+  function updateMini() {
+    const stage = $('voiceStage');
+    let key = null;
+    if (voice && stage.classList.contains('offstage')) {
+      const vids = [...tileEls].filter(([, el]) => el.classList.contains('video'));
+      const pick = vids.find(([k]) => k === focusUid) || vids.find(([, el]) => el.classList.contains('screen') && !el.classList.contains('self')) ||
+        vids.find(([, el]) => !el.classList.contains('self')) || vids[0];
+      if (pick) key = pick[0];
+    }
+    stage.classList.toggle('mini', !!key);
+    tileEls.forEach((el, k) => el.classList.toggle('mini-main', k === key));
   }
 
   function renderStage() {
@@ -1709,6 +1766,7 @@
     $('tiles').classList.toggle('show-stats', !!av.showStats);
     paintSpeaking();
     applyVolumes();
+    updateMini();
   }
 
   // ---- per-user volume / mute (applied inside the publisher, which plays everyone's audio)
@@ -2290,9 +2348,9 @@
   }
 
   // tiny emoji picker anchored to an element
-  function emojiPicker(anchor, onPick) {
+  function emojiPicker(anchor, onPick, list = REACTS) {
     const m = $('emojiMenu');
-    m.innerHTML = REACTS.map((e) => `<button data-emo="${e}">${e}</button>`).join('');
+    m.innerHTML = list.map((e) => `<button data-emo="${e}">${e}</button>`).join('');
     const r = anchor.getBoundingClientRect();
     m.classList.remove('hidden');
     const mw = m.offsetWidth, mh = m.offsetHeight;
@@ -2702,7 +2760,9 @@
   $('vsShare').onclick = toggleShare;
   $('cbShare').onclick = toggleShare;
   $('voiceWhere').onclick = showVoice;
+  $('voiceStage').addEventListener('click', () => { if ($('voiceStage').classList.contains('mini')) showVoice(); });
   $('tiles').addEventListener('click', (e) => {
+    if ($('voiceStage').classList.contains('mini')) return; // the preview only jumps back to the call
     const q = e.target.closest('[data-q]');
     if (q) { e.stopPropagation(); return qualityMenu(q.dataset.q, q); }
     const wf = e.target.closest('[data-wfs]');
@@ -2755,7 +2815,7 @@
   });
   document.addEventListener('mousedown', (e) => {
     if (!e.target.closest('#ctxMenu')) closeCtx();
-    if (!e.target.closest('#emojiMenu') && !e.target.closest('[data-react]') && !e.target.closest('#cbReact')) $('emojiMenu').classList.add('hidden');
+    if (!e.target.closest('#emojiMenu') && !e.target.closest('[data-react]') && !e.target.closest('#cbReact') && !e.target.closest('#emojiBtn')) $('emojiMenu').classList.add('hidden');
   });
   window.addEventListener('blur', closeCtx);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeCtx(); $('emojiMenu').classList.add('hidden'); if (winFs) { winFs = null; renderStage(); } } });
@@ -2764,6 +2824,17 @@
   input.addEventListener('keydown', (e) => { if (e.key === 'Escape' && replyTarget) cancelReply(); });
 
   // Files, including images: offer metadata via button, paste, or drag & drop.
+  $('emojiBtn').onclick = (e) => {
+    e.stopPropagation();
+    if (!$('emojiMenu').classList.contains('hidden')) return $('emojiMenu').classList.add('hidden');
+    emojiPicker($('emojiBtn'), (emo) => {
+      const at = input.selectionStart ?? input.value.length, to = input.selectionEnd ?? at;
+      input.value = input.value.slice(0, at) + emo + input.value.slice(to);
+      input.focus();
+      input.selectionStart = input.selectionEnd = at + emo.length;
+      input.dispatchEvent(new Event('input'));
+    }, EMOJIS);
+  };
   $('attachBtn').onclick = () => $('fileInput').click();
   $('fileInput').onchange = () => { addAttachments($('fileInput').files); $('fileInput').value = ''; };
   $('msgInput').addEventListener('paste', (e) => {

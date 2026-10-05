@@ -252,7 +252,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .vi-person { display: flex; flex-direction: column; align-items: center; gap: 8px; color: var(--text); font-weight: 600; }
 .vi-person.speaking .avatar { box-shadow: 0 0 0 3px #000, 0 0 0 6px var(--green); }
 
-#voiceStage { position: absolute; top: 48px; left: 0; right: 0; bottom: 0; background: #000; }
+#voiceStage { position: absolute; top: 48px; left: 0; right: 0; bottom: 0; background: #000; overflow: hidden; }
 #voiceStage.offstage { visibility: hidden; pointer-events: none; }
 #voiceStage.offstage * { visibility: hidden !important; }
 #callBar {
@@ -392,8 +392,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .tile:fullscreen .tile-media iframe { pointer-events: auto; }
 
 /* focus mode: one big tile, everyone else in a strip */
-#tiles.focus-mode { display: block; }
-#tiles.focus-mode .tile { position: absolute; width: 192px; bottom: 12px; left: calc(50% - (var(--sn) * 204px - 12px) / 2 + var(--i, 0) * 204px); }
+#tiles.focus-mode { display: block; --tw: min(192px, calc((100cqw - 24px - (max(var(--sn, 1), 1) - 1) * 12px) / max(var(--sn, 1), 1))); }
+#tiles.focus-mode .tile { position: absolute; width: var(--tw); bottom: 12px; left: calc(50% - (var(--sn) * (var(--tw) + 12px) - 12px) / 2 + var(--i, 0) * (var(--tw) + 12px)); }
 #tiles.focus-mode .tile.focused { left: 12px; right: 12px; top: 12px; bottom: 144px; width: auto; aspect-ratio: auto; }
 #tiles.focus-mode.no-strip .tile.focused { bottom: 12px; }
 #tiles.focus-mode .tile:not(.focused) .avatar.big { width: 48px; height: 48px; font-size: 20px; }
@@ -467,7 +467,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .re-pill.add { opacity: 0; color: var(--text-muted); }
 .re-pill.add .ico-svg { width: 16px; height: 16px; }
 .msg:hover .re-pill.add { opacity: 1; }
-#emojiMenu { position: fixed; z-index: 70; max-width: calc(100vw - 16px); box-sizing: border-box; display: grid; grid-template-columns: repeat(8, minmax(0, 36px)); gap: 2px; padding: 8px; background: var(--bg-float); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.55); }
+#emojiMenu { position: fixed; z-index: 70; max-width: calc(100vw - 16px); max-height: min(320px, calc(100vh - 16px)); overflow-y: auto; box-sizing: border-box; display: grid; grid-template-columns: repeat(8, minmax(0, 36px)); gap: 2px; padding: 8px; background: var(--bg-float); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.55); }
 #emojiMenu button { width: 100%; min-width: 0; padding: 0; overflow: hidden; height: 36px; border: 0; border-radius: 6px; background: none; font-size: 22px; }
 #emojiMenu button:hover { background: #2b2d31; transform: scale(1.1); }
 .tile-fx { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
@@ -585,3 +585,18 @@ button { font: inherit; color: inherit; cursor: pointer; }
 @media (max-width: 640px) { #sideResizer { display: none; } }
 body.resizing { cursor: col-resize; user-select: none; }
 body.resizing iframe { pointer-events: none !important; }
+
+/* ---------- v25: call preview while browsing elsewhere, emoji button, ping ---------- */
+#voiceStage.offstage.mini { visibility: visible; pointer-events: auto; top: auto; left: auto; right: 16px; bottom: 84px; width: 320px; height: 180px; z-index: 30; border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.6); cursor: pointer; }
+#voiceStage.offstage.mini #tiles { inset: 0; padding: 0; display: block; visibility: visible !important; }
+#voiceStage.offstage.mini .tile.mini-main { display: grid !important; position: absolute; left: 0; right: 0; top: 0; bottom: 0; width: auto; height: auto; aspect-ratio: auto; border-radius: 0; box-shadow: none; }
+#voiceStage.offstage.mini .tile.mini-main, #voiceStage.offstage.mini .tile.mini-main .tile-media, #voiceStage.offstage.mini .tile.mini-main .tile-media *,
+#voiceStage.offstage.mini .tile.mini-main .tile-name, #voiceStage.offstage.mini .tile.mini-main .tile-name * { visibility: visible !important; }
+#voiceStage.offstage.mini .tile.mini-main .tile-name { font-size: 11px; left: 6px; bottom: 6px; padding: 2px 6px; }
+#voiceStage.offstage.mini::after { content: "Back to call"; position: absolute; inset: 0; display: grid; place-items: center; background: rgba(0,0,0,.55); color: #fff; font-weight: 700; opacity: 0; transition: opacity .15s; }
+#voiceStage.offstage.mini:hover::after { opacity: 1; }
+.composer-row #emojiBtn { margin: 6px 6px 0 0; flex: none; }
+.vu-ping { font: 600 11px/1 ui-monospace, Consolas, monospace; color: var(--text-muted); flex: none; }
+.vu-ping.good { color: var(--green); }
+.vu-ping.ok { color: #faa61a; }
+.vu-ping.bad { color: var(--red); }
