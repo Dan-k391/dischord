@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dischord</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎧</text></svg>">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Server rail -->
+    <nav id="rail">
+      <button class="rail-btn home" id="homeBtn" title="Home">🎧</button>
+      <div class="rail-sep"></div>
+      <div id="serverList"></div>
+      <button class="rail-btn add" id="addServerBtn" title="Add a server">+</button>
+    </nav>
+
+    <!-- Channel sidebar -->
+    <aside id="sidebar">
+      <header id="serverHeader">
+        <span id="serverName">Dischord</span>
+        <button id="serverMenuBtn" class="icon-btn" title="Server options">▾</button>
+        <div id="serverMenu" class="menu hidden">
+          <button data-act="invite">Invite people</button>
+          <button data-act="addText">Create text channel</button>
+          <button data-act="addVoice">Create voice channel</button>
+          <button data-act="rename">Rename server</button>
+          <button data-act="leave" class="danger">Leave server</button>
+        </div>
+      </header>
+      <div id="channelList"></div>
+
+      <div id="voiceStatus" class="hidden">
+        <div class="vs-info">
+          <div class="vs-title">● Voice Connected</div>
+          <div class="vs-where" id="voiceWhere"></div>
+        </div>
+        <button class="icon-btn" id="vsShare" title="Share screen">🖥️</button>
+        <button class="icon-btn" id="vsCam" title="Toggle camera">📷</button>
+        <button class="icon-btn danger" id="vsLeave" title="Disconnect">✆</button>
+      </div>
+
+      <footer id="userPanel">
+        <div class="avatar" id="meAvatar"></div>
+        <div class="me-info">
+          <div class="me-name" id="meName"></div>
+          <div class="me-status" id="meStatus">Online</div>
+        </div>
+        <button class="icon-btn" id="micBtn" title="Mute">🎙️</button>
+        <button class="icon-btn" id="deafBtn" title="Deafen">🎧</button>
+        <button class="icon-btn" id="settingsBtn" title="User settings">⚙️</button>
+      </footer>
+    </aside>
+
+    <!-- Main area -->
+    <main id="main">
+      <header id="mainHeader">
+        <span id="chanIcon">#</span>
+        <span id="chanName"></span>
+        <span id="chanTopic"></span>
+        <div class="spacer"></div>
+        <button class="icon-btn" id="membersToggle" title="Member list">👥</button>
+      </header>
+
+      <section id="welcome" class="view">
+        <div class="welcome-card">
+          <h1>Welcome to Dischord</h1>
+          <p>Servers, text channels and voice/video rooms — peer to peer, powered by VDO.Ninja. No accounts, no backend.</p>
+          <div class="row">
+            <button class="btn primary" id="wCreate">Create a server</button>
+            <button class="btn" id="wJoin">Join with invite link</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="textView" class="view hidden">
+        <div id="messages"></div>
+        <div id="typing"></div>
+        <form id="composer" autocomplete="off">
+          <textarea id="msgInput" rows="1" placeholder="Message"></textarea>
+        </form>
+      </section>
+
+      <section id="voiceView" class="view hidden">
+        <div id="voiceIdle">
+          <h2 id="voiceIdleTitle"></h2>
+          <p id="voiceIdleWho"></p>
+          <button class="btn primary" id="joinVoiceBtn">Join Voice</button>
+        </div>
+      </section>
+
+      <!-- The live VDO.Ninja call lives here and survives switching channels -->
+      <div id="voiceStage" class="hidden"></div>
+    </main>
+
+    <!-- Members -->
+    <aside id="members"></aside>
+  </div>
+
+  <!-- Hidden data-only VDO.Ninja connections (one per server) -->
+  <div id="meshHost" aria-hidden="true"></div>
+
+  <!-- Modal -->
+  <div id="modalBack" class="hidden">
+    <div id="modal"></div>
+  </div>
+  <div id="toast" class="hidden"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
