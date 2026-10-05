@@ -20,6 +20,10 @@
   // Point this at a self-hosted VDO.Ninja if you like (see README).
   const VDO = (window.DISCHORD_CONFIG && window.DISCHORD_CONFIG.vdoUrl) || 'https://vdo.ninja/';
   const PROTO = 2;
+  // The release this page is running, read from the ?v= on its own script tag. Everyone reports theirs,
+  // so the app can say when someone is too out of date for a feature, or when a newer release exists.
+  const APP_VER = +(((typeof document !== 'undefined' && document.currentScript && document.currentScript.src) || '').match(/[?&]v=(\d+)/) || [0, 0])[1];
+  const KICK_VER = 36, MOVE_VER = 35; // first releases that obey these requests
   const MAX_MSGS = 500;
   const HIST_SEND = 80;           // messages per channel sent during history sync
   const PING_MS = 8000;           // presence heartbeat
@@ -316,7 +320,7 @@
     if (!m || !m.iframe.contentWindow) return false;
     const inV = myVoiceIn(sid);
     const started = inV ? callStart(sid, inV) : null;
-    const body = { v: PROTO, u: me, vc: inV, vs: inV ? voice.vs : null, vss: inV && voice.ss ? voice.ssVs : null, vt: started ? now() - started : null, st: myState(), ...payload };
+    const body = { v: PROTO, u: me, vc: inV, vs: inV ? voice.vs : null, vss: inV && voice.ss ? voice.ssVs : null, vt: started ? now() - started : null, ver: APP_VER, st: myState(), ...payload };
     const o = { sendData: { dischord: body } };
     if (uuid) o.UUID = uuid;
     m.iframe.contentWindow.postMessage(o, '*');
@@ -399,6 +403,11 @@
     const wasOnline = isOnline(prev);
     const m = prev || { uuids: new Set() };
     m.user = user;
+    m.ver = Number.isInteger(body.ver) && body.ver > 0 ? body.ver : 0; // 0 = a release from before versions were reported
+    if (APP_VER && m.ver > APP_VER && !touch.toldNewer) {
+      touch.toldNewer = true;
+      toast('A newer version of Dischord is available. Reload the page to update.', 10000);
+    }
     const vc = isId(body.vc) ? body.vc : null;
     if (vc) noteCallStart(sid, vc, Number.isFinite(body.vt) && body.vt >= 0 && body.vt < 30 * 864e5 ? now() - body.vt : now());
     if (!m.conns) m.conns = new Map();
@@ -2367,6 +2376,21 @@
     });
   }
 
+  // Kick and move are requests the other person's app carries out. Say so plainly when it can't
+  // (their page is an older release) or when it didn't (no change after a few seconds).
+  function askPeer(sid, uid, payload, minVer, doing, done, what) {
+    const m = (members[sid] || {})[uid];
+    if (!m) return;
+    const name = m.user.name;
+    if (APP_VER && (m.ver || 0) < minVer) return toast(`${name} is on an older version of Dischord and can't ${what} until they reload the page.`, 8000);
+    send(sid, payload);
+    toast(doing);
+    setTimeout(() => {
+      const now = (members[sid] || {})[uid];
+      if (now && isOnline(now) && !done(now)) toast(`${name}'s app did not respond. They may need to reload the page.`, 8000);
+    }, 4000);
+  }
+
   function userMenu(uid, x, y) {
     const self = uid === me.id;
     const sid = cur.sid;
@@ -2445,7 +2469,7 @@
             else toast('Open a text channel to mention someone.');
             return;
           }
-          case 'kick': closeCtx(); send(sid, { t: 'kick', to: uid }); return toast(`Removing ${user.name} from the call`);
+          case 'kick': closeCtx(); return askPeer(sid, uid, { t: 'kick', to: uid }, KICK_VER, `Removing ${user.name} from the call`, (m) => !m.vc, 'be kicked');
           case 'copyname': closeCtx(); navigator.clipboard && navigator.clipboard.writeText(user.name); return toast('Copied');
         }
       };
@@ -3123,7 +3147,7 @@
           if (!(voice && voice.sid === s.id && voice.cid === dest.id)) joinVoice(s.id, dest.id, !!(voice && voice.sid === s.id && voice.cam));
         } else {
           const m = (members[s.id] || {})[d.id];
-          if (m && m.vc !== dest.id) { send(s.id, { t: 'move', to: d.id, cid: dest.id }); toast(`Moving ${m.user.name} to ${dest.name}`); }
+          if (m && m.vc !== dest.id) askPeer(s.id, d.id, { t: 'move', to: d.id, cid: dest.id }, MOVE_VER, `Moving ${m.user.name} to ${dest.name}`, (x) => x.vc === dest.id, 'be moved');
         }
         return;
       }
