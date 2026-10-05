@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Dischord</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎧</text></svg>">
-  <link rel="stylesheet" href="style.css?v=7">
+  <link rel="stylesheet" href="style.css?v=8">
 </head>
 <body>
   <div id="app">
@@ -85,8 +85,14 @@
         <div id="messages"></div>
         <div id="typing"></div>
         <form id="composer" autocomplete="off">
-          <textarea id="msgInput" rows="1" placeholder="Message"></textarea>
+          <div id="attachBar" class="hidden"></div>
+          <div class="composer-row">
+            <button type="button" class="icon-btn" id="attachBtn" title="Upload an image (or paste / drop one)"><i data-icon="plusCircle"></i></button>
+            <textarea id="msgInput" rows="1" placeholder="Message"></textarea>
+          </div>
+          <input type="file" id="fileInput" accept="image/*" multiple hidden>
         </form>
+        <div class="drop-hint">Drop images to upload</div>
       </section>
 
       <section id="voiceView" class="view hidden">
@@ -112,6 +118,7 @@
           <button class="call-btn" id="cbCam" title="Turn on camera"><i data-icon="camera"></i></button>
           <button class="call-btn" id="cbShare" title="Share your screen"><i data-icon="screen"></i></button>
           <button class="call-btn" id="cbDeaf" title="Deafen"><i data-icon="headphones"></i></button>
+          <button class="call-btn" id="cbReact" title="Send a reaction"><i data-icon="smile"></i></button>
           <div class="call-sep"></div>
           <button class="call-btn" id="cbSettings" title="Voice & video settings"><i data-icon="gear"></i></button>
           <button class="call-btn danger" id="cbLeave" title="Disconnect"><i data-icon="hangup"></i></button>
@@ -131,7 +138,9 @@
     <div id="modal"></div>
   </div>
   <div id="toast" class="hidden"></div>
+  <div id="ctxMenu" class="hidden"></div>
+  <div id="emojiMenu" class="hidden"></div>
 
-  <script src="app.js?v=7"></script>
+  <script src="app.js?v=8"></script>
 </body>
 </html>

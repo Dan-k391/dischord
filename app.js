@@ -24,15 +24,19 @@
   const PING_MS = 8000;           // presence heartbeat
   const STALE_CONNECTED = 90000;  // connected peer considered gone after this long silent
   const STALE_LOOSE = 25000;      // peer with no live connection considered gone after this
-  const COLORS = ['#7b61ff', '#5865f2', '#3ba55c', '#faa61a', '#ed4245', '#eb459e', '#00a8fc', '#1abc9c', '#e67e22', '#9b59b6'];
+  const COLORS = ['#5865f2', '#7b61ff', '#9b59b6', '#eb459e', '#ed4245', '#f47b67', '#e67e22', '#faa61a',
+    '#f1c40f', '#57f287', '#3ba55c', '#1abc9c', '#00a8fc', '#3498db', '#607d8b', '#99aab5'];
+  const REACTS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '🎉', '👀', '💯', '😎', '🙏', '🤔', '👏', '😡', '✅', '❌'];
+  const IMG_CHUNK = 14000;        // chars per image chunk over the data channel
+  const IMG_MAX = 4500000;        // max data-URL length (~3.3 MB image)
 
-  const AV_DEFAULTS = { camQ: '720', camFps: 30, camBr: 2500, ssQ: '1080', ssFps: 30, ssBr: 6000, ssHint: 'detail', recvCap: 0, codec: '', selfPreview: 'full' };
+  const AV_DEFAULTS = { camQ: '720', camFps: 30, camBr: 2500, ssQ: '1080', ssFps: 30, ssBr: 6000, ssHint: 'detail', recvCap: 0, codec: '', selfPreview: 'full', showStats: false };
   const CAM_BRS = [300, 600, 1000, 1500, 2500, 4000, 6000, 8000];
-  const SS_BRS = [1000, 2500, 4000, 6000, 8000, 12000, 16000, 20000];
-  const VIEW_BRS = [300, 800, 1500, 2500, 4000, 6000, 8000, 12000, 20000];
+  const SS_BRS = [1000, 2500, 4000, 6000, 8000, 12000, 16000, 20000, 30000, 40000];
+  const VIEW_BRS = [300, 800, 1500, 2500, 4000, 6000, 8000, 12000, 20000, 30000, 40000];
   const mbps = (k) => (k >= 1000 ? (k / 1000).toFixed(k % 1000 ? 1 : 0) + ' Mbps' : k + ' kbps');
-  const CAM_Q = { '360': 2, '720': 1, '1080': 0 };
-  const SS_Q = { '720': 1, '1080': 0, '1440': -3 };
+  const CAM_Q = { '360': 2, '720': 1, '1080': 0, '1440': -3, '2160': -2 };
+  const SS_Q = { '720': 1, '1080': 0, '1440': -3, '2160': -2, source: -1 };
 
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -79,6 +83,15 @@
     trash: '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>',
     logout: '<path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/>',
     signal: '<path d="M4 20v-3M9 20v-7M14 20V9M19 20V4"/>',
+    smile: '<circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0M9 9.5h.01M15 9.5h.01"/>',
+    image: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-9 9"/>',
+    plusCircle: '<circle cx="12" cy="12" r="9.5"/><path d="M12 8v8M8 12h8"/>',
+    volume: '<path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/>',
+    eyeOff: '<path d="M3 3l18 18M10.6 6.1A9.8 9.8 0 0 1 12 6c5 0 9 6 9 6a17 17 0 0 1-3.2 3.8M6.6 6.6A17 17 0 0 0 3 12s4 6 9 6a9 9 0 0 0 4.2-1"/>',
+    copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>',
+    at: '<circle cx="12" cy="12" r="4"/><path d="M16 12v1.5a2.5 2.5 0 0 0 5 0V12a9 9 0 1 0-3.5 7.1"/>',
+    chart: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
+    check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
     expand: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
     live: '<rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><circle cx="12" cy="10.5" r="2" fill="currentColor"/>',
   };
@@ -99,6 +112,7 @@
   let av = { ...AV_DEFAULTS, ...store.get('av', {}) };
   if (av.sendBr && !store.get('av', {}).camBr) av.camBr = av.sendBr; // migrate v4 settings
   delete av.sendBr; delete av.recvBr;
+  if (!av.v8) { av.ssQ = 'source'; if (av.ssBr < 8000) av.ssBr = 8000; av.v8 = 1; store.set('av', av); } // v8: native-res screen share by default
   const cur = { sid: store.get('lastSid', null), cid: null };
   const msgs = {};       // sid -> { cid: [msg] }
   const known = {};      // sid -> { userId: user }   (persisted)
@@ -110,6 +124,9 @@
   let voice = null;      // { sid, cid, iframe, cam, ss, vs }
   let micOn = store.get('micOn', true), deaf = store.get('deaf', false);
   let membersOpen = store.get('membersOpen', true);
+  const userVol = store.get('vol', {});      // uid -> { v: 0-100 voice, sv: 0-100 stream, m: muted }
+  const hiddenVid = store.get('hidevid', {}); // uid -> true (don't receive their camera)
+  const imgCache = new Map();                // image id -> data URL
 
   const server = (sid) => servers.find((s) => s.id === sid);
   const channel = (s, cid) => s && s.channels.find((c) => c.id === cid);
@@ -138,13 +155,31 @@
     const color = typeof u.color === 'string' && /^#[0-9a-f]{6}$/i.test(u.color) ? u.color : COLORS[0];
     return { id: u.id, name: u.name.trim().slice(0, 32) || 'anon', color };
   }
+  const clampInt = (v, lo, hi) => (Number.isFinite(+v) ? Math.max(lo, Math.min(hi, Math.round(+v))) : lo);
+  function cleanImg(i) {
+    if (!i || typeof i !== 'object' || !isStr(i.id, 64) || !/^[a-z0-9]+$/i.test(i.id)) return undefined;
+    return { id: i.id, w: clampInt(i.w, 1, 10000), h: clampInt(i.h, 1, 10000), n: clampInt(i.n, 1, IMG_MAX) };
+  }
+  function cleanRe(re) {
+    if (!re || typeof re !== 'object') return undefined;
+    const out = {};
+    for (const e of Object.keys(re).slice(0, 20)) {
+      if (!e || e.length > 16 || !re[e] || typeof re[e] !== 'object') continue;
+      const o = {};
+      for (const u of Object.keys(re[e]).slice(0, 200)) if (isId(u) && Number.isFinite(+re[e][u])) o[u] = +re[e][u];
+      if (Object.keys(o).length) out[e] = o;
+    }
+    return Object.keys(out).length ? out : undefined;
+  }
   function cleanMsg(m) {
     if (!m || !isStr(m.id, 64) || !isId(m.cid) || typeof m.ts !== 'number') return null;
     const a = cleanUser(m.a);
     if (!a) return null;
     if (m.del) return { id: m.id, cid: m.cid, ts: m.ts, a, del: true, text: '' };
-    if (typeof m.text !== 'string' || !m.text.length || m.text.length > 4000) return null;
-    return { id: m.id, cid: m.cid, ts: Math.min(m.ts, now() + 60000), a, text: m.text, ed: m.ed ? 1 : undefined };
+    const text = typeof m.text === 'string' ? m.text : '';
+    const img = cleanImg(m.img);
+    if ((!text && !img) || text.length > 4000) return null;
+    return { id: m.id, cid: m.cid, ts: Math.min(m.ts, now() + 60000), a, text, img, re: cleanRe(m.re), ed: m.ed ? 1 : undefined };
   }
   function cleanServerDef(d) {
     if (!d || !isId(d.id) || !isStr(d.name, 64) || !Array.isArray(d.channels) || typeof d.v !== 'number') return null;
@@ -316,6 +351,21 @@
         if (msg && msg.a.id === t.user.id && addMsg(sid, msg)) renderIfCurrent(sid, msg.cid);
         break;
       }
+      case 'react': {
+        if (!isId(p.cid) || !isStr(p.mid, 64) || !isStr(p.e, 16) || !Number.isFinite(+p.v)) break;
+        const m = (getMsgs(sid)[p.cid] || []).find((x) => x.id === p.mid);
+        if (m && !m.del && mergeRe(m, { [p.e]: { [t.user.id]: +p.v } })) { saveMsgs(sid); renderIfCurrent(sid, p.cid); }
+        break;
+      }
+      case 'imgc':
+        onImgChunk(sid, p);
+        break;
+      case 'imgreq':
+        if (isStr(p.id, 64)) getImg(p.id).then((url) => { if (url) setTimeout(() => pushImage(sid, p.id, uuid), Math.random() * 500); });
+        break;
+      case 'creact':
+        if (isStr(p.e, 16) && voice && voice.sid === sid && p.vc === voice.cid) floatReaction(t.user.id, p.e);
+        break;
       case 'typing':
         if (isId(p.cid)) {
           const k = sid + '/' + p.cid;
@@ -330,7 +380,7 @@
         break;
       }
     }
-    if (sid === cur.sid) renderPresence();
+    if (sid === cur.sid && p.t !== 'imgc') renderPresence();
   }
 
   function mergeServer(sid, def) {
@@ -360,8 +410,11 @@
       const old = list[i];
       if (old.del) return false;
       if (m.del) { list[i] = m; saveMsgs(sid); return true; }
-      if (m.ed && m.text !== old.text) { list[i] = m; saveMsgs(sid); return true; }
-      return false;
+      let changed = false;
+      if (m.ed && m.text !== old.text) { list[i] = { ...m, re: old.re }; changed = true; }
+      if (m.re && mergeRe(list[i], m.re)) changed = true;
+      if (changed) saveMsgs(sid);
+      return changed;
     }
     let j = list.length;
     while (j > 0 && list[j - 1].ts > m.ts) j--;
@@ -369,6 +422,30 @@
     if (list.length > MAX_MSGS) list.splice(0, list.length - MAX_MSGS);
     saveMsgs(sid);
     return true;
+  }
+
+  // reactions: per (emoji, user) last-writer-wins; value = +ts (on) / -ts (off)
+  function mergeRe(target, re) {
+    let changed = false;
+    target.re = target.re || {};
+    for (const e in re) {
+      for (const u in re[e]) {
+        const v = re[e][u], cv = (target.re[e] || {})[u];
+        if (cv === undefined || Math.abs(v) > Math.abs(cv)) { (target.re[e] = target.re[e] || {})[u] = v; changed = true; }
+      }
+    }
+    return changed;
+  }
+  function toggleReaction(mid, e) {
+    const list = getMsgs(cur.sid)[cur.cid] || [];
+    const m = list.find((x) => x.id === mid);
+    if (!m || m.del) return;
+    const on = !(((m.re || {})[e] || {})[me.id] > 0);
+    const v = on ? now() : -now();
+    mergeRe(m, { [e]: { [me.id]: v } });
+    saveMsgs(cur.sid);
+    send(cur.sid, { t: 'react', cid: cur.cid, mid, e, v });
+    renderMessages();
   }
 
   function onNewMsg(sid, m) {
@@ -386,12 +463,23 @@
     const s = server(cur.sid);
     if (!s || !cur.cid) return;
     text = text.replace(/\s+$/, '').replace(/^\n+/, '');
-    if (!text) return;
+    const imgs = pending.splice(0);
+    renderAttachBar();
+    if (!text && !imgs.length) return;
     if (text.length > 4000) { toast('Message is too long (4000 characters max).'); return; }
-    const m = { id: me.id + rid(8), cid: cur.cid, ts: now(), a: me, text };
-    addMsg(s.id, m);
+    const parts = imgs.length ? imgs.map((im, i) => ({ img: im, text: i === imgs.length - 1 ? text : '' })) : [{ text }];
+    for (const part of parts) {
+      const m = { id: me.id + rid(8), cid: cur.cid, ts: now(), a: me, text: part.text };
+      if (part.img) {
+        m.img = { id: part.img.id, w: part.img.w, h: part.img.h, n: part.img.url.length };
+        imgCache.set(part.img.id, part.img.url);
+        idb.put(part.img.id, part.img.url);
+      }
+      addMsg(s.id, m);
+      send(s.id, { t: 'msg', m });
+      if (part.img) pushImage(s.id, part.img.id);
+    }
     markRead(s.id, cur.cid);
-    send(s.id, { t: 'msg', m });
     lastTypingSent = 0;
     renderMessages(true);
   }
@@ -454,9 +542,136 @@
     const s = server(sid), c = channel(s, m.cid);
     if (!s || !c) return;
     try {
-      const n = new Notification(`${m.a.name} (#${c.name}, ${s.name})`, { body: m.text.slice(0, 200), tag: sid + m.cid });
+      const n = new Notification(`${m.a.name} (#${c.name}, ${s.name})`, { body: (m.text || (m.img ? '📷 Image' : '')).slice(0, 200), tag: sid + m.cid });
       n.onclick = () => { window.focus(); selectServer(sid); selectChannel(m.cid); };
     } catch { }
+  }
+
+  // ---------------------------------------------------------------- images (P2P, chunked, stored in IndexedDB)
+  const idb = (() => {
+    let dbp = null;
+    const open = () => dbp || (dbp = new Promise((res, rej) => {
+      const r = indexedDB.open('dischord-img' + (PROFILE ? '-' + PROFILE : ''), 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('i');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    }));
+    return {
+      async get(k) {
+        try {
+          const db = await open();
+          return await new Promise((res) => { const q = db.transaction('i').objectStore('i').get(k); q.onsuccess = () => res(q.result); q.onerror = () => res(undefined); });
+        } catch { return undefined; }
+      },
+      async put(k, v) {
+        try {
+          const db = await open();
+          return await new Promise((res) => { const tx = db.transaction('i', 'readwrite'); tx.objectStore('i').put(v, k); tx.oncomplete = () => res(true); tx.onerror = () => res(false); });
+        } catch { return false; }
+      },
+    };
+  })();
+
+  async function getImg(id) {
+    if (imgCache.has(id)) return imgCache.get(id);
+    const url = await idb.get(id);
+    if (url) imgCache.set(id, url);
+    return url;
+  }
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const pushing = new Map();   // id/uuid -> ts (avoid duplicate sends)
+  async function pushImage(sid, id, uuid) {
+    const k = id + '/' + (uuid || '*');
+    if (pushing.has(k) && now() - pushing.get(k) < 20000) return;
+    pushing.set(k, now());
+    const url = await getImg(id);
+    if (!url) return;
+    const n = Math.ceil(url.length / IMG_CHUNK);
+    for (let i = 0; i < n; i++) {
+      send(sid, { t: 'imgc', id, i, n, d: url.slice(i * IMG_CHUNK, (i + 1) * IMG_CHUNK) }, uuid);
+      if (i % 6 === 5) await sleep(15); // don't flood the data channel
+    }
+  }
+
+  const incoming = {};         // id -> { n, parts, got }
+  const requested = {};        // id -> ts
+  function onImgChunk(sid, p) {
+    if (!isStr(p.id, 64) || !Number.isInteger(p.i) || !Number.isInteger(p.n) || p.n < 1 || p.n > Math.ceil(IMG_MAX / IMG_CHUNK) || p.i < 0 || p.i >= p.n || typeof p.d !== 'string' || p.d.length > IMG_CHUNK) return;
+    if (imgCache.has(p.id)) return;
+    const b = (incoming[p.id] = incoming[p.id] || { n: p.n, parts: new Array(p.n), got: 0 });
+    if (b.n !== p.n || b.parts[p.i] !== undefined) return;
+    b.parts[p.i] = p.d; b.got++;
+    if (b.got < b.n) return;
+    const url = b.parts.join('');
+    delete incoming[p.id];
+    if (!/^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(url)) return;
+    imgCache.set(p.id, url);
+    idb.put(p.id, url);
+    paintImages();
+  }
+  function requestImg(sid, id) {
+    if (requested[id] && now() - requested[id] < 15000) return;
+    requested[id] = now();
+    send(sid, { t: 'imgreq', id });
+  }
+
+  // fill <img data-img> elements from cache / IndexedDB / peers
+  function paintImages() {
+    document.querySelectorAll('img[data-img]:not([src])').forEach(async (el) => {
+      const id = el.dataset.img;
+      const url = await getImg(id);
+      if (url) { el.src = url; el.parentElement.classList.remove('loading'); }
+      else if (cur.sid) requestImg(cur.sid, id);
+    });
+  }
+
+  // shrink big images before sending (keeps GIFs as-is when small enough)
+  async function prepImage(file) {
+    if (!file || !/^image\//.test(file.type)) throw new Error('That file is not an image.');
+    const readUrl = (f) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsDataURL(f); });
+    const dims = (url) => new Promise((res, rej) => { const im = new Image(); im.onload = () => res({ w: im.naturalWidth, h: im.naturalHeight }); im.onerror = rej; im.src = url; });
+    if (file.type === 'image/gif' && file.size <= 3000000) {
+      const url = await readUrl(file);
+      return { id: rid(16), url, ...(await dims(url)) };
+    }
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, 2560 / Math.max(bmp.width, bmp.height));
+    const w = Math.max(1, Math.round(bmp.width * scale)), h = Math.max(1, Math.round(bmp.height * scale));
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    c.getContext('2d').drawImage(bmp, 0, 0, w, h);
+    let q = 0.92, url = c.toDataURL('image/webp', q);
+    if (!url.startsWith('data:image/webp')) url = c.toDataURL('image/jpeg', q);
+    while (url.length > IMG_MAX && q > 0.45) { q -= 0.12; url = c.toDataURL(url.startsWith('data:image/webp') ? 'image/webp' : 'image/jpeg', q); }
+    if (url.length > IMG_MAX) throw new Error('Image is too large even after compression.');
+    return { id: rid(16), url, w, h };
+  }
+
+  const pending = [];          // images waiting in the composer
+  async function addAttachments(files) {
+    const s = server(cur.sid), c = channel(s, cur.cid);
+    if (!c || c.type !== 'text') return;
+    for (const f of [...files].slice(0, 4)) {
+      if (pending.length >= 4) { toast('Up to 4 images per message.'); break; }
+      try { pending.push(await prepImage(f)); } catch (e) { toast(e.message || 'Could not read that image.'); }
+    }
+    renderAttachBar();
+    $('msgInput').focus();
+  }
+  function renderAttachBar() {
+    const bar = $('attachBar');
+    bar.classList.toggle('hidden', !pending.length);
+    bar.innerHTML = pending.map((im, i) => `<div class="att"><img src="${im.url}" alt=""><button class="att-x" data-rm="${i}" title="Remove">${icon('x')}</button></div>`).join('');
+  }
+  function lightbox(id) {
+    getImg(id).then((url) => {
+      if (!url) return;
+      const ext = (url.match(/^data:image\/(\w+)/) || [, 'png'])[1];
+      modal(`<div class="lightbox"><img src="${url}" alt=""></div>
+        <div class="actions"><a class="btn" href="${url}" download="dischord-${id}.${ext}">Download</a><button class="btn primary" data-close>Close</button></div>`, null, true, true);
+      $('modal').classList.add('lb');
+    });
   }
 
   // ---------------------------------------------------------------- voice
@@ -501,6 +716,7 @@
     setTimeout(() => { f.src = voiceUrl(s, c, withCam, vs); }, rejoin ? 500 : 0);
     $('pubHost').appendChild(f);
     voice = { sid, cid, iframe: f, cam: !!withCam, ss: false, vs, ssFrame: null, ssVs: null, ...(keepShare || {}) };
+    for (const k in sentVol) delete sentVol[k];
     f.addEventListener('load', () => {
       setTimeout(() => {
         voicePost({ getLoudness: true });
@@ -637,6 +853,13 @@
       return;
     }
 
+    if (d.stats) {
+      for (const el of tileEls.values()) {
+        const f = el.querySelector('.tile-media iframe');
+        if (f && f.contentWindow === e.source) { onTileStats(el, d.stats); return; }
+      }
+    }
+
     let sid = null;
     for (const id in meshes) if (meshes[id].iframe.contentWindow === e.source) { sid = id; break; }
     if (!sid) return;
@@ -737,7 +960,13 @@
 
   // ---------------------------------------------------------------- rendering
   const initials = (n) => (n.match(/\b\p{L}|\p{N}/gu) || [n[0] || '?']).slice(0, 2).join('').toUpperCase();
-  const avatar = (u, dot, cls = '') => `<div class="avatar ${cls}" style="background:${esc(u.color)}">${esc((u.name[0] || '?').toUpperCase())}${dot ? '<span class="dot"></span>' : ''}</div>`;
+  function shade(hex, pct) {
+    const n = parseInt(hex.slice(1), 16);
+    const f = (c) => Math.max(0, Math.min(255, Math.round(c + (pct < 0 ? c : 255 - c) * pct)));
+    return '#' + [f(n >> 16), f((n >> 8) & 255), f(n & 255)].map((c) => c.toString(16).padStart(2, '0')).join('');
+  }
+  const avBg = (color) => `linear-gradient(135deg, ${shade(color, 0.18)}, ${shade(color, -0.22)})`;
+  const avatar = (u, dot, cls = '') => `<div class="avatar ${cls}" style="background:${avBg(u.color)}">${esc((u.name[0] || '?').toUpperCase())}${dot ? '<span class="dot"></span>' : ''}</div>`;
   const stateIcons = (st) => (st ? (st.s ? '<span class="live-tag">LIVE</span>' : '') + (st.c ? icon('camera', 'mini') : '') + (st.d ? icon('deaf', 'mini off') : st.m ? icon('micOff', 'mini off') : '') : '');
 
   function render() {
@@ -861,7 +1090,8 @@
     for (const o of voiceOccupants(voice.sid, voice.cid)) {
       const st = o.st || {};
       const hideSelf = o.self && av.selfPreview === 'off';
-      out.push({ key: o.user.id, uid: o.user.id, user: o.user, st, self: !!o.self, screen: false, vs: st.c && o.vs && !hideSelf ? o.vs : '' });
+      const hideCam = !o.self && hiddenVid[o.user.id];
+      out.push({ key: o.user.id, uid: o.user.id, user: o.user, st, self: !!o.self, screen: false, vs: st.c && o.vs && !hideSelf && !hideCam ? o.vs : '' });
       if (st.s && o.vss) out.push({ key: o.user.id + ':s', uid: o.user.id, user: o.user, st, self: !!o.self, screen: true, vs: hideSelf ? '' : o.vss });
     }
     return out;
@@ -885,7 +1115,7 @@
         el.className = 'tile';
         el.dataset.key = t.key;
         if (!t.screen) el.dataset.uid = t.uid; // speaking ring is for people, not screens
-        el.innerHTML = '<div class="tile-media"></div><div class="tile-name"></div><div class="tile-tools"></div>';
+        el.innerHTML = '<div class="tile-media"></div><div class="tile-name"></div><div class="tile-tools"></div><div class="tile-stats"></div><div class="tile-fx"></div>';
         host.appendChild(el);
         tileEls.set(t.key, el);
       }
@@ -909,6 +1139,7 @@
         if (f && f.contentWindow) f.contentWindow.postMessage({ bitrate: br }, '*');
       }
       el.classList.toggle('video', hasVid);
+      if (!hasVid) el.querySelector('.tile-stats').textContent = '';
       el.classList.toggle('screen', t.screen);
       el.classList.toggle('self', t.self);
       const st = t.st;
@@ -947,7 +1178,211 @@
       host.style.setProperty('--rows', Math.ceil((n || 1) / cols));
       tileEls.forEach((el) => el.classList.remove('focused'));
     }
+    $('tiles').classList.toggle('show-stats', !!av.showStats);
     paintSpeaking();
+    applyVolumes();
+  }
+
+  // ---- per-user volume / mute (applied inside the publisher, which plays everyone's audio)
+  const volOf = (uid, stream) => {
+    const c = userVol[uid] || {};
+    if (c.m) return 0;
+    return (stream ? (c.sv ?? 100) : (c.v ?? 100)) / 100;
+  };
+  const sentVol = {};
+  function applyVolumes(force) {
+    if (!voice) return;
+    for (const o of voiceOccupants(voice.sid, voice.cid)) {
+      if (o.self) continue;
+      for (const [vs, stream] of [[o.vs, false], [o.vss, true]]) {
+        if (!vs) continue;
+        const v = volOf(o.user.id, stream);
+        if (!force && sentVol[vs] === v) continue;
+        if (v === 1 && sentVol[vs] === undefined) continue; // default, nothing to do
+        if (force && v === 1) continue;
+        sentVol[vs] = v;
+        voicePost({ volume: v, target: vs });
+      }
+    }
+  }
+  function setVol(uid, patch) {
+    userVol[uid] = { ...(userVol[uid] || {}), ...patch };
+    store.set('vol', userVol);
+    applyVolumes();
+    renderPresence();
+  }
+
+  // ---- live stream stats (resolution / fps / bitrate / codec) for every video tile
+  function pollStats() {
+    tileEls.forEach((el) => {
+      const f = el.classList.contains('video') && el.querySelector('.tile-media iframe');
+      if (f && f.contentWindow) f.contentWindow.postMessage({ getStats: true }, '*');
+    });
+  }
+  function onTileStats(el, stats) {
+    const inbound = stats && stats.inbound;
+    if (!inbound) return;
+    const st = Object.values(inbound).find((x) => x && typeof x === 'object');
+    if (!st) return;
+    // VDO.Ninja nests per-track stats: { <trackId>: { _type:'video', Resolution, FPS, Bitrate_in_kbps, codec }, 'Peer-to-Peer': {...} }
+    const vid = Object.values(st).find((o) => o && typeof o === 'object' && (o._type === 'video' || /video/i.test(o.type || ''))) || st;
+    const p2p = st['Peer-to-Peer'] || {};
+    const res = vid.Resolution || vid.resolution || (vid._frameWidth ? vid._frameWidth + 'x' + vid._frameHeight : '');
+    const fps = vid.FPS ?? vid.fps;
+    const br = +(vid.Bitrate_in_kbps ?? vid.video_bitrate_kbps ?? 0);
+    const codec = vid.codec || vid.video_codec || '';
+    const loss = +(vid.packetLoss_in_percentage || 0);
+    const parts = [];
+    if (res) parts.push(String(res).replace(/\s+/g, ''));
+    if (fps !== undefined && fps !== null && fps !== '') parts.push(Math.round(+fps) + ' fps');
+    if (br) parts.push(mbps(Math.round(br)));
+    if (codec) parts.push(String(codec).replace(/^video\//i, '').toUpperCase());
+    if (loss >= 1) parts.push(loss.toFixed(1) + '% loss');
+    if (p2p.candidateType_remote === 'relay') parts.push('relayed');
+    el.querySelector('.tile-stats').textContent = parts.join(' · ');
+  }
+
+  // ---- in-call reactions
+  function floatReaction(uid, e) {
+    const el = tileEls.get(uid);
+    if (!el) return;
+    const fx = el.querySelector('.tile-fx');
+    const span = document.createElement('span');
+    span.className = 'float-emoji';
+    span.textContent = e;
+    span.style.left = (20 + Math.random() * 60) + '%';
+    fx.appendChild(span);
+    setTimeout(() => span.remove(), 2600);
+  }
+  function sendCallReaction(e) {
+    if (!voice) return;
+    floatReaction(me.id, e);
+    send(voice.sid, { t: 'creact', e });
+  }
+
+  // ---------------------------------------------------------------- right-click menus
+  function openCtx(x, y, html, wire) {
+    const m = $('ctxMenu');
+    m.innerHTML = html;
+    paintIcons(m);
+    m.classList.remove('hidden');
+    const w = m.offsetWidth, h = m.offsetHeight;
+    m.style.left = Math.max(6, Math.min(x, window.innerWidth - w - 6)) + 'px';
+    m.style.top = Math.max(6, Math.min(y, window.innerHeight - h - 6)) + 'px';
+    if (wire) wire(m);
+  }
+  const closeCtx = () => $('ctxMenu').classList.add('hidden');
+  const ctxItem = (act, ico, label, extra = '') => `<button class="ctx-item ${extra}" data-act="${act}">${ico ? icon(ico) : ''}<span>${label}</span></button>`;
+  const ctxCheck = (act, label, on) => `<button class="ctx-item check ${on ? 'on' : ''}" data-act="${act}"><span>${label}</span><i class="box">${on ? icon('check') : ''}</i></button>`;
+  const ctxSlider = (act, label, val) => `<div class="ctx-slider"><div class="cs-head"><span>${label}</span><b data-out="${act}">${val}%</b></div><input type="range" min="0" max="100" step="1" value="${val}" data-slide="${act}"></div>`;
+  const ctxSelect = (act, label, val, opts) => `<div class="ctx-select"><span>${label}</span><select data-sel="${act}">${opts.map(([v, l]) => `<option value="${v}" ${String(v) === String(val) ? 'selected' : ''}>${l}</option>`).join('')}</select></div>`;
+  const qOpts = (auto) => [[0, 'Auto' + (auto ? ' · ' + mbps(auto) : '')], ...VIEW_BRS.map((k) => [k, mbps(k)])];
+
+  function userMenu(uid, x, y) {
+    const self = uid === me.id;
+    const sid = cur.sid;
+    const ms = (members[sid] || {})[uid];
+    const user = self ? me : (ms && ms.user) || getKnown(sid)[uid];
+    if (!user) return;
+    const occ = voice ? voiceOccupants(voice.sid, voice.cid).find((o) => o.user.id === uid) : null;
+    const st = (occ && occ.st) || {};
+    let h = `<div class="ctx-head">${avatar(user)}<span>${esc(user.name)}</span></div>`;
+    if (self) {
+      h += ctxCheck('mic', 'Mute microphone', !micOn || deaf) + ctxCheck('deaf', 'Deafen', deaf);
+      if (voice) {
+        h += '<div class="ctx-sep"></div>' + ctxCheck('cam', 'Camera', !!voice.cam) + ctxCheck('share', 'Share screen', !!voice.ssFrame);
+        h += ctxSelect('selfprev', 'My preview', av.selfPreview, [['full', 'Full quality'], ['low', 'Low'], ['off', 'Hidden']]);
+      }
+      h += '<div class="ctx-sep"></div>' + ctxCheck('stats', 'Show stream stats', !!av.showStats) + ctxItem('avset', 'gear', 'Voice & video settings') + ctxItem('profile', 'edit', 'Edit profile');
+    } else {
+      const c = userVol[uid] || {};
+      if (occ) {
+        h += ctxSlider('vol', 'User volume', c.v ?? 100);
+        if (st.s) h += ctxSlider('svol', 'Stream volume', c.sv ?? 100);
+        h += ctxCheck('mute', 'Mute', !!c.m);
+        if (st.c) h += ctxCheck('hidevid', 'Hide video', !!hiddenVid[uid]);
+        if (st.c && occ.vs && !hiddenVid[uid]) h += ctxSelect('qcam', 'Video quality', streamBr[occ.vs] || 0, qOpts(st.cb));
+        if (st.s && occ.vss) h += ctxSelect('qss', 'Stream quality', streamBr[occ.vss] || 0, qOpts(st.sb));
+        if (st.s && occ.vss) h += ctxItem('watch', 'expand', 'Focus stream') + ctxItem('fs', 'expand', 'Fullscreen stream');
+        h += ctxCheck('stats', 'Show stream stats', !!av.showStats);
+        h += '<div class="ctx-sep"></div>';
+      } else if (c.m || (c.v ?? 100) !== 100) {
+        h += ctxSlider('vol', 'User volume', c.v ?? 100) + ctxCheck('mute', 'Mute', !!c.m) + '<div class="ctx-sep"></div>';
+      }
+      h += ctxItem('mention', 'at', 'Mention') + ctxItem('copyname', 'copy', 'Copy username');
+    }
+    openCtx(x, y, h, (m) => {
+      m.querySelectorAll('[data-slide]').forEach((r) => {
+        r.oninput = () => {
+          m.querySelector(`[data-out="${r.dataset.slide}"]`).textContent = r.value + '%';
+          setVol(uid, r.dataset.slide === 'vol' ? { v: +r.value } : { sv: +r.value });
+        };
+      });
+      m.querySelectorAll('[data-sel]').forEach((sel) => {
+        sel.onchange = () => {
+          const a = sel.dataset.sel;
+          if (a === 'selfprev') { av.selfPreview = sel.value; store.set('av', av); tileEls.forEach((el) => { if (el.classList.contains('self')) el.dataset.vs = '__reload'; }); renderStage(); return; }
+          const vs = a === 'qcam' ? occ.vs : occ.vss;
+          streamBr[vs] = +sel.value;
+          renderStage();
+        };
+      });
+      m.onclick = (e) => {
+        const b = e.target.closest('[data-act]');
+        if (!b) return;
+        const a = b.dataset.act;
+        const reopen = () => userMenu(uid, x, y);
+        switch (a) {
+          case 'mic': toggleMic(); return reopen();
+          case 'deaf': toggleDeaf(); return reopen();
+          case 'cam': closeCtx(); return toggleCam();
+          case 'share': closeCtx(); return toggleShare();
+          case 'stats': av.showStats = !av.showStats; store.set('av', av); renderStage(); return reopen();
+          case 'avset': closeCtx(); return settingsModal('av');
+          case 'profile': closeCtx(); return settingsModal('profile');
+          case 'mute': setVol(uid, { m: !(userVol[uid] || {}).m }); return reopen();
+          case 'hidevid': hiddenVid[uid] = !hiddenVid[uid]; if (!hiddenVid[uid]) delete hiddenVid[uid]; store.set('hidevid', hiddenVid); renderStage(); return reopen();
+          case 'watch': closeCtx(); showVoice(); focusUid = uid + ':s'; return renderStage();
+          case 'fs': { closeCtx(); showVoice(); const el = tileEls.get(uid + ':s'); if (el && el.requestFullscreen) el.requestFullscreen(); return; }
+          case 'mention': {
+            closeCtx();
+            const inp = $('msgInput');
+            if (!$('textView').classList.contains('hidden')) { inp.value += (inp.value && !/\s$/.test(inp.value) ? ' ' : '') + '@' + user.name.replace(/\s+/g, '') + ' '; inp.focus(); }
+            else toast('Open a text channel to mention someone.');
+            return;
+          }
+          case 'copyname': closeCtx(); navigator.clipboard && navigator.clipboard.writeText(user.name); return toast('Copied');
+        }
+      };
+    });
+  }
+
+  function messageMenu(mid, x, y) {
+    const m = (getMsgs(cur.sid)[cur.cid] || []).find((z) => z.id === mid);
+    if (!m) return;
+    const mine = m.a.id === me.id;
+    let h = `<div class="ctx-emojis">${REACTS.slice(0, 8).map((e) => `<button data-emo="${e}">${e}</button>`).join('')}</div>`;
+    if (m.text) h += ctxItem('copy', 'copy', 'Copy text');
+    if (m.img) h += ctxItem('openimg', 'image', 'Open image');
+    if (!mine) h += ctxItem('mention', 'at', 'Mention ' + esc(m.a.name));
+    if (mine && m.text) h += ctxItem('edit', 'edit', 'Edit message');
+    if (mine) h += ctxItem('del', 'trash', 'Delete message', 'danger');
+    openCtx(x, y, h, (menu) => {
+      menu.onclick = (e) => {
+        const emo = e.target.closest('[data-emo]');
+        if (emo) { closeCtx(); return toggleReaction(mid, emo.dataset.emo); }
+        const b = e.target.closest('[data-act]');
+        if (!b) return;
+        closeCtx();
+        switch (b.dataset.act) {
+          case 'copy': navigator.clipboard && navigator.clipboard.writeText(m.text); return toast('Copied');
+          case 'openimg': return lightbox(m.img.id);
+          case 'mention': { const inp = $('msgInput'); inp.value += '@' + m.a.name.replace(/\s+/g, '') + ' '; return inp.focus(); }
+          case 'edit': return editMessage(mid);
+          case 'del': return deleteMessage(mid);
+        }
+      };
+    });
   }
 
   function qualityMenu(key, btn) {
@@ -1017,19 +1452,49 @@
       if (newDay) h += `<div class="day-sep"><span>${new Date(m.ts).toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' })}</span></div>`;
       const head = newDay || !prev || prev.a.id !== m.a.id || m.ts - prev.ts > 7 * 60000;
       const mine = m.a.id === me.id;
-      const acts = mine ? `<div class="actions"><button class="icon-btn" data-edit="${esc(m.id)}" title="Edit">${icon('edit')}</button><button class="icon-btn danger" data-del="${esc(m.id)}" title="Delete">${icon('trash')}</button></div>` : '';
+      const acts = `<div class="actions"><button class="icon-btn" data-react="${esc(m.id)}" title="Add reaction">${icon('smile')}</button>` +
+        (mine ? `${m.text ? `<button class="icon-btn" data-edit="${esc(m.id)}" title="Edit">${icon('edit')}</button>` : ''}<button class="icon-btn danger" data-del="${esc(m.id)}" title="Delete">${icon('trash')}</button>` : '') + '</div>';
       const edited = m.ed ? ' <span class="time">(edited)</span>' : '';
+      const img = m.img ? `<div class="msg-img loading" style="aspect-ratio:${m.img.w}/${m.img.h};width:min(100%, ${Math.min(420, m.img.w)}px)" data-open="${esc(m.img.id)}"><img data-img="${esc(m.img.id)}" alt=""></div>` : '';
+      const text = m.text ? `<div class="text">${formatText(m.text)}${edited}</div>` : '';
+      const re = renderRe(m);
       if (head) {
-        h += `<div class="msg head"><div class="gutter">${avatar(m.a)}</div><div class="body">
-          <div class="meta"><span class="author" style="color:${esc(m.a.color)}">${esc(m.a.name)}</span><span class="time" title="${esc(new Date(m.ts).toLocaleString())}">${esc(fmtStamp(m.ts))}</span></div>
-          <div class="text">${formatText(m.text)}${edited}</div></div>${acts}</div>`;
+        h += `<div class="msg head" data-mid="${esc(m.id)}"><div class="gutter" data-uid="${esc(m.a.id)}" data-ctx="user">${avatar(m.a)}</div><div class="body">
+          <div class="meta"><span class="author" data-uid="${esc(m.a.id)}" data-ctx="user" style="color:${esc(m.a.color)}">${esc(m.a.name)}</span><span class="time" title="${esc(new Date(m.ts).toLocaleString())}">${esc(fmtStamp(m.ts))}</span></div>
+          ${text}${img}${re}</div>${acts}</div>`;
       } else {
-        h += `<div class="msg"><div class="gutter time-side">${esc(fmtTime(m.ts))}</div><div class="body"><div class="text">${formatText(m.text)}${edited}</div></div>${acts}</div>`;
+        h += `<div class="msg" data-mid="${esc(m.id)}"><div class="gutter time-side">${esc(fmtTime(m.ts))}</div><div class="body">${text}${img}${re}</div>${acts}</div>`;
       }
       prev = m;
     }
     box.innerHTML = h;
     if (forceBottom || nearBottom) box.scrollTop = box.scrollHeight;
+    paintImages();
+  }
+
+  function renderRe(m) {
+    if (!m.re) return '';
+    const pills = [];
+    for (const e in m.re) {
+      const who = Object.keys(m.re[e]).filter((u) => m.re[e][u] > 0);
+      if (!who.length) continue;
+      const k = getKnown(cur.sid);
+      const names = who.map((u) => (u === me.id ? 'You' : (k[u] && k[u].name) || 'someone')).join(', ');
+      pills.push(`<button class="re-pill ${who.includes(me.id) ? 'mine' : ''}" data-rtoggle="${esc(m.id)}" data-e="${esc(e)}" title="${esc(names)}">${esc(e)}<span>${who.length}</span></button>`);
+    }
+    return pills.length ? `<div class="reacts">${pills.join('')}<button class="re-pill add" data-react="${esc(m.id)}" title="Add reaction">${icon('smile')}</button></div>` : '';
+  }
+
+  // tiny emoji picker anchored to an element
+  function emojiPicker(anchor, onPick) {
+    const m = $('emojiMenu');
+    m.innerHTML = REACTS.map((e) => `<button data-emo="${e}">${e}</button>`).join('');
+    const r = anchor.getBoundingClientRect();
+    m.classList.remove('hidden');
+    const mw = m.offsetWidth, mh = m.offsetHeight;
+    m.style.left = Math.max(8, Math.min(window.innerWidth - mw - 8, r.right - mw)) + 'px';
+    m.style.top = (r.top - mh - 6 > 8 ? r.top - mh - 6 : r.bottom + 6) + 'px';
+    m.onclick = (e) => { const b = e.target.closest('[data-emo]'); if (!b) return; m.classList.add('hidden'); onPick(b.dataset.emo); };
   }
 
   function renderIfCurrent(sid, cid) { if (sid === cur.sid && cid === cur.cid) renderMessages(); }
@@ -1069,7 +1534,7 @@
 
   function renderUserPanel() {
     if (!me) return;
-    $('meAvatar').outerHTML = `<div class="avatar" id="meAvatar" style="background:${esc(me.color)}">${esc(me.name[0].toUpperCase())}<span class="dot"></span></div>`;
+    $('meAvatar').outerHTML = `<div class="avatar" id="meAvatar" style="background:${avBg(me.color)}">${esc(me.name[0].toUpperCase())}<span class="dot"></span></div>`;
     $('meName').textContent = me.name;
     let peersN = 0;
     if (cur.sid) for (const id in members[cur.sid] || {}) if (isOnline(members[cur.sid][id])) peersN++;
@@ -1117,32 +1582,56 @@
     return false;
   }
 
-  function colorPicker(sel) {
-    return `<div class="colors" id="mColors">${COLORS.map((c) => `<button type="button" data-color="${c}" class="${c === sel ? 'sel' : ''}" style="background:${c}"></button>`).join('')}</div>`;
+  // profile editor: live preview card + colour swatches (+ custom colour)
+  function profileEditor(name, color) {
+    const custom = !COLORS.includes(color);
+    return `<div class="pedit">
+      <div class="pcard" id="pCard">
+        <div class="pcard-banner" style="background:${avBg(color)}"></div>
+        <div class="pcard-av" style="background:${avBg(color)}">${esc((name[0] || '?').toUpperCase())}<span class="dot"></span></div>
+        <div class="pcard-body"><div class="pcard-name">${esc(name || 'Your name')}</div><div class="pcard-sub">Online</div></div>
+      </div>
+      <div class="pedit-fields">
+        <label>Display name</label><input type="text" id="mName" maxlength="32" value="${esc(name)}" placeholder="e.g. daniel">
+        <label>Profile colour</label>
+        <div class="swatches" id="mColors">${COLORS.map((c) => `<button type="button" class="swatch ${c === color ? 'sel' : ''}" data-color="${c}" style="--sw:${c}" title="${c}">${icon('check')}</button>`).join('')}
+          <label class="swatch custom ${custom ? 'sel' : ''}" title="Custom colour" style="--sw:${custom ? color : '#2b2d31'}">${icon('plus')}<input type="color" id="mCustom" value="${color}"></label>
+        </div>
+      </div>
+    </div>`;
   }
-  function wireColors(onPick) {
-    $('mColors').onclick = (e) => {
-      const b = e.target.closest('[data-color]');
-      if (!b) return;
-      $('mColors').querySelectorAll('button').forEach((x) => x.classList.remove('sel'));
-      b.classList.add('sel');
-      onPick(b.dataset.color);
+  function wireProfileEditor(state) {
+    const paint = () => {
+      const card = $('pCard');
+      card.querySelector('.pcard-banner').style.background = avBg(state.color);
+      const pav = card.querySelector('.pcard-av');
+      pav.style.background = avBg(state.color);
+      pav.firstChild.nodeValue = ($('mName').value.trim()[0] || '?').toUpperCase();
+      card.querySelector('.pcard-name').textContent = $('mName').value.trim() || 'Your name';
+      card.querySelector('.pcard-name').style.color = state.color;
+      $('mColors').querySelectorAll('.swatch').forEach((x) => x.classList.toggle('sel', x.dataset.color === state.color || (x.classList.contains('custom') && !COLORS.includes(state.color))));
+      const cu = $('mColors').querySelector('.custom');
+      if (!COLORS.includes(state.color)) cu.style.setProperty('--sw', state.color);
     };
+    $('mColors').onclick = (e) => { const b = e.target.closest('[data-color]'); if (!b) return; state.color = b.dataset.color; paint(); };
+    $('mCustom').oninput = () => { state.color = $('mCustom').value; paint(); };
+    $('mName').addEventListener('input', paint);
+    paint();
   }
 
   function profileModal(first) {
-    let color = (me && me.color) || COLORS[Math.floor(Math.random() * COLORS.length)];
+    const state = { color: (me && me.color) || COLORS[Math.floor(Math.random() * COLORS.length)] };
     modal(`<h2>Welcome to Dischord</h2>
-      <p>Pick a display name. It's stored only in this browser.</p>
-      <label>Display name</label><input type="text" id="mName" maxlength="32" placeholder="e.g. daniel">
-      <label>Color</label>${colorPicker(color)}
+      <p>Pick a name and a colour. It's stored only in this browser.</p>
+      ${profileEditor('', state.color)}
       <div class="actions"><button class="btn primary" id="mOk">Continue</button></div>`, () => {
-      wireColors((c) => (color = c));
+      wireProfileEditor(state);
       const inp = $('mName');
       inp.focus();
       const ok = () => {
         const name = inp.value.trim().slice(0, 32);
         if (!name) return inp.focus();
+        const color = state.color;
         me = { id: rid(12), name, color };
         store.set('me', me);
         closeModal();
@@ -1150,29 +1639,28 @@
       };
       $('mOk').onclick = ok;
       inp.onkeydown = (e) => { if (e.key === 'Enter') ok(); };
-    }, !first);
+    }, !first, true);
   }
 
   const opt = (val, cur, label) => `<option value="${val}" ${String(val) === String(cur) ? 'selected' : ''}>${label}</option>`;
 
   function settingsModal(tab = 'profile') {
-    let color = me.color;
+    const state = { color: me.color };
     modal(`<div class="tabs"><button data-tab="profile">My profile</button><button data-tab="av">Voice &amp; Video</button></div>
       <div class="tab-body" data-body="profile">
-        <label>Display name</label><input type="text" id="mName" maxlength="32" value="${esc(me.name)}">
-        <label>Color</label>${colorPicker(color)}
+        ${profileEditor(me.name, me.color)}
         ${'Notification' in window && Notification.permission !== 'granted' ? '<label>Notifications</label><button class="btn" id="mNotif">Enable desktop notifications</button>' : ''}
       </div>
       <div class="tab-body" data-body="av">
         <h3>Camera</h3>
         <div class="grid3">
-          <div><label>Resolution</label><select id="aCamQ">${opt('360', av.camQ, '360p')}${opt('720', av.camQ, '720p')}${opt('1080', av.camQ, '1080p')}</select></div>
+          <div><label>Resolution</label><select id="aCamQ">${opt('360', av.camQ, '360p')}${opt('720', av.camQ, '720p')}${opt('1080', av.camQ, '1080p')}${opt('1440', av.camQ, '1440p')}${opt('2160', av.camQ, '4K')}</select></div>
           <div><label>Frame rate</label><select id="aCamFps">${opt(15, av.camFps, '15 fps')}${opt(30, av.camFps, '30 fps')}${opt(60, av.camFps, '60 fps')}</select></div>
           <div><label>Bitrate</label><select id="aCamBr">${CAM_BRS.map((k) => opt(k, av.camBr, mbps(k))).join('')}</select></div>
         </div>
         <h3>Screen share</h3>
         <div class="grid3">
-          <div><label>Resolution</label><select id="aSsQ">${opt('720', av.ssQ, '720p')}${opt('1080', av.ssQ, '1080p')}${opt('1440', av.ssQ, '1440p')}</select></div>
+          <div><label>Resolution</label><select id="aSsQ">${opt('source', av.ssQ, 'Source (native)')}${opt('2160', av.ssQ, '4K')}${opt('1440', av.ssQ, '1440p')}${opt('1080', av.ssQ, '1080p')}${opt('720', av.ssQ, '720p')}</select></div>
           <div><label>Frame rate</label><select id="aSsFps">${opt(5, av.ssFps, '5 fps (slides)')}${opt(15, av.ssFps, '15 fps')}${opt(30, av.ssFps, '30 fps')}${opt(60, av.ssFps, '60 fps (games)')}</select></div>
           <div><label>Bitrate</label><select id="aSsBr">${SS_BRS.map((k) => opt(k, av.ssBr, mbps(k))).join('')}</select></div>
           <div style="grid-column: span 3"><label>Optimize screen share for</label><select id="aSsHint">${opt('detail', av.ssHint, 'Clarity: sharp text and detail (recommended)')}${opt('motion', av.ssHint, 'Smoothness: games and video, may soften under load')}</select></div>
@@ -1183,6 +1671,7 @@
           <div><label>Your own preview</label><select id="aSelf">${opt('full', av.selfPreview, 'Full quality')}${opt('low', av.selfPreview, 'Low (saves CPU)')}${opt('off', av.selfPreview, 'Hidden')}</select></div>
           <div style="grid-column: span 3"><label>Max download per stream</label><select id="aRecv">${opt(0, av.recvCap, 'No limit (use each sender\'s setting)')}${VIEW_BRS.map((k) => opt(k, av.recvCap, 'Up to ' + mbps(k))).join('')}</select></div>
         </div>
+        <label class="inline-check"><input type="checkbox" id="aStats" ${av.showStats ? 'checked' : ''}> Always show stream stats (resolution · fps · bitrate · codec) on video tiles</label>
         <p class="hint">Bitrate is the biggest quality factor: higher = sharper, but every viewer pulls that much from your upload. You can also change any stream's quality from the button on its tile. ${voice ? 'Saving reconnects your call to apply camera/screen changes.' : ''}</p>
         ${voice ? '<button class="btn" id="aDevices">Choose microphone / camera…</button>' : '<p class="hint">Join a voice channel to pick your microphone and camera.</p>'}
       </div>
@@ -1193,18 +1682,19 @@
       };
       $('modal').querySelectorAll('[data-tab]').forEach((b) => (b.onclick = () => show(b.dataset.tab)));
       show(tab);
-      wireColors((c) => (color = c));
+      wireProfileEditor(state);
       if ($('mNotif')) $('mNotif').onclick = () => Notification.requestPermission().then(() => toast('Notifications: ' + Notification.permission));
       if ($('aDevices')) $('aDevices').onclick = () => { closeModal(); showVoice(); voice.devices = true; voicePost({ toggleSettings: true }); renderStage(); };
       $('mOk').onclick = () => {
         const name = $('mName').value.trim().slice(0, 32);
         if (!name) { show('profile'); return $('mName').focus(); }
         const nameChanged = name !== me.name;
+        const color = state.color;
         me = { ...me, name, color };
         store.set('me', me);
         const next = {
           camQ: $('aCamQ').value, camFps: +$('aCamFps').value, camBr: +$('aCamBr').value,
-          ssQ: $('aSsQ').value, ssFps: +$('aSsFps').value, ssBr: +$('aSsBr').value, ssHint: $('aSsHint').value, recvCap: +$('aRecv').value, codec: $('aCodec').value, selfPreview: $('aSelf').value,
+          ssQ: $('aSsQ').value, ssFps: +$('aSsFps').value, ssBr: +$('aSsBr').value, ssHint: $('aSsHint').value, recvCap: +$('aRecv').value, codec: $('aCodec').value, selfPreview: $('aSelf').value, showStats: $('aStats').checked, v8: 1,
         };
         const sendKeys = ['camQ', 'camFps', 'camBr'];
         const shareKeys = ['ssQ', 'ssFps', 'ssBr', 'ssHint'];
@@ -1366,6 +1856,12 @@
   };
 
   $('messages').onclick = (e) => {
+    const rt = e.target.closest('[data-rtoggle]');
+    if (rt) return toggleReaction(rt.dataset.rtoggle, rt.dataset.e);
+    const ra = e.target.closest('[data-react]');
+    if (ra) { e.stopPropagation(); return emojiPicker(ra, (emo) => toggleReaction(ra.dataset.react, emo)); }
+    const op = e.target.closest('[data-open]');
+    if (op) return lightbox(op.dataset.open);
     const d = e.target.closest('[data-del]');
     if (d) return deleteMessage(d.dataset.del);
     const ed = e.target.closest('[data-edit]');
@@ -1413,6 +1909,38 @@
   $('cbSettings').onclick = () => settingsModal('av');
   $('membersToggle').onclick = () => { membersOpen = !membersOpen; store.set('membersOpen', membersOpen); renderMembers(); };
 
+  // right-click menus
+  document.addEventListener('contextmenu', (e) => {
+    const u = e.target.closest('#channelList .voice-user[data-uid], #members .mem[data-uid], #tiles .tile[data-key], [data-ctx="user"][data-uid], #userPanel');
+    const msg = !u && e.target.closest('#messages .msg[data-mid]');
+    if (!u && !msg) return closeCtx();
+    e.preventDefault();
+    if (msg) return messageMenu(msg.dataset.mid, e.clientX, e.clientY);
+    const uid = u.id === 'userPanel' ? me.id : (u.dataset.uid || (u.dataset.key || '').split(':')[0]);
+    if (uid) userMenu(uid, e.clientX, e.clientY);
+  });
+  document.addEventListener('mousedown', (e) => {
+    if (!e.target.closest('#ctxMenu')) closeCtx();
+    if (!e.target.closest('#emojiMenu') && !e.target.closest('[data-react]') && !e.target.closest('#cbReact')) $('emojiMenu').classList.add('hidden');
+  });
+  window.addEventListener('blur', closeCtx);
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeCtx(); $('emojiMenu').classList.add('hidden'); } });
+
+  // images: button, paste, drag & drop
+  $('attachBtn').onclick = () => $('fileInput').click();
+  $('fileInput').onchange = () => { addAttachments($('fileInput').files); $('fileInput').value = ''; };
+  $('msgInput').addEventListener('paste', (e) => {
+    const files = [...(e.clipboardData ? e.clipboardData.files : [])].filter((f) => f.type.startsWith('image/'));
+    if (files.length) { e.preventDefault(); addAttachments(files); }
+  });
+  $('textView').addEventListener('dragover', (e) => { if ([...e.dataTransfer.types].includes('Files')) { e.preventDefault(); $('textView').classList.add('drop'); } });
+  $('textView').addEventListener('dragleave', (e) => { if (!e.relatedTarget || !$('textView').contains(e.relatedTarget)) $('textView').classList.remove('drop'); });
+  $('textView').addEventListener('drop', (e) => { e.preventDefault(); $('textView').classList.remove('drop'); addAttachments(e.dataTransfer.files); });
+  $('attachBar').onclick = (e) => { const b = e.target.closest('[data-rm]'); if (b) { pending.splice(+b.dataset.rm, 1); renderAttachBar(); } };
+
+  // in-call reactions
+  $('cbReact').onclick = (e) => { e.stopPropagation(); emojiPicker($('cbReact'), sendCallReaction); };
+
   window.addEventListener('hashchange', checkInviteHash);
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
@@ -1437,6 +1965,8 @@
     if (cur.sid) renderPresence();
   }, 3000);
   setInterval(paintSpeaking, 250);
+  setInterval(pollStats, 2000);
+  setInterval(() => applyVolumes(true), 4000);
 
   // ---------------------------------------------------------------- boot
   function start() {

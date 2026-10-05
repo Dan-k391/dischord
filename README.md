@@ -4,9 +4,13 @@ A Discord-style chat app built on [VDO.Ninja](https://vdo.ninja). No accounts, n
 
 ## Features
 - **Servers** with text and voice channels, shareable **invite links**
-- **Text chat** sent peer-to-peer (Markdown-ish formatting, edit/delete, typing indicators, unread badges, desktop notifications)
+- **Text chat** sent peer-to-peer: Markdown-ish formatting, edit/delete, typing indicators, unread badges, desktop notifications
+- **Images**: attach, paste or drag & drop; compressed in the browser, sent peer-to-peer in chunks, stored in IndexedDB; people who join later fetch them from whoever has them
+- **Reactions** on messages, plus floating emoji reactions in voice calls
 - **History sync**: when you come online, peers send you recent messages you missed
-- **Voice channels** with mute/deafen, **camera**, **screen share**, speaking indicators, focus view + fullscreen for streams, and **quality settings** (resolution, frame rate and bitrate for camera and screen share, plus a per-stream bitrate picker on every video tile)
+- **Voice channels** with mute/deafen, **camera** and **screen share at the same time**, speaking indicators, focus view + fullscreen
+- **Right-click menus**: per-user volume, stream volume, local mute, hide video, per-stream quality; quick actions for yourself
+- **Quality controls**: resolution (up to 4K / native source), frame rate and bitrate (up to 40 Mbps) for camera and screen share; per-stream bitrate picker; live stats (resolution · fps · bitrate · codec) on every video
 - **Presence**: member list, online/offline, who's in which voice channel
 
 ## Run it
