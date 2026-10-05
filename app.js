@@ -2,8 +2,8 @@
  *
  * How it works (no backend):
  *  - Each server has a random id + secret key. Everyone who has the invite has both.
- *  - For every server you're in, a hidden VDO.Ninja iframe joins a data-only room
- *    (&datamode). That peer-to-peer mesh carries text messages, presence, typing,
+ *  - For every server you're in, a hidden VDO.Ninja iframe joins a room
+ *    with no camera or mic. That peer-to-peer mesh carries text messages, presence, typing,
  *    channel changes and history sync, via the VDO.Ninja IFRAME API (sendData/dataReceived).
  *  - Voice channels are separate, visible VDO.Ninja rooms (audio, camera, screen share).
  *  - Everything is stored in your browser's localStorage. History reaches people who
@@ -104,7 +104,8 @@
 
   function meshUrl(s) {
     const p = new URLSearchParams({ room: roomFor(s), password: s.key, label: me.name });
-    return VDO + '?' + p.toString() + '&datamode&cleanoutput';
+    // &datamode discovers peers but never connects them in rooms; a no-camera/no-mic guest does.
+    return VDO + '?' + p.toString() + '&videodevice=0&audiodevice=0&webcam&autostart&cleanoutput';
   }
 
   function connectMesh(s) {

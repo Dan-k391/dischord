@@ -20,8 +20,8 @@ To use it with friends over the internet, host the folder on any static host
 
 ## How it works
 - Each server has a random id and secret key; the invite link carries both (keep it private).
-- For each server you've joined, a hidden VDO.Ninja iframe joins a **data-only room**
-  (`&datamode`). Messages, presence, channel changes and history travel over its WebRTC
+- For each server you've joined, a hidden VDO.Ninja iframe joins a room with no
+  camera or mic (`&videodevice=0&audiodevice=0`). Messages, presence, channel changes and history travel over its WebRTC
   data channels using the VDO.Ninja IFRAME API (`sendData` / `dataReceived`).
 - Each voice channel is its own VDO.Ninja room shown in the main area. It stays connected
   while you browse text channels.
