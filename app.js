@@ -30,7 +30,7 @@
   const IMG_CHUNK = 14000;        // chars per image chunk over the data channel
   const IMG_MAX = 4500000;        // max data-URL length (~3.3 MB image)
 
-  const AV_DEFAULTS = { camQ: '720', camFps: 30, camBr: 2500, ssQ: '1080', ssFps: 30, ssBr: 6000, ssHint: 'detail', recvCap: 0, codec: 'h264', selfPreview: 'full', showStats: false };
+  const AV_DEFAULTS = { camQ: '720', camFps: 30, camBr: 2500, ssQ: '1080', ssFps: 60, ssBr: 12000, ssHint: 'motion', recvCap: 0, codec: 'h264', selfPreview: 'low', showStats: false };
   const CAM_BRS = [300, 600, 1000, 1500, 2500, 4000, 6000, 8000];
   const SS_BRS = [1000, 2500, 4000, 6000, 8000, 12000, 16000, 20000, 30000, 40000];
   const VIEW_BRS = [300, 800, 1500, 2500, 4000, 6000, 8000, 12000, 20000, 30000, 40000];
@@ -114,11 +114,12 @@
   let servers = store.get('servers', []);
   let reads = store.get('reads', {});
   let lastChan = store.get('lastChan', {});
-  let av = { ...AV_DEFAULTS, ...store.get('av', {}) };
-  if (av.sendBr && !store.get('av', {}).camBr) av.camBr = av.sendBr; // migrate v4 settings
+  const savedAv = store.get('av', {}) || {};
+  let av = { ...AV_DEFAULTS, ...savedAv };
+  if (av.sendBr && !savedAv.camBr) av.camBr = av.sendBr; // migrate v4 settings
   delete av.sendBr; delete av.recvBr;
-  if (!av.v8) { av.ssQ = 'source'; if (av.ssBr < 8000) av.ssBr = 8000; av.v8 = 1; store.set('av', av); } // v8: native-res screen share by default
-  if (!av.v9) { if (!av.codec) av.codec = 'h264'; av.v9 = 1; store.set('av', av); } // v9: H.264 by default so the GPU does the encoding
+  // Keep explicit saved choices, including Auto codec. Fresh profiles use the FPS-oriented defaults.
+  if (!av.v8 || !av.v9) { av.v8 = 1; av.v9 = 1; store.set('av', av); }
   const cur = { sid: store.get('lastSid', null), cid: null };
   const msgs = {};       // sid -> { cid: [msg] }
   const known = {};      // sid -> { userId: user }   (persisted)
@@ -227,7 +228,7 @@
   }
 
   const myVoiceIn = (sid) => (voice && voice.sid === sid ? voice.cid : null);
-  const myState = () => ({ m: !micOn || deaf, d: deaf, c: !!(voice && voice.cam), s: !!(voice && voice.ss), cb: av.camBr, sb: av.ssBr });
+  const myState = () => ({ m: !micOn || deaf, d: deaf, c: !!(voice && voice.cam), s: !!(voice && voice.ss), cb: av.camBr, sb: voice && voice.ssSettings ? voice.ssSettings.ssBr : av.ssBr });
 
   // Every payload carries who I am and my voice state, so presence is never stale.
   function send(sid, payload, uuid) {
@@ -683,14 +684,15 @@
 
   // ---------------------------------------------------------------- voice
   // The publisher sends my mic/camera/screen and plays everyone's audio (&novideo: no video in).
-  function voiceUrl(s, c, withCam, vs) {
+  function voiceUrl(s, c, withCam, vs, ssVs = vs + 's') {
     const p = new URLSearchParams({ room: roomFor(s, 'v' + c.id), password: s.key, label: me.name, push: vs });
     let u = VDO + '?' + p.toString();
     u += '&autostart&webcam&novideo&nocontrolbar&hideheader&chatbutton=false&nohangupbutton';
     u += withCam ? `&quality=${CAM_Q[av.camQ] ?? 1}&maxframerate=${av.camFps}` : '&videodevice=0';
     u += `&screensharequality=${SS_Q[av.ssQ] ?? 0}&screensharefps=${av.ssFps}`;
-    u += `&maxvideobitrate=${av.camBr}&exclude=${vs}s`; // never play our own screen-share audio back
+    u += `&maxvideobitrate=${av.camBr}&exclude=${ssVs}`; // preserve exclusion when camera reconnects during a share
     if (!micOn || deaf) u += '&mute';
+    if (deaf) u += '&mutespeaker';
     return u;
   }
 
@@ -698,8 +700,12 @@
   function screenUrl(ssVs) {
     const s = server(voice.sid);
     const p = new URLSearchParams({ room: roomFor(s, 'v' + voice.cid), password: s.key, label: me.name + ' (screen)', push: ssVs });
-    return VDO + '?' + p.toString() + `&screenshare&autostart&noaudio&novideo&nocontrolbar&hideheader&chatbutton=false&nohangupbutton` +
-      `&screensharequality=${SS_Q[av.ssQ] ?? 0}&screensharefps=${av.ssFps}&maxvideobitrate=${av.ssBr}&contenthint=${av.ssHint || 'detail'}`;
+    const q = SS_Q[av.ssQ] ?? 0, hint = av.ssHint === 'detail' ? 'detail' : 'motion';
+    // Both primary and secondary capture parameters support older self-hosted VDO.Ninja versions.
+    // The target bitrate is separate from the publisher cap; motion lets encoding favor the selected FPS.
+    return VDO + '?' + p.toString() + `&screenshare&autostart&noaudio&novideo&nopreview&nocontrolbar&hideheader&chatbutton=false&nohangupbutton` +
+      `&quality=${q}&screensharequality=${q}&maxframerate=${av.ssFps}&screensharefps=${av.ssFps}` +
+      `&outboundvideobitrate=${av.ssBr}&maxvideobitrate=${av.ssBr}&screensharecontenthint=${hint}&contenthint=${hint}`;
   }
 
   // Each video/screen on the stage is its own view-only connection, so we control layout + bitrate.
@@ -713,24 +719,29 @@
 
   function joinVoice(sid, cid, withCam) {
     const s = server(sid), c = channel(s, cid);
-    if (!s || !c) return;
+    if (!s || !c || c.type !== 'voice') return;
     const rejoin = voice && voice.sid === sid && voice.cid === cid;
-    const keepShare = rejoin && voice.ssFrame ? { ssFrame: voice.ssFrame, ss: voice.ss, ssVs: voice.ssVs } : null;
-    if (voice) { dropVoiceFrame(); if (!keepShare) stopShare(true); }
+    const keepShare = rejoin ? { ssFrame: voice.ssFrame, ss: voice.ss, ssVs: voice.ssVs, ssTimer: voice.ssTimer, ssSettings: voice.ssSettings } : null;
+    if (voice) { dropVoiceFrame(); if (!rejoin) stopShare(true); }
     const vs = 'dc' + me.id.slice(0, 10) + rid(5);
     const f = document.createElement('iframe');
     f.allow = 'autoplay; camera; microphone; display-capture; fullscreen; picture-in-picture; clipboard-write';
-    // give the old connection a moment to release the camera / stream id
-    setTimeout(() => { f.src = voiceUrl(s, c, withCam, vs); }, rejoin ? 500 : 0);
-    $('pubHost').appendChild(f);
-    voice = { sid, cid, iframe: f, cam: !!withCam, ss: false, vs, ssFrame: null, ssVs: null, ...(keepShare || {}) };
+    f.title = 'Voice connection';
+    const call = { sid, cid, iframe: f, cam: !!withCam, ss: false, vs, ssFrame: null, ssVs: vs + 's', timers: new Set(), ...(keepShare || {}) };
+    voice = call;
     for (const k in sentVol) delete sentVol[k];
     f.addEventListener('load', () => {
-      setTimeout(() => {
-        voicePost({ getLoudness: true });
-        if (deaf) voicePost({ mute: true });
-      }, 2500);
+      if (voice !== call) return;
+      // load can precede media setup; also replay on VDO.Ninja's media-ready events.
+      for (const delay of [0, 1000, 2500, 5000]) scheduleVoice(call, () => {
+        if (!call.loudnessReady) call.loudnessRequested = false;
+        syncVoiceState(call);
+      }, delay);
     });
+    const load = () => { f.src = voiceUrl(s, c, withCam, vs, call.ssVs); };
+    // Keep the first navigation in the join gesture. Rejoins let the old device close first.
+    if (rejoin) scheduleVoice(call, load, 500); else load();
+    $('pubHost').appendChild(f);
     broadcastState();
     if (!rejoin) playTone(true);
     render();
@@ -738,6 +749,8 @@
 
   function dropVoiceFrame() {
     if (!voice) return;
+    voice.timers.forEach(clearTimeout);
+    voice.timers.clear();
     const f = voice.iframe;
     try { f.contentWindow.postMessage({ close: true }, '*'); } catch { }
     setTimeout(() => f.remove(), 300);
@@ -757,18 +770,36 @@
 
   function voicePost(o) { if (voice && voice.iframe.contentWindow) voice.iframe.contentWindow.postMessage(o, '*'); }
 
+  function scheduleVoice(call, fn, delay) {
+    const timer = setTimeout(() => {
+      call.timers.delete(timer);
+      if (voice === call) fn();
+    }, delay);
+    call.timers.add(timer);
+  }
+
+  function syncVoiceState(call = voice) {
+    if (!call || voice !== call) return;
+    voicePost({ mic: micOn && !deaf });
+    voicePost({ mute: deaf }); // speaker state is independent of the microphone
+    if (!call.loudnessRequested) {
+      call.loudnessRequested = true; // set before sending: older hosts can emit a media-ready event here
+      voicePost({ getLoudness: true });
+    }
+    applyVolumes(true);
+  }
+
   function toggleMic() {
-    if (deaf) { deaf = false; voicePost({ mute: false }); micOn = true; }
+    if (deaf) { deaf = false; micOn = true; }
     else micOn = !micOn;
-    voicePost({ mic: micOn });
+    syncVoiceState();
     store.set('micOn', micOn); store.set('deaf', deaf);
     broadcastState();
     renderControls(); renderPresence();
   }
   function toggleDeaf() {
     deaf = !deaf;
-    voicePost({ mute: deaf });
-    voicePost({ mic: deaf ? false : micOn });
+    syncVoiceState();
     store.set('deaf', deaf);
     broadcastState();
     renderControls(); renderPresence();
@@ -780,12 +811,12 @@
   function toggleShare() {
     if (!voice) return;
     if (voice.ssFrame) return stopShare();
-    const ssVs = voice.vs + 's';
+    const ssVs = voice.ssVs;
     const f = document.createElement('iframe');
     f.allow = 'autoplay; display-capture; fullscreen';
     f.src = screenUrl(ssVs);
     $('pubHost').appendChild(f);
-    voice.ssFrame = f; voice.ssVs = ssVs; voice.ss = false;
+    voice.ssFrame = f; voice.ssVs = ssVs; voice.ss = false; voice.ssSettings = { ...av };
     clearTimeout(voice.ssTimer);
     voice.ssTimer = setTimeout(() => { if (voice && voice.ssFrame === f && !voice.ss) stopShare(true); }, 120000);
     renderControls();
@@ -794,9 +825,11 @@
   function stopShare(silent) {
     if (!voice || !voice.ssFrame) return;
     const f = voice.ssFrame;
+    clearTimeout(voice.ssTimer);
+    voice.ssTimer = null;
     try { f.contentWindow.postMessage({ close: true }, '*'); } catch { }
     setTimeout(() => f.remove(), 300);
-    voice.ssFrame = null; voice.ss = false;
+    voice.ssFrame = null; voice.ss = false; voice.ssSettings = null;
     if (!silent) { broadcastState(); renderControls(); renderPresence(); }
   }
   function showVoice() { if (voice) { if (cur.sid !== voice.sid) selectServer(voice.sid); selectChannel(voice.cid); } }
@@ -850,13 +883,22 @@
     if (!d || typeof d !== 'object') return;
 
     if (voice && e.source === voice.iframe.contentWindow) {
-      if (d.loudness) onLoudness(d.loudness);
+      if (['joined-room-complete', 'local-microphone-event', 'local-camera-event', 'video-element-created',
+        'new-stream-added', 'new-audio-track-added', 'view-connection', 'push-connection'].includes(d.action) && d.value !== false) {
+        const call = voice;
+        syncVoiceState(call);
+        scheduleVoice(call, () => syncVoiceState(call), 250);
+      }
+      if (d.loudness) { voice.loudnessReady = true; onLoudness(d.loudness); }
       if (d.stats) onSendStats(false, d.stats);
       return;
     }
     if (voice && voice.ssFrame && e.source === voice.ssFrame.contentWindow) {
       if (d.action === 'screen-share-state') {
-        if (d.value) { voice.ss = true; broadcastState(); renderControls(); renderPresence(); }
+        if (d.value) {
+          clearTimeout(voice.ssTimer); voice.ssTimer = null;
+          voice.ss = true; broadcastState(); renderControls(); renderPresence();
+        }
         else stopShare(); // cancelled the picker, or hit Chrome's "Stop sharing"
       }
       if (d.stats) onSendStats(true, d.stats);
@@ -1086,8 +1128,11 @@
   let hideStrip = store.get('hideStrip', false); // focus mode: hide the row of other people under the big tile
 
   function wantedBr(t) {
-    // own preview: by default exactly what others receive (your own send bitrate, full resolution)
-    if (t.self) return av.selfPreview === 'low' ? (t.screen ? 1500 : 800) : (t.screen ? av.ssBr : av.camBr);
+    // Preview choices are independent of remote viewers. Keep the active share's cap until it restarts.
+    if (t.self) {
+      const br = t.screen ? ((voice && voice.ssSettings && voice.ssSettings.ssBr) || av.ssBr) : av.camBr;
+      return av.selfPreview === 'low' ? Math.min(br, t.screen ? 1500 : 800) : br;
+    }
     const pick = streamBr[t.vs];
     if (pick) return pick;
     const st = t.st || {};
@@ -1220,10 +1265,10 @@
         if (!vs) continue;
         const v = volOf(o.user.id, stream);
         if (!force && sentVol[vs] === v) continue;
-        if (v === 1 && sentVol[vs] === undefined) continue; // default, nothing to do
-        if (force && v === 1) continue;
         sentVol[vs] = v;
-        voicePost({ volume: v, target: vs });
+        // The top-level volume API also changes the default for future peers.
+        // Set only this stream's media element, keeping later joiners audible.
+        voicePost({ target: vs, settings: { volume: v } });
       }
     }
   }
@@ -1257,7 +1302,7 @@
     if (el && !el.classList.contains('video')) el.querySelector('.tile-stats').textContent = text;
   }
   function onSendStats(screen, stats) {
-    const pcs = Object.values((stats && stats.outbound) || {}).filter((o) => o && typeof o === 'object' && (o.quality_limitation_reason !== undefined || o.video_encoder));
+    const pcs = Object.values((stats && stats.outbound) || {}).filter((o) => o && typeof o === 'object' && (o.quality_limitation_reason !== undefined || o.video_encoder || o.resolution || o.video_bitrate_kbps));
     if (!pcs.length) return setSendNote(screen, '');
     const reasons = pcs.map((o) => o.quality_limitation_reason).filter((r) => r && r !== 'none');
     const why = reasons.includes('cpu') ? 'cpu' : reasons.includes('bandwidth') ? 'bandwidth' : '';
@@ -1265,6 +1310,12 @@
     const enc = pcs.map((o) => o.video_encoder).find(Boolean) || '';
     const hw = /MediaFoundation|VideoToolbox|Vaapi|V4L2|D3D|Nv|Amf|Qsv|External/i.test(enc);
     const parts = [];
+    const frameRates = pcs.map((o) => {
+      const match = String(o.resolution || '').match(/@\s*([\d.]+)/);
+      const fps = o.FPS ?? o.fps ?? o._FPS ?? (match ? match[1] : undefined);
+      return fps !== undefined && fps !== null && fps !== '' && Number.isFinite(+fps) ? +fps : null;
+    }).filter((fps) => fps !== null);
+    if (frameRates.length) parts.push(Math.round(Math.min(...frameRates)) + ' fps');
     if (why) parts.push(why === 'cpu' ? 'CPU-limited' : 'uplink-limited');
     parts.push(pcs.length + (pcs.length === 1 ? ' encode' : ' encodes'));
     if (enc) parts.push(hw ? 'hardware' : 'software');
@@ -1296,7 +1347,7 @@
     const loss = +(vid.packetLoss_in_percentage || 0);
     const parts = [];
     if (res) parts.push(String(res).replace(/\s+/g, ''));
-    if (fps !== undefined && fps !== null && fps !== '') parts.push(Math.round(+fps) + ' fps');
+    if (fps !== undefined && fps !== null && fps !== '' && Number.isFinite(+fps)) parts.push(Math.round(+fps) + ' fps');
     if (br) parts.push(mbps(Math.round(br)));
     if (codec) parts.push(String(codec).replace(/^video\//i, '').toUpperCase());
     if (loss >= 1) parts.push(loss.toFixed(1) + '% loss');
@@ -1734,16 +1785,17 @@
           <div><label>Resolution</label><select id="aSsQ">${opt('source', av.ssQ, 'Source (native)')}${opt('2160', av.ssQ, '4K')}${opt('1440', av.ssQ, '1440p')}${opt('1080', av.ssQ, '1080p')}${opt('720', av.ssQ, '720p')}</select></div>
           <div><label>Frame rate</label><select id="aSsFps">${opt(5, av.ssFps, '5 fps (slides)')}${opt(15, av.ssFps, '15 fps')}${opt(30, av.ssFps, '30 fps')}${opt(60, av.ssFps, '60 fps (games)')}</select></div>
           <div><label>Bitrate</label><select id="aSsBr">${SS_BRS.map((k) => opt(k, av.ssBr, mbps(k))).join('')}</select></div>
-          <div style="grid-column: span 3"><label>Optimize screen share for</label><select id="aSsHint">${opt('detail', av.ssHint, 'Clarity: sharp text and detail (recommended)')}${opt('motion', av.ssHint, 'Smoothness: games and video, may soften under load')}</select></div>
+          <div style="grid-column: span 3"><label>Optimize screen share for</label><select id="aSsHint">${opt('motion', av.ssHint, 'Smoothness: prioritize frame rate (recommended)')}${opt('detail', av.ssHint, 'Clarity: prioritize sharp text and detail')}</select></div>
         </div>
+        <p class="hint">Smoothness prioritizes the selected FPS under load. 1080p and a Low own preview reduce the processing needed for steady motion. Clarity may reduce FPS to keep text sharp.</p>
         <h3>Watching others</h3>
         <div class="grid3">
-          <div><label>Video codec</label><select id="aCodec">${opt('h264', av.codec, 'H.264 (GPU encoding, recommended)')}${opt('', av.codec, 'Auto (usually VP8, CPU)')}${opt('vp9', av.codec, 'VP9 (sharper, CPU)')}${opt('av1', av.codec, 'AV1 (sharpest, most CPU)')}</select></div>
+          <div><label>Video codec</label><select id="aCodec">${opt('h264', av.codec, 'H.264 (recommended)')}${opt('', av.codec, 'Auto')}${opt('vp9', av.codec, 'VP9')}${opt('av1', av.codec, 'AV1')}</select></div>
           <div><label>Your own preview</label><select id="aSelf">${opt('full', av.selfPreview, 'Full quality')}${opt('low', av.selfPreview, 'Low (saves CPU)')}${opt('off', av.selfPreview, 'Hidden')}</select></div>
           <div style="grid-column: span 3"><label>Max download per stream</label><select id="aRecv">${opt(0, av.recvCap, 'No limit (use each sender\'s setting)')}${VIEW_BRS.map((k) => opt(k, av.recvCap, 'Up to ' + mbps(k))).join('')}</select></div>
         </div>
         <label class="inline-check"><input type="checkbox" id="aStats" ${av.showStats ? 'checked' : ''}> Always show stream stats (resolution · fps · bitrate · codec) on video tiles</label>
-        <p class="hint">Bitrate is the biggest quality factor: higher = sharper, but every viewer pulls that much from your upload. You can also change any stream's quality from the button on its tile. ${voice ? 'Saving reconnects your call to apply camera/screen changes.' : ''}</p>
+        <p class="hint">Higher bitrate improves detail, and every viewer needs that much upload bandwidth. Change any stream's quality from its tile. ${voice ? 'Camera changes reconnect your call. Screen share changes apply after you stop and share again.' : ''}</p>
         ${voice ? '<button class="btn" id="aDevices">Choose microphone / camera…</button>' : '<p class="hint">Join a voice channel to pick your microphone and camera.</p>'}
       </div>
       <div class="actions"><button class="btn link" data-close>Cancel</button><button class="btn primary" id="mOk">Save</button></div>`, () => {
@@ -1782,7 +1834,7 @@
           setTimeout(() => servers.forEach(connectMesh), 400);
         }
         if (voice && (avChanged || nameChanged)) joinVoice(voice.sid, voice.cid, voice.cam);
-        if (voice && shareChanged && voice.ssFrame) toast('New screen share settings apply the next time you share.');
+        if (voice && shareChanged && voice.ssFrame) toast('Stop sharing, then share again to apply the new resolution, FPS, bitrate and smoothness settings.', 8000);
         if (viewChanged) { tileEls.forEach((el) => { el.dataset.vs = '__reload'; }); } // reconnect viewers with the new codec
         render();
         renderStage();
@@ -2022,6 +2074,7 @@
   window.addEventListener('hashchange', checkInviteHash);
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
+    syncVoiceState();
     broadcastState();
     if (cur.sid && cur.cid) { markRead(cur.sid, cur.cid); renderRail(); renderChannels(); }
   });

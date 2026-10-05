@@ -44,6 +44,18 @@ To use it with friends over the internet, host the folder on any static host
 ## Testing with two identities
 Add `?as=alice` (or any name) to the URL to get a separate identity and storage in the same browser.
 
+## Voice and screen sharing
+- New profiles start at **1080p / 60 FPS**, with **Smoothness** priority and a **Low** own preview to reduce encoding load. Existing saved preferences are preserved.
+- Choose 5, 15, 30 or 60 FPS freely in **User settings → Voice & Video**. Resolution, bitrate, preview and clarity/smoothness remain selectable. Stop and restart an active share after changing its capture settings.
+- The selected FPS is a capture target. Delivered FPS can be lower when the source is static or the browser, encoder or network is limited. Try a browser tab as the source for smooth motion; enable stream stats to check the actual FPS. [VDO.Ninja explains capture limits here](https://docs.vdo.ninja/guides/how-to-screen-share-in-1080p).
+- Microphone mute and deafen are independent. Audio settings are reapplied when media connects or reconnects; muting one person does not affect the playback volume of people joining later.
+
+Run the dependency-free regression checks with Node.js:
+```sh
+node --check app.js
+node tests/media.test.js
+```
+
 ## Self-hosting VDO.Ninja (optional)
 Add this before `app.js` in `index.html`:
 ```html
