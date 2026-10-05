@@ -1,34 +1,46 @@
-/* Dischord — a Discord-style app on top of VDO.Ninja.
+/* Dischord — a Discord-style app on top of VDO.Ninja. Fully peer-to-peer.
  *
  * How it works (no backend):
  *  - Each server has a random id + secret key. Everyone who has the invite has both.
- *  - For every server you're in, a hidden VDO.Ninja iframe joins a room
- *    with no camera or mic. That peer-to-peer mesh carries text messages, presence, typing,
- *    channel changes and history sync, via the VDO.Ninja IFRAME API (sendData/dataReceived).
+ *  - For every server you're in, a hidden VDO.Ninja iframe joins a room as a guest with
+ *    no camera or mic. That peer-to-peer mesh carries text messages, presence, typing,
+ *    voice-channel occupancy, channel changes and history sync, via the VDO.Ninja
+ *    IFRAME API (sendData / dataReceived).
  *  - Voice channels are separate, visible VDO.Ninja rooms (audio, camera, screen share).
+ *    Dischord draws its own controls and drives VDO.Ninja through postMessage.
  *  - Everything is stored in your browser's localStorage. History reaches people who
  *    join later as long as someone who has it is online.
+ *
+ * Testing tip: add ?as=alice to the URL to use a separate identity in the same browser.
  */
 (() => {
   'use strict';
 
   // Point this at a self-hosted VDO.Ninja if you like (see README).
   const VDO = (window.DISCHORD_CONFIG && window.DISCHORD_CONFIG.vdoUrl) || 'https://vdo.ninja/';
-  const PROTO = 1;
+  const PROTO = 2;
   const MAX_MSGS = 500;
-  const HIST_SEND = 60;          // messages per channel sent during history sync
-  const ONLINE_MS = 45000;       // considered offline after this long without a ping
-  const PING_MS = 15000;
+  const HIST_SEND = 80;           // messages per channel sent during history sync
+  const PING_MS = 8000;           // presence heartbeat
+  const STALE_CONNECTED = 90000;  // connected peer considered gone after this long silent
+  const STALE_LOOSE = 25000;      // peer with no live connection considered gone after this
   const COLORS = ['#7b61ff', '#5865f2', '#3ba55c', '#faa61a', '#ed4245', '#eb459e', '#00a8fc', '#1abc9c', '#e67e22', '#9b59b6'];
+
+  const AV_DEFAULTS = { camQ: '720', camFps: 30, ssQ: '1080', ssFps: 30, sendBr: 2500, recvBr: 0 };
+  const CAM_Q = { '360': 2, '720': 1, '1080': 0 };
+  const SS_Q = { '720': 1, '1080': 0, '1440': -3 };
 
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const now = () => Date.now();
 
+  // Optional ?as=name gives a separate identity/storage in the same browser (handy for testing).
+  const PROFILE = (new URLSearchParams(location.search).get('as') || '').replace(/[^a-z0-9_-]/gi, '').slice(0, 20);
+  const PREFIX = 'dischord.' + (PROFILE ? 'p_' + PROFILE + '.' : '');
   const store = {
-    get(k, d) { try { const v = localStorage.getItem('dischord.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
-    set(k, v) { try { localStorage.setItem('dischord.' + k, JSON.stringify(v)); } catch { } },
-    del(k) { try { localStorage.removeItem('dischord.' + k); } catch { } },
+    get(k, d) { try { const v = localStorage.getItem(PREFIX + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+    set(k, v) { try { localStorage.setItem(PREFIX + k, JSON.stringify(v)); } catch { } },
+    del(k) { try { localStorage.removeItem(PREFIX + k); } catch { } },
   };
 
   function rid(n = 10) {
@@ -41,20 +53,55 @@
   const b64e = (obj) => btoa(unescape(encodeURIComponent(JSON.stringify(obj)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   const b64d = (str) => JSON.parse(decodeURIComponent(escape(atob(str.replace(/-/g, '+').replace(/_/g, '/')))));
 
+  // ---------------------------------------------------------------- icons (inline SVG)
+  const P = {
+    mic: '<path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M19 11a7 7 0 0 1-14 0M12 18v3"/>',
+    micOff: '<path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z"/><path d="M19 11a7 7 0 0 1-14 0M12 18v3"/><path class="slash" d="M4 4l16 16"/>',
+    headphones: '<path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="3" y="14" width="4.5" height="7" rx="1.5"/><rect x="16.5" y="14" width="4.5" height="7" rx="1.5"/>',
+    deaf: '<path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="3" y="14" width="4.5" height="7" rx="1.5"/><rect x="16.5" y="14" width="4.5" height="7" rx="1.5"/><path class="slash" d="M4 4l16 16"/>',
+    camera: '<rect x="2.5" y="6" width="13" height="12" rx="2.5"/><path d="M15.5 10.5l6-3.5v10l-6-3.5z"/>',
+    cameraOff: '<rect x="2.5" y="6" width="13" height="12" rx="2.5"/><path d="M15.5 10.5l6-3.5v10l-6-3.5z"/><path class="slash" d="M3 3l18 18"/>',
+    screen: '<rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>',
+    gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+    hangup: '<path fill="currentColor" stroke="none" d="M12 9c-2.4 0-4.7.5-6.8 1.4-.7.3-1.2 1-1.2 1.8v2.3c0 .8.8 1.4 1.6 1.2l2.8-.7c.6-.2 1-.7 1-1.3v-1.6a11 11 0 0 1 5.2 0v1.6c0 .6.4 1.1 1 1.3l2.8.7c.8.2 1.6-.4 1.6-1.2v-2.3c0-.8-.5-1.5-1.2-1.8C16.7 9.5 14.4 9 12 9z"/>',
+    speaker: '<path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/>',
+    hash: '<path d="M5 9h15M4 15h15M10 3L8 21M16 3l-2 18"/>',
+    users: '<circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0"/><path d="M16 4.2a4 4 0 0 1 0 7.6M22 21a7 7 0 0 0-4-6.3"/>',
+    userPlus: '<circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0M19 8v6M16 11h6"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    x: '<path d="M6 6l12 12M18 6L6 18"/>',
+    chevron: '<path d="M6 9l6 6 6-6"/>',
+    edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/>',
+    trash: '<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>',
+    logout: '<path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/>',
+    signal: '<path d="M4 20v-3M9 20v-7M14 20V9M19 20V4"/>',
+    live: '<rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><circle cx="12" cy="10.5" r="2" fill="currentColor"/>',
+  };
+  const icon = (name, cls = '') => `<svg class="ico-svg ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[name] || ''}</svg>`;
+  function paintIcons(root = document) {
+    root.querySelectorAll('i[data-icon]').forEach((el) => { el.outerHTML = icon(el.dataset.icon); });
+  }
+  function setIcon(btn, name) {
+    const svg = btn.querySelector('svg');
+    if (svg) svg.innerHTML = P[name] || '';
+  }
+
   // ---------------------------------------------------------------- state
   let me = store.get('me', null);
   let servers = store.get('servers', []);
   let reads = store.get('reads', {});
   let lastChan = store.get('lastChan', {});
+  let av = { ...AV_DEFAULTS, ...store.get('av', {}) };
   const cur = { sid: store.get('lastSid', null), cid: null };
   const msgs = {};       // sid -> { cid: [msg] }
   const known = {};      // sid -> { userId: user }   (persisted)
-  const members = {};    // sid -> { userId: { user, voice, seen, uuid } }
+  const members = {};    // sid -> { userId: { user, vc, vs, st, seen, uuids:Set } }
+  const peers = {};      // sid -> Map(uuid -> { uid, rx, helloAt })
   const typing = {};     // sid/cid -> { userId: { name, until } }
-  const meshes = {};     // sid -> { iframe, peers:Set }
-  const histSent = {};   // sid/uuid -> ts
-  let voice = null;      // { sid, cid, iframe, cam }
-  let micOn = true, deaf = false;
+  const meshes = {};     // sid -> { iframe }
+  const speaking = {};   // userId -> until ts
+  let voice = null;      // { sid, cid, iframe, cam, ss, vs }
+  let micOn = store.get('micOn', true), deaf = store.get('deaf', false);
   let membersOpen = store.get('membersOpen', true);
 
   const server = (sid) => servers.find((s) => s.id === sid);
@@ -98,8 +145,12 @@
       .map((c) => ({ id: c.id, name: c.name, type: c.type }));
     return { id: d.id, name: d.name, channels, v: d.v };
   }
+  function cleanState(st) {
+    st = st && typeof st === 'object' ? st : {};
+    return { m: !!st.m, d: !!st.d, c: !!st.c, s: !!st.s };
+  }
 
-  // ---------------------------------------------------------------- mesh (data-only VDO.Ninja rooms)
+  // ---------------------------------------------------------------- mesh (hidden VDO.Ninja rooms)
   const roomFor = (s, suffix = '') => 'dischord' + s.id + suffix;
 
   function meshUrl(s) {
@@ -114,7 +165,8 @@
     f.src = meshUrl(s);
     f.title = 'mesh-' + s.id;
     $('meshHost').appendChild(f);
-    meshes[s.id] = { iframe: f, peers: new Set() };
+    meshes[s.id] = { iframe: f };
+    peers[s.id] = peers[s.id] || new Map();
   }
   function disconnectMesh(sid) {
     const m = meshes[sid];
@@ -122,44 +174,82 @@
     try { send(sid, { t: 'bye' }); } catch { }
     setTimeout(() => m.iframe.remove(), 200);
     delete meshes[sid];
+    peers[sid] = new Map();
   }
 
+  const myVoiceIn = (sid) => (voice && voice.sid === sid ? voice.cid : null);
+  const myState = () => ({ m: !micOn || deaf, d: deaf, c: !!(voice && voice.cam), s: !!(voice && voice.ss) });
+
+  // Every payload carries who I am and my voice state, so presence is never stale.
   function send(sid, payload, uuid) {
     const m = meshes[sid];
     if (!m || !m.iframe.contentWindow) return;
-    const body = { v: PROTO, u: me, ...payload };
+    const body = { v: PROTO, u: me, vc: myVoiceIn(sid), vs: myVoiceIn(sid) ? voice.vs : null, st: myState(), ...payload };
     const o = { sendData: { dischord: body } };
     if (uuid) o.UUID = uuid;
     m.iframe.contentWindow.postMessage(o, '*');
   }
-
-  const myVoiceIn = (sid) => (voice && voice.sid === sid ? voice.cid : null);
+  const broadcastState = () => { for (const sid in meshes) send(sid, { t: 'ping' }); };
 
   function hello(sid, uuid, want) {
     const s = server(sid);
     if (!s) return;
-    send(sid, { t: 'hello', want: !!want, voice: myVoiceIn(sid), s: { id: s.id, name: s.name, channels: s.channels, v: s.v } }, uuid);
+    send(sid, { t: 'hello', want: !!want, s: { id: s.id, name: s.name, channels: s.channels, v: s.v } }, uuid);
+  }
+
+  // Greet a newly connected peer, retrying until we hear back (the data channel can lag the event).
+  function greet(sid, uuid) {
+    const map = peers[sid];
+    if (!map) return;
+    const p = map.get(uuid) || { uid: null, rx: 0, helloAt: 0 };
+    map.set(uuid, p);
+    const delays = [0, 700, 1800, 4000, 8000, 15000];
+    delays.forEach((d) => setTimeout(() => {
+      const q = peers[sid] && peers[sid].get(uuid);
+      if (q && !q.rx) hello(sid, uuid, true);
+    }, d));
+  }
+
+  function peerGone(sid, uuid) {
+    const map = peers[sid];
+    if (!map) return;
+    const p = map.get(uuid);
+    map.delete(uuid);
+    const m = p && p.uid && members[sid] && members[sid][p.uid];
+    if (m) {
+      m.uuids.delete(uuid);
+      if (!m.uuids.size) m.seen = 0;
+    }
+    if (sid === cur.sid) renderPresence();
   }
 
   function sendHistory(sid, uuid) {
-    const key = sid + '/' + uuid;
-    if (histSent[key] && now() - histSent[key] < 10000) return;
-    histSent[key] = now();
     const all = getMsgs(sid);
     for (const cid in all) {
       const list = all[cid].slice(-HIST_SEND);
-      for (let i = 0; i < list.length; i += 15) {
-        send(sid, { t: 'hist', ms: list.slice(i, i + 15) }, uuid);
-      }
+      for (let i = 0; i < list.length; i += 15) send(sid, { t: 'hist', ms: list.slice(i, i + 15) }, uuid);
     }
   }
 
-  function touch(sid, u, uuid, v) {
-    const user = cleanUser(u);
+  function isOnline(m) {
+    if (!m || !m.seen) return false;
+    return now() - m.seen < (m.uuids && m.uuids.size ? STALE_CONNECTED : STALE_LOOSE);
+  }
+
+  function touch(sid, body, uuid) {
+    const user = cleanUser(body.u);
     if (!user || user.id === me.id) return null;
-    members[sid] = members[sid] || {};
-    const wasOnline = isOnline(members[sid][user.id]);
-    members[sid][user.id] = { user, voice: isId(v) ? v : null, seen: now(), uuid };
+    const ms = (members[sid] = members[sid] || {});
+    const prev = ms[user.id];
+    const wasOnline = isOnline(prev);
+    const m = prev || { uuids: new Set() };
+    m.user = user;
+    m.vc = isId(body.vc) ? body.vc : null;
+    m.vs = m.vc && isId(body.vs) ? body.vs : null;
+    m.st = cleanState(body.st);
+    m.seen = now();
+    if (uuid) m.uuids.add(uuid);
+    ms[user.id] = m;
     const k = getKnown(sid);
     if (!k[user.id] || k[user.id].name !== user.name || k[user.id].color !== user.color) {
       k[user.id] = user;
@@ -167,25 +257,33 @@
     }
     return { user, wasOnline };
   }
-  const isOnline = (m) => !!m && now() - m.seen < ONLINE_MS;
 
   function onPeerData(sid, p, uuid) {
     if (!p || typeof p !== 'object' || !p.u) return;
     const s = server(sid);
     if (!s) return;
-    const t = touch(sid, p.u, uuid, p.voice);
+    const t = touch(sid, p, uuid);
     if (!t) return;
-    const m = meshes[sid];
-    if (m && uuid) m.peers.add(uuid);
+
+    // first packet from this connection: make sure both sides know each other + have history
+    if (uuid && peers[sid]) {
+      const map = peers[sid];
+      const pr = map.get(uuid) || { uid: null, rx: 0, helloAt: 0 };
+      const first = !pr.rx;
+      pr.rx = now(); pr.uid = t.user.id;
+      map.set(uuid, pr);
+      if (first) {
+        sendHistory(sid, uuid);
+        if (p.t !== 'hello' || p.want) { hello(sid, uuid, false); pr.helloAt = now(); }
+      } else if (p.t === 'hello' && p.want && now() - pr.helloAt > 1500) {
+        hello(sid, uuid, false); pr.helloAt = now();
+      }
+    }
 
     switch (p.t) {
       case 'hello':
+      case 'server':
         mergeServer(sid, p.s);
-        if (p.want) hello(sid, uuid, false);
-        sendHistory(sid, uuid);
-        break;
-      case 'ping':
-        if (!t.wasOnline) hello(sid, uuid, true);
         break;
       case 'msg': {
         const msg = cleanMsg(p.m);
@@ -199,7 +297,7 @@
           const msg = cleanMsg(raw);
           if (msg && addMsg(sid, msg)) changed = true;
         }
-        if (changed) render();
+        if (changed) { if (sid === cur.sid) renderMessages(); renderRail(); if (sid === cur.sid) renderChannels(); }
         break;
       }
       case 'del':
@@ -216,14 +314,13 @@
           renderTyping();
         }
         break;
-      case 'server':
-        mergeServer(sid, p.s);
+      case 'bye': {
+        const m = members[sid][t.user.id];
+        if (m) { m.seen = 0; m.uuids.clear(); }
         break;
-      case 'bye':
-        if (members[sid][t.user.id]) members[sid][t.user.id].seen = 0;
-        break;
+      }
     }
-    if (sid === cur.sid) { renderMembers(); renderChannels(); }
+    if (sid === cur.sid) renderPresence();
   }
 
   function mergeServer(sid, def) {
@@ -233,6 +330,7 @@
     s.name = d.name; s.channels = d.channels; s.v = d.v;
     saveServers();
     if (voice && voice.sid === sid && !channel(s, voice.cid)) leaveVoice();
+    if (cur.sid === sid && !channel(s, cur.cid)) cur.cid = (s.channels.find((c) => c.type === 'text') || s.channels[0] || {}).id || null;
     render();
   }
 
@@ -255,7 +353,6 @@
       if (m.ed && m.text !== old.text) { list[i] = m; saveMsgs(sid); return true; }
       return false;
     }
-    // insert sorted by ts
     let j = list.length;
     while (j > 0 && list[j - 1].ts > m.ts) j--;
     list.splice(j, 0, m);
@@ -267,9 +364,12 @@
   function onNewMsg(sid, m) {
     const k = sid + '/' + m.cid;
     if (typing[k]) delete typing[k][m.a.id];
-    if (sid === cur.sid && m.cid === cur.cid && document.hasFocus()) markRead(sid, m.cid);
-    else if (document.hidden || sid !== cur.sid || m.cid !== cur.cid) notify(sid, m);
-    render();
+    const viewing = sid === cur.sid && m.cid === cur.cid;
+    if (viewing && !document.hidden) markRead(sid, m.cid);
+    if (!viewing || document.hidden) notify(sid, m);
+    if (viewing) { renderMessages(); renderTyping(); }
+    renderRail();
+    if (sid === cur.sid) renderChannels();
   }
 
   function sendMessage(text) {
@@ -282,6 +382,7 @@
     addMsg(s.id, m);
     markRead(s.id, cur.cid);
     send(s.id, { t: 'msg', m });
+    lastTypingSent = 0;
     renderMessages(true);
   }
 
@@ -326,14 +427,14 @@
     const r = reads[sid + '/' + cid] || 0;
     const list = getMsgs(sid)[cid] || [];
     let n = 0;
-    for (let i = list.length - 1; i >= 0 && list[i].ts > r; i--) if (!list[i].del && list[i].a.id !== me.id) n++;
+    for (let i = list.length - 1; i >= 0 && list[i].ts > r; i--) if (!list[i].del && me && list[i].a.id !== me.id) n++;
     return n;
   }
   const serverUnread = (s) => s.channels.some((c) => c.type === 'text' && unreadCount(s.id, c.id) > 0);
 
   let lastTypingSent = 0;
   function sendTyping() {
-    if (now() - lastTypingSent < 3000) return;
+    if (now() - lastTypingSent < 2500) return;
     lastTypingSent = now();
     send(cur.sid, { t: 'typing', cid: cur.cid });
   }
@@ -349,11 +450,14 @@
   }
 
   // ---------------------------------------------------------------- voice
-  function voiceUrl(s, c, withCam) {
-    const p = new URLSearchParams({ room: roomFor(s, 'v' + c.id), password: s.key, label: me.name });
-    let u = VDO + '?' + p.toString() + '&autostart&ssb&showlabels&darkmode&chatbutton=false&nohangupbutton&nmb&nospeakerbutton';
-    if (withCam) u += '&webcam';
-    else u += '&videodevice=0&webcam';
+  function voiceUrl(s, c, withCam, vs) {
+    const p = new URLSearchParams({ room: roomFor(s, 'v' + c.id), password: s.key, label: me.name, push: vs });
+    let u = VDO + '?' + p.toString();
+    u += '&autostart&webcam&nocontrolbar&hideheader&showlabels&chatbutton=false&nohangupbutton';
+    u += withCam ? `&quality=${CAM_Q[av.camQ] ?? 1}&maxframerate=${av.camFps}` : '&videodevice=0';
+    u += `&screensharequality=${SS_Q[av.ssQ] ?? 0}&screensharefps=${av.ssFps}`;
+    u += `&maxvideobitrate=${av.sendBr}&roombitrate=${av.sendBr}`;
+    if (av.recvBr) u += `&bitrate=${av.recvBr}`;
     if (!micOn || deaf) u += '&mute';
     return u;
   }
@@ -361,45 +465,71 @@
   function joinVoice(sid, cid, withCam) {
     const s = server(sid), c = channel(s, cid);
     if (!s || !c) return;
-    if (voice) leaveVoice(true);
+    const rejoin = voice && voice.sid === sid && voice.cid === cid;
+    if (voice) dropVoiceFrame();
+    const vs = 'dc' + me.id.slice(0, 10) + rid(5);
     const f = document.createElement('iframe');
     f.allow = 'autoplay; camera; microphone; display-capture; fullscreen; picture-in-picture; clipboard-write';
-    f.src = voiceUrl(s, c, withCam);
-    $('voiceStage').innerHTML = '';
-    $('voiceStage').appendChild(f);
-    voice = { sid, cid, iframe: f, cam: withCam };
-    f.addEventListener('load', () => { if (deaf) setTimeout(() => voicePost({ mute: true }), 2500); });
-    send(sid, { t: 'ping', voice: cid });
-    playTone(true);
+    // give the old connection a moment to release the camera / stream id
+    setTimeout(() => { f.src = voiceUrl(s, c, withCam, vs); }, rejoin ? 500 : 0);
+    $('stageFrame').appendChild(f);
+    voice = { sid, cid, iframe: f, cam: !!withCam, ss: false, vs };
+    f.addEventListener('load', () => {
+      setTimeout(() => {
+        voicePost({ getLoudness: true });
+        if (deaf) voicePost({ mute: true });
+      }, 2500);
+    });
+    broadcastState();
+    if (!rejoin) playTone(true);
     render();
   }
 
-  function leaveVoice(silent) {
+  function dropVoiceFrame() {
     if (!voice) return;
-    const sid = voice.sid;
-    try { voice.iframe.contentWindow.postMessage({ close: true }, '*'); } catch { }
     const f = voice.iframe;
+    try { f.contentWindow.postMessage({ close: true }, '*'); } catch { }
     setTimeout(() => f.remove(), 300);
+  }
+
+  function leaveVoice() {
+    if (!voice) return;
+    dropVoiceFrame();
     voice = null;
-    send(sid, { t: 'ping', voice: null });
-    if (!silent) playTone(false);
+    for (const k in speaking) delete speaking[k];
+    broadcastState();
+    playTone(false);
     render();
   }
 
   function voicePost(o) { if (voice && voice.iframe.contentWindow) voice.iframe.contentWindow.postMessage(o, '*'); }
 
   function toggleMic() {
-    if (deaf) { deaf = false; voicePost({ mute: false }); }
-    micOn = !micOn;
+    if (deaf) { deaf = false; voicePost({ mute: false }); micOn = true; }
+    else micOn = !micOn;
     voicePost({ mic: micOn });
-    renderUserPanel();
+    store.set('micOn', micOn); store.set('deaf', deaf);
+    broadcastState();
+    renderControls(); renderPresence();
   }
   function toggleDeaf() {
     deaf = !deaf;
     voicePost({ mute: deaf });
     voicePost({ mic: deaf ? false : micOn });
-    renderUserPanel();
+    store.set('deaf', deaf);
+    broadcastState();
+    renderControls(); renderPresence();
   }
+  function toggleCam() {
+    if (!voice) return;
+    joinVoice(voice.sid, voice.cid, !voice.cam); // rejoin so the camera is truly released when off
+  }
+  function toggleShare() {
+    if (!voice) return;
+    voicePost({ function: 'commands', action: 'togglescreenshare' });
+    showVoice();
+  }
+  function showVoice() { if (voice) { if (cur.sid !== voice.sid) selectServer(voice.sid); selectChannel(voice.cid); } }
 
   let audioCtx;
   function playTone(up) {
@@ -417,13 +547,38 @@
     } catch { }
   }
 
+  // loudness from VDO.Ninja is keyed by stream id; map it back to users
+  function onLoudness(obj) {
+    if (!obj || typeof obj !== 'object' || !voice) return;
+    const ms = members[voice.sid] || {};
+    const byVs = {};
+    for (const id in ms) if (ms[id].vs) byVs[ms[id].vs] = id;
+    let changed = false;
+    for (const key in obj) {
+      const uid = byVs[key];
+      const level = +obj[key];
+      if (uid && level > 5) { if (!(speaking[uid] > now())) changed = true; speaking[uid] = now() + 500; }
+    }
+    if (changed) paintSpeaking();
+  }
+  function paintSpeaking() {
+    document.querySelectorAll('[data-uid]').forEach((el) => el.classList.toggle('speaking', speaking[el.dataset.uid] > now()));
+  }
+
   // ---------------------------------------------------------------- iframe API listener
   window.addEventListener('message', (e) => {
     const d = e.data;
     if (!d || typeof d !== 'object') return;
+
+    if (voice && e.source === voice.iframe.contentWindow) {
+      if (d.action === 'screen-share-state') { voice.ss = !!d.value; broadcastState(); renderControls(); renderPresence(); }
+      if (d.loudness) onLoudness(d.loudness);
+      return;
+    }
+
     let sid = null;
     for (const id in meshes) if (meshes[id].iframe.contentWindow === e.source) { sid = id; break; }
-    if (!sid) return; // voice iframe events are not needed
+    if (!sid) return;
 
     if (d.dataReceived && d.dataReceived.dischord) {
       onPeerData(sid, d.dataReceived.dischord, d.UUID);
@@ -431,18 +586,10 @@
     }
     if (d.action && d.UUID) {
       const a = d.action;
-      const up = ['push-connection', 'view-connection', 'guest-connected', 'new-view-connection'].includes(a) && d.value !== false;
+      const up = ['push-connection', 'view-connection', 'new-push-connection', 'new-view-connection', 'guest-connected'].includes(a) && d.value !== false;
       const down = a === 'end-view-connection' || ((a === 'push-connection' || a === 'view-connection') && d.value === false);
-      if (up) {
-        // data channel may need a moment to open
-        setTimeout(() => hello(sid, d.UUID, true), 600);
-        setTimeout(() => hello(sid, d.UUID, true), 3500);
-      } else if (down) {
-        const ms = members[sid] || {};
-        for (const uid in ms) if (ms[uid].uuid === d.UUID) ms[uid].seen = 0;
-        if (meshes[sid]) meshes[sid].peers.delete(d.UUID);
-        if (sid === cur.sid) { renderMembers(); renderChannels(); }
-      }
+      if (up) greet(sid, d.UUID);
+      else if (down) peerGone(sid, d.UUID);
     }
   });
 
@@ -495,7 +642,7 @@
   }
 
   function inviteCode(s) { return b64e({ i: s.id, k: s.key, n: s.name, c: s.channels, v: s.v }); }
-  function inviteLink(s) { return location.href.split('#')[0] + '#invite=' + inviteCode(s); }
+  function inviteLink(s) { return location.origin + location.pathname + '#invite=' + inviteCode(s); }
 
   function joinFromInvite(input) {
     let code = String(input || '').trim();
@@ -529,7 +676,8 @@
 
   // ---------------------------------------------------------------- rendering
   const initials = (n) => (n.match(/\b\p{L}|\p{N}/gu) || [n[0] || '?']).slice(0, 2).join('').toUpperCase();
-  const avatar = (u, dot) => `<div class="avatar" style="background:${esc(u.color)}">${esc((u.name[0] || '?').toUpperCase())}${dot ? '<span class="dot"></span>' : ''}</div>`;
+  const avatar = (u, dot, cls = '') => `<div class="avatar ${cls}" style="background:${esc(u.color)}">${esc((u.name[0] || '?').toUpperCase())}${dot ? '<span class="dot"></span>' : ''}</div>`;
+  const stateIcons = (st) => (st ? (st.s ? '<span class="live-tag">LIVE</span>' : '') + (st.c ? icon('camera', 'mini') : '') + (st.d ? icon('deaf', 'mini off') : st.m ? icon('micOff', 'mini off') : '') : '');
 
   function render() {
     if (!me) return;
@@ -539,11 +687,14 @@
     renderMain();
     renderMembers();
     renderUserPanel();
+    renderControls();
   }
+  function renderPresence() { renderChannels(); renderMembers(); renderUserPanel(); renderVoiceIdle(); }
 
   function renderRail() {
+    if (!me) return;
     $('serverList').innerHTML = servers.map((s) =>
-      `<button class="rail-btn ${s.id === cur.sid ? 'active' : ''} ${serverUnread(s) && s.id !== cur.sid ? 'unread' : ''}" data-sid="${esc(s.id)}" title="${esc(s.name)}">${esc(initials(s.name))}</button>`).join('');
+      `<button class="rail-btn ${s.id === cur.sid ? 'active' : ''} ${serverUnread(s) && s.id !== cur.sid ? 'unread' : ''} ${voice && voice.sid === s.id ? 'in-voice' : ''}" data-sid="${esc(s.id)}" title="${esc(s.name)}">${esc(initials(s.name))}</button>`).join('');
     $('homeBtn').classList.toggle('active', !cur.sid);
     let total = 0;
     for (const s of servers) for (const c of s.channels) if (c.type === 'text') total += unreadCount(s.id, c.id);
@@ -558,40 +709,46 @@
 
   function voiceOccupants(sid, cid) {
     const out = [];
-    if (voice && voice.sid === sid && voice.cid === cid) out.push(me);
+    if (voice && voice.sid === sid && voice.cid === cid) out.push({ user: me, st: myState(), self: true });
     const ms = members[sid] || {};
-    for (const id in ms) if (isOnline(ms[id]) && ms[id].voice === cid) out.push(ms[id].user);
+    for (const id in ms) if (isOnline(ms[id]) && ms[id].vc === cid) out.push({ user: ms[id].user, st: ms[id].st });
     return out;
   }
 
   function renderChannels() {
+    if (!me) return;
     const s = server(cur.sid);
     const el = $('channelList');
     if (!s) {
       el.innerHTML = `<div class="cat"><span>Your servers</span></div>` + (servers.length
-        ? servers.map((x) => `<div class="chan" data-sid="${esc(x.id)}"><span class="ico">◆</span><span class="name">${esc(x.name)}</span></div>`).join('')
+        ? servers.map((x) => `<div class="chan" data-sid="${esc(x.id)}"><span class="ico">${icon('hash')}</span><span class="name">${esc(x.name)}</span></div>`).join('')
         : `<div class="chan" style="cursor:default">No servers yet</div>`);
       return;
     }
     const text = s.channels.filter((c) => c.type === 'text');
     const vc = s.channels.filter((c) => c.type === 'voice');
-    let h = `<div class="cat"><span>Text channels</span><button class="icon-btn" data-add="text" title="Create channel">+</button></div>`;
+    let h = `<div class="cat"><span>Text channels</span><button class="icon-btn" data-add="text" title="Create channel">${icon('plus')}</button></div>`;
     for (const c of text) {
       const n = c.id === cur.cid ? 0 : unreadCount(s.id, c.id);
       h += `<div class="chan ${c.id === cur.cid ? 'active' : ''} ${n ? 'unread' : ''}" data-cid="${esc(c.id)}">
-        <span class="ico">#</span><span class="name">${esc(c.name)}</span>
+        <span class="ico">${icon('hash')}</span><span class="name">${esc(c.name)}</span>
         ${n ? `<span class="badge">${n > 99 ? '99+' : n}</span>` : ''}
-        <button class="icon-btn del" data-delc="${esc(c.id)}" title="Delete channel">✕</button></div>`;
+        <button class="icon-btn del" data-delc="${esc(c.id)}" title="Delete channel">${icon('trash')}</button></div>`;
     }
-    h += `<div class="cat"><span>Voice channels</span><button class="icon-btn" data-add="voice" title="Create channel">+</button></div>`;
+    h += `<div class="cat"><span>Voice channels</span><button class="icon-btn" data-add="voice" title="Create channel">${icon('plus')}</button></div>`;
     for (const c of vc) {
       const who = voiceOccupants(s.id, c.id);
-      h += `<div class="chan ${c.id === cur.cid ? 'active' : ''}" data-cid="${esc(c.id)}">
-        <span class="ico">🔊</span><span class="name">${esc(c.name)}</span>
-        <button class="icon-btn del" data-delc="${esc(c.id)}" title="Delete channel">✕</button></div>`;
-      if (who.length) h += `<div class="voice-users">${who.map((u) => `<div class="voice-user">${avatar(u)}<span>${esc(u.name)}</span></div>`).join('')}</div>`;
+      const mine = voice && voice.sid === s.id && voice.cid === c.id;
+      h += `<div class="chan ${c.id === cur.cid ? 'active' : ''} ${mine ? 'connected' : ''}" data-cid="${esc(c.id)}">
+        <span class="ico">${icon('speaker')}</span><span class="name">${esc(c.name)}</span>
+        ${who.length ? `<span class="count">${who.length}</span>` : ''}
+        <button class="icon-btn del" data-delc="${esc(c.id)}" title="Delete channel">${icon('trash')}</button></div>`;
+      if (who.length) {
+        h += `<div class="voice-users">${who.map((o) => `<div class="voice-user" data-uid="${esc(o.self ? me.id : o.user.id)}">${avatar(o.user)}<span class="vu-name">${esc(o.user.name)}</span><span class="vu-icons">${stateIcons(o.st)}</span></div>`).join('')}</div>`;
+      }
     }
     el.innerHTML = h;
+    paintSpeaking();
   }
 
   function renderMain() {
@@ -600,25 +757,31 @@
     $('welcome').classList.toggle('hidden', !!c);
     $('textView').classList.toggle('hidden', !c || c.type !== 'text');
     $('voiceView').classList.toggle('hidden', !c || c.type !== 'voice');
-    const inThisVoice = voice && c && voice.sid === cur.sid && voice.cid === c.id;
+    const inThisVoice = !!(voice && c && voice.sid === cur.sid && voice.cid === c.id);
     $('voiceStage').classList.toggle('offstage', !inThisVoice);
     $('voiceStage').classList.toggle('hidden', !voice);
     $('mainHeader').classList.toggle('hidden', !c);
-    $('membersToggle').classList.toggle('hidden', !c);
+    $('voiceView').classList.toggle('behind', inThisVoice);
 
     if (!c) return;
-    $('chanIcon').textContent = c.type === 'text' ? '#' : '🔊';
+    $('chanIcon').innerHTML = icon(c.type === 'text' ? 'hash' : 'speaker');
     $('chanName').textContent = c.name;
-    $('chanTopic').textContent = c.type === 'voice' ? 'Voice & video powered by VDO.Ninja' : '';
+    $('chanTopic').textContent = c.type === 'voice' ? 'Voice & video, peer-to-peer' : '';
     if (c.type === 'text') {
       $('msgInput').placeholder = `Message #${c.name}`;
       renderMessages();
       renderTyping();
-    } else if (!inThisVoice) {
-      const who = voiceOccupants(s.id, c.id);
-      $('voiceIdleTitle').textContent = '🔊 ' + c.name;
-      $('voiceIdleWho').textContent = who.length ? `${who.map((u) => u.name).join(', ')} ${who.length === 1 ? 'is' : 'are'} in here.` : 'No one is here yet.';
-    }
+    } else renderVoiceIdle();
+  }
+
+  function renderVoiceIdle() {
+    const s = server(cur.sid), c = channel(s, cur.cid);
+    if (!c || c.type !== 'voice') return;
+    const who = voiceOccupants(s.id, c.id);
+    $('voiceIdleTitle').textContent = c.name;
+    $('voiceIdleWho').innerHTML = who.length
+      ? `<div class="vi-people">${who.map((o) => `<div class="vi-person" data-uid="${esc(o.user.id)}">${avatar(o.user, false, 'big')}<span>${esc(o.user.name)}</span></div>`).join('')}</div>`
+      : '<p>No one is here yet. Jump in and others will see you in the channel list.</p>';
   }
 
   function fmtTime(ts) { return new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
@@ -648,16 +811,16 @@
     const box = $('messages');
     const s = server(cur.sid), c = channel(s, cur.cid);
     if (!c || c.type !== 'text') return;
-    const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+    const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
     const list = (getMsgs(s.id)[c.id] || []).filter((m) => !m.del);
-    let h = `<div class="chan-intro"><div class="big">#</div><h2>Welcome to #${esc(c.name)}!</h2><p>This is the start of the #${esc(c.name)} channel. Messages travel peer-to-peer; people who join later get recent history from whoever is online.</p></div>`;
+    let h = `<div class="chan-intro"><div class="big">${icon('hash')}</div><h2>Welcome to #${esc(c.name)}!</h2><p>This is the start of the #${esc(c.name)} channel. Messages travel peer-to-peer; people who join later get recent history from whoever is online.</p></div>`;
     let prev = null;
     for (const m of list) {
       const newDay = !prev || new Date(prev.ts).toDateString() !== new Date(m.ts).toDateString();
       if (newDay) h += `<div class="day-sep"><span>${new Date(m.ts).toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' })}</span></div>`;
       const head = newDay || !prev || prev.a.id !== m.a.id || m.ts - prev.ts > 7 * 60000;
       const mine = m.a.id === me.id;
-      const acts = mine ? `<div class="actions"><button class="icon-btn" data-edit="${esc(m.id)}" title="Edit">✎</button><button class="icon-btn danger" data-del="${esc(m.id)}" title="Delete">🗑</button></div>` : '';
+      const acts = mine ? `<div class="actions"><button class="icon-btn" data-edit="${esc(m.id)}" title="Edit">${icon('edit')}</button><button class="icon-btn danger" data-del="${esc(m.id)}" title="Delete">${icon('trash')}</button></div>` : '';
       const edited = m.ed ? ' <span class="time">(edited)</span>' : '';
       if (head) {
         h += `<div class="msg head"><div class="gutter">${avatar(m.a)}</div><div class="body">
@@ -679,54 +842,67 @@
     const t = typing[k] || {};
     const names = Object.values(t).filter((x) => x.until > now()).map((x) => x.name);
     $('typing').innerHTML = !names.length ? '' :
-      `<b>${names.slice(0, 3).map(esc).join(', ')}</b> ${names.length === 1 ? 'is' : 'are'} typing…`;
+      `<span class="dots"><i></i><i></i><i></i></span><b>${names.slice(0, 3).map(esc).join(', ')}</b> ${names.length === 1 ? 'is' : 'are'} typing…`;
   }
 
   function renderMembers() {
+    if (!me) return;
     const el = $('members');
     const s = server(cur.sid);
     el.classList.toggle('collapsed', !s || !membersOpen);
     if (!s) return;
     const ms = members[s.id] || {};
     const k = getKnown(s.id);
-    const online = [{ user: me, voice: myVoiceIn(s.id) }];
+    const ids = new Set([...Object.keys(k), ...Object.keys(ms)]);
+    const online = [{ user: me, vc: myVoiceIn(s.id), st: myState(), self: true }];
     const offline = [];
-    for (const id in k) {
+    for (const id of ids) {
       if (id === me.id) continue;
       const m = ms[id];
-      if (isOnline(m)) online.push(m); else offline.push({ user: k[id] });
+      if (isOnline(m)) online.push(m); else offline.push({ user: (m && m.user) || k[id] });
     }
-    const vname = (cid) => { const c = channel(s, cid); return c ? '🔊 ' + c.name : ''; };
-    const row = (m, on) => `<div class="mem ${on ? '' : 'offline'}">${avatar(m.user, true)}<div style="min-width:0"><div class="nm" style="color:${on ? esc(m.user.color) : 'inherit'}">${esc(m.user.name)}${m.user.id === me.id ? ' <span class="sub">(you)</span>' : ''}</div>${on && m.voice ? `<div class="sub">${esc(vname(m.voice))}</div>` : ''}</div></div>`;
+    online.sort((a, b) => (a.self ? -1 : b.self ? 1 : a.user.name.localeCompare(b.user.name)));
+    offline.sort((a, b) => a.user.name.localeCompare(b.user.name));
+    const vname = (cid) => { const c = channel(s, cid); return c ? c.name : ''; };
+    const row = (m, on) => `<div class="mem ${on ? '' : 'offline'}" data-uid="${esc(m.user.id)}">${avatar(m.user, true)}<div class="mem-text"><div class="nm" style="color:${on ? esc(m.user.color) : 'inherit'}">${esc(m.user.name)}${m.self ? ' <span class="sub">(you)</span>' : ''}</div>${on && m.vc ? `<div class="sub">${icon('speaker', 'mini')} ${esc(vname(m.vc))}</div>` : ''}</div><span class="vu-icons">${on && m.vc ? stateIcons(m.st) : ''}</span></div>`;
     el.innerHTML = `<div class="mem-cat">Online — ${online.length}</div>${online.map((m) => row(m, true)).join('')}` +
       (offline.length ? `<div class="mem-cat" style="margin-top:20px">Offline — ${offline.length}</div>${offline.map((m) => row(m, false)).join('')}` : '');
+    paintSpeaking();
   }
 
   function renderUserPanel() {
     if (!me) return;
     $('meAvatar').outerHTML = `<div class="avatar" id="meAvatar" style="background:${esc(me.color)}">${esc(me.name[0].toUpperCase())}<span class="dot"></span></div>`;
     $('meName').textContent = me.name;
-    const peers = cur.sid && meshes[cur.sid] ? Object.values(members[cur.sid] || {}).filter(isOnline).length : 0;
-    $('meStatus').textContent = cur.sid ? (peers ? `${peers} peer${peers === 1 ? '' : 's'} connected` : 'Waiting for peers…') : 'Online';
-    $('micBtn').classList.toggle('off', !micOn || deaf);
-    $('micBtn').title = micOn && !deaf ? 'Mute' : 'Unmute';
-    $('deafBtn').classList.toggle('off', deaf);
-    $('deafBtn').title = deaf ? 'Undeafen' : 'Deafen';
+    let peersN = 0;
+    if (cur.sid) for (const id in members[cur.sid] || {}) if (isOnline(members[cur.sid][id])) peersN++;
+    $('meStatus').textContent = cur.sid ? (peersN ? `${peersN} other${peersN === 1 ? '' : 's'} online` : 'Waiting for others…') : 'Online';
     $('voiceStatus').classList.toggle('hidden', !voice);
     if (voice) {
       const s = server(voice.sid), c = channel(s, voice.cid);
       $('voiceWhere').textContent = c ? `${c.name} / ${s.name}` : '';
-      $('voiceWhere').style.cursor = 'pointer';
-      $('vsCam').classList.toggle('on', !!voice.cam);
     }
   }
 
+  function renderControls() {
+    const muted = !micOn || deaf;
+    for (const id of ['micBtn', 'cbMic']) { const b = $(id); setIcon(b, muted ? 'micOff' : 'mic'); b.classList.toggle('off', muted); b.title = muted ? 'Unmute' : 'Mute'; }
+    for (const id of ['deafBtn', 'cbDeaf']) { const b = $(id); setIcon(b, deaf ? 'deaf' : 'headphones'); b.classList.toggle('off', deaf); b.title = deaf ? 'Undeafen' : 'Deafen'; }
+    const cam = !!(voice && voice.cam), ss = !!(voice && voice.ss);
+    setIcon($('cbCam'), cam ? 'camera' : 'cameraOff');
+    $('cbCam').classList.toggle('on', cam); $('cbCam').title = cam ? 'Turn off camera' : 'Turn on camera';
+    $('cbShare').classList.toggle('on', ss); $('cbShare').title = ss ? 'Stop sharing' : 'Share your screen';
+    $('vsCam').classList.toggle('on', cam); $('vsShare').classList.toggle('on', ss);
+  }
+
   // ---------------------------------------------------------------- modals
-  function modal(html, mount, dismissable = true) {
+  function modal(html, mount, dismissable = true, wide = false) {
     $('modal').innerHTML = html;
+    $('modal').classList.toggle('wide', wide);
     $('modalBack').classList.remove('hidden');
     $('modalBack').dataset.dismiss = dismissable ? '1' : '';
     $('modal').querySelectorAll('[data-close]').forEach((b) => (b.onclick = closeModal));
+    paintIcons($('modal'));
     if (mount) mount();
   }
   function closeModal() { $('modalBack').classList.add('hidden'); $('modal').innerHTML = ''; }
@@ -757,38 +933,82 @@
 
   function profileModal(first) {
     let color = (me && me.color) || COLORS[Math.floor(Math.random() * COLORS.length)];
-    modal(`<h2>${first ? 'Welcome to Dischord' : 'User settings'}</h2>
-      <p>${first ? 'Pick a display name. It\'s stored only in this browser.' : 'Changes are shared with everyone online.'}</p>
-      <label>Display name</label><input type="text" id="mName" maxlength="32" value="${esc(me ? me.name : '')}" placeholder="e.g. daniel">
+    modal(`<h2>Welcome to Dischord</h2>
+      <p>Pick a display name. It's stored only in this browser.</p>
+      <label>Display name</label><input type="text" id="mName" maxlength="32" placeholder="e.g. daniel">
       <label>Color</label>${colorPicker(color)}
-      ${!first && 'Notification' in window && Notification.permission !== 'granted' ? '<div class="actions" style="justify-content:flex-start"><button class="btn" id="mNotif">Enable desktop notifications</button></div>' : ''}
-      <div class="actions">${first ? '' : '<button class="btn link" data-close>Cancel</button>'}<button class="btn primary" id="mOk">${first ? 'Continue' : 'Save'}</button></div>`, () => {
+      <div class="actions"><button class="btn primary" id="mOk">Continue</button></div>`, () => {
       wireColors((c) => (color = c));
       const inp = $('mName');
       inp.focus();
-      if ($('mNotif')) $('mNotif').onclick = () => Notification.requestPermission().then(() => toast('Notifications: ' + Notification.permission));
       const ok = () => {
         const name = inp.value.trim().slice(0, 32);
         if (!name) return inp.focus();
-        const firstTime = !me;
-        const nameChanged = me && me.name !== name;
-        me = { id: me ? me.id : rid(12), name, color };
+        me = { id: rid(12), name, color };
         store.set('me', me);
         closeModal();
-        if (firstTime) start();
-        else {
-          for (const sid in meshes) send(sid, { t: 'ping', voice: myVoiceIn(sid) });
-          if (nameChanged) {
-            // VDO.Ninja labels come from the URL; reconnect so labels update
-            for (const sid in meshes) { disconnectMesh(sid); }
-            setTimeout(() => servers.forEach(connectMesh), 400);
-          }
-          render();
-        }
+        start();
       };
       $('mOk').onclick = ok;
       inp.onkeydown = (e) => { if (e.key === 'Enter') ok(); };
     }, !first);
+  }
+
+  const opt = (val, cur, label) => `<option value="${val}" ${String(val) === String(cur) ? 'selected' : ''}>${label}</option>`;
+
+  function settingsModal(tab = 'profile') {
+    let color = me.color;
+    modal(`<div class="tabs"><button data-tab="profile">My profile</button><button data-tab="av">Voice &amp; Video</button></div>
+      <div class="tab-body" data-body="profile">
+        <label>Display name</label><input type="text" id="mName" maxlength="32" value="${esc(me.name)}">
+        <label>Color</label>${colorPicker(color)}
+        ${'Notification' in window && Notification.permission !== 'granted' ? '<label>Notifications</label><button class="btn" id="mNotif">Enable desktop notifications</button>' : ''}
+      </div>
+      <div class="tab-body" data-body="av">
+        <div class="grid2">
+          <div><label>Camera resolution</label><select id="aCamQ">${opt('360', av.camQ, '360p')}${opt('720', av.camQ, '720p (HD)')}${opt('1080', av.camQ, '1080p (Full HD)')}</select></div>
+          <div><label>Camera frame rate</label><select id="aCamFps">${opt(15, av.camFps, '15 fps')}${opt(30, av.camFps, '30 fps')}${opt(60, av.camFps, '60 fps')}</select></div>
+          <div><label>Screen share resolution</label><select id="aSsQ">${opt('720', av.ssQ, '720p')}${opt('1080', av.ssQ, '1080p')}${opt('1440', av.ssQ, '1440p')}</select></div>
+          <div><label>Screen share frame rate</label><select id="aSsFps">${opt(5, av.ssFps, '5 fps (text/slides)')}${opt(15, av.ssFps, '15 fps')}${opt(30, av.ssFps, '30 fps')}${opt(60, av.ssFps, '60 fps (games)')}</select></div>
+          <div><label>Upload quality (what others get)</label><select id="aSend">${opt(500, av.sendBr, 'Data saver · 0.5 Mbps')}${opt(1500, av.sendBr, 'Balanced · 1.5 Mbps')}${opt(2500, av.sendBr, 'High · 2.5 Mbps')}${opt(6000, av.sendBr, 'Ultra · 6 Mbps')}</select></div>
+          <div><label>Download quality (what you get)</label><select id="aRecv">${opt(0, av.recvBr, 'Auto')}${opt(300, av.recvBr, 'Data saver')}${opt(1500, av.recvBr, 'Balanced')}${opt(4000, av.recvBr, 'High')}${opt(8000, av.recvBr, 'Maximum')}</select></div>
+        </div>
+        <p class="hint">Each person sends a stream to everyone else in the call, so high upload settings need a good connection when many people are in a channel. ${voice ? 'Saving reconnects your call to apply the changes.' : ''}</p>
+        ${voice ? '<button class="btn" id="aDevices">Choose microphone / camera…</button>' : '<p class="hint">Join a voice channel to pick your microphone and camera.</p>'}
+      </div>
+      <div class="actions"><button class="btn link" data-close>Cancel</button><button class="btn primary" id="mOk">Save</button></div>`, () => {
+      const show = (t) => {
+        $('modal').querySelectorAll('[data-tab]').forEach((b) => b.classList.toggle('sel', b.dataset.tab === t));
+        $('modal').querySelectorAll('[data-body]').forEach((b) => b.classList.toggle('hidden', b.dataset.body !== t));
+      };
+      $('modal').querySelectorAll('[data-tab]').forEach((b) => (b.onclick = () => show(b.dataset.tab)));
+      show(tab);
+      wireColors((c) => (color = c));
+      if ($('mNotif')) $('mNotif').onclick = () => Notification.requestPermission().then(() => toast('Notifications: ' + Notification.permission));
+      if ($('aDevices')) $('aDevices').onclick = () => { closeModal(); showVoice(); voicePost({ toggleSettings: 'toggle' }); };
+      $('mOk').onclick = () => {
+        const name = $('mName').value.trim().slice(0, 32);
+        if (!name) { show('profile'); return $('mName').focus(); }
+        const nameChanged = name !== me.name;
+        me = { ...me, name, color };
+        store.set('me', me);
+        const next = {
+          camQ: $('aCamQ').value, camFps: +$('aCamFps').value, ssQ: $('aSsQ').value, ssFps: +$('aSsFps').value,
+          sendBr: +$('aSend').value, recvBr: +$('aRecv').value,
+        };
+        const avChanged = JSON.stringify(next) !== JSON.stringify(av);
+        av = next;
+        store.set('av', av);
+        closeModal();
+        broadcastState();
+        if (nameChanged) { // VDO.Ninja labels come from the URL; reconnect so labels update
+          for (const sid in meshes) disconnectMesh(sid);
+          setTimeout(() => servers.forEach(connectMesh), 400);
+        }
+        if (voice && (avChanged || nameChanged)) joinVoice(voice.sid, voice.cid, voice.cam);
+        render();
+      };
+    }, true, true);
   }
 
   function createServerModal() {
@@ -818,10 +1038,11 @@
 
   function inviteModal() {
     const s = server(cur.sid);
+    if (!s) return;
     const link = inviteLink(s);
-    const local = location.protocol === 'file:';
+    const local = location.protocol === 'file:' || /^(localhost|127\.)/.test(location.hostname);
     modal(`<h2>Invite friends to ${esc(s.name)}</h2>
-      <p>Anyone with this link can join, chat and hop into voice.${local ? '<br><br><b>Heads up:</b> you\'re opening Dischord from a file on your computer, so this link only works on this PC. Host the folder (e.g. GitHub Pages or Netlify) to share it — friends can also paste it into <i>Join a server</i> in their own copy.' : ''}</p>
+      <p>Anyone with this link can join, chat and hop into voice. Keep it private.${local ? '<br><br><b>Heads up:</b> this copy is running on your own computer, so the link only works here. Use the hosted site to invite people.' : ''}</p>
       <label>Invite link</label><input type="text" id="mLink" readonly value="${esc(link)}">
       <div class="actions"><button class="btn link" data-close>Done</button><button class="btn primary" id="mCopy">Copy</button></div>`, () => {
       $('mLink').select();
@@ -836,8 +1057,8 @@
     modal(`<h2>Create channel</h2>
       <label>Channel type</label>
       <div class="radio-row">
-        <label class="opt"><input type="radio" name="ct" value="text" ${type !== 'voice' ? 'checked' : ''}> # Text</label>
-        <label class="opt"><input type="radio" name="ct" value="voice" ${type === 'voice' ? 'checked' : ''}> 🔊 Voice</label>
+        <label class="opt"><input type="radio" name="ct" value="text" ${type !== 'voice' ? 'checked' : ''}> <i data-icon="hash"></i> Text</label>
+        <label class="opt"><input type="radio" name="ct" value="voice" ${type === 'voice' ? 'checked' : ''}> <i data-icon="speaker"></i> Voice</label>
       </div>
       <label>Channel name</label><input type="text" id="mName" maxlength="40" placeholder="new-channel">
       <div class="actions"><button class="btn link" data-close>Cancel</button><button class="btn primary" id="mOk">Create channel</button></div>`, () => {
@@ -878,11 +1099,13 @@
   }
 
   // ---------------------------------------------------------------- events
+  paintIcons();
   $('serverList').onclick = (e) => { const b = e.target.closest('[data-sid]'); if (b) selectServer(b.dataset.sid); };
   $('homeBtn').onclick = () => selectServer(null);
   $('addServerBtn').onclick = createServerModal;
   $('wCreate').onclick = createServerModal;
   $('wJoin').onclick = joinModal;
+  $('inviteTop').onclick = inviteModal;
 
   $('serverMenuBtn').onclick = (e) => { e.stopPropagation(); $('serverMenu').classList.toggle('hidden'); };
   document.addEventListener('click', () => $('serverMenu').classList.add('hidden'));
@@ -916,7 +1139,12 @@
     const sv = e.target.closest('[data-sid]');
     if (sv) return selectServer(sv.dataset.sid);
     const ch = e.target.closest('[data-cid]');
-    if (ch) selectChannel(ch.dataset.cid);
+    if (ch) {
+      const c = channel(server(cur.sid), ch.dataset.cid);
+      selectChannel(ch.dataset.cid);
+      // Discord-style: clicking a voice channel joins it
+      if (c && c.type === 'voice' && !(voice && voice.sid === cur.sid && voice.cid === c.id)) joinVoice(cur.sid, c.id, false);
+    }
   };
 
   $('messages').onclick = (e) => {
@@ -940,30 +1168,29 @@
   $('composer').onsubmit = (e) => e.preventDefault();
 
   $('joinVoiceBtn').onclick = () => joinVoice(cur.sid, cur.cid, false);
-  $('joinVoiceBtn').insertAdjacentHTML('afterend', ' <button class="btn" id="joinVideoBtn">Join with Camera</button>');
   $('joinVideoBtn').onclick = () => joinVoice(cur.sid, cur.cid, true);
-  $('vsLeave').onclick = () => leaveVoice();
-  $('vsCam').onclick = () => {
-    if (!voice) return;
-    if (!voice.cam) { // audio-only session: rejoin with camera
-      const { sid, cid } = voice;
-      joinVoice(sid, cid, true);
-      return;
-    }
-    voicePost({ camera: 'toggle' });
-  };
-  $('vsShare').onclick = () => { voicePost({ function: 'publishScreen' }); if (voice) selectServerAndChannel(voice.sid, voice.cid); };
-  $('voiceWhere').onclick = () => { if (voice) selectServerAndChannel(voice.sid, voice.cid); };
-  function selectServerAndChannel(sid, cid) { if (cur.sid !== sid) selectServer(sid); selectChannel(cid); }
-
+  $('vsLeave').onclick = leaveVoice;
+  $('cbLeave').onclick = leaveVoice;
+  $('vsCam').onclick = toggleCam;
+  $('cbCam').onclick = toggleCam;
+  $('vsShare').onclick = toggleShare;
+  $('cbShare').onclick = toggleShare;
+  $('voiceWhere').onclick = showVoice;
   $('micBtn').onclick = toggleMic;
+  $('cbMic').onclick = toggleMic;
   $('deafBtn').onclick = toggleDeaf;
-  $('settingsBtn').onclick = () => profileModal(false);
+  $('cbDeaf').onclick = toggleDeaf;
+  $('settingsBtn').onclick = () => settingsModal('profile');
+  $('cbSettings').onclick = () => settingsModal('av');
   $('membersToggle').onclick = () => { membersOpen = !membersOpen; store.set('membersOpen', membersOpen); renderMembers(); };
 
   window.addEventListener('hashchange', checkInviteHash);
-  window.addEventListener('focus', () => { if (cur.sid && cur.cid) { markRead(cur.sid, cur.cid); renderRail(); renderChannels(); } });
-  window.addEventListener('beforeunload', () => { for (const sid in meshes) send(sid, { t: 'bye' }); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    broadcastState();
+    if (cur.sid && cur.cid) { markRead(cur.sid, cur.cid); renderRail(); renderChannels(); }
+  });
+  window.addEventListener('pagehide', () => { for (const sid in meshes) send(sid, { t: 'bye' }); });
 
   function checkInviteHash() {
     const m = location.hash.match(/invite=([A-Za-z0-9_-]+)/);
@@ -975,14 +1202,12 @@
   let pendingInvite = null;
 
   // ---------------------------------------------------------------- timers
-  setInterval(() => {
-    for (const sid in meshes) send(sid, { t: 'ping', voice: myVoiceIn(sid) });
-  }, PING_MS);
+  setInterval(broadcastState, PING_MS);
   setInterval(() => {
     renderTyping();
-    if (cur.sid) { renderMembers(); renderUserPanel(); }
-  }, 2000);
-  setInterval(() => { if (cur.sid) renderChannels(); }, 10000);
+    if (cur.sid) renderPresence();
+  }, 3000);
+  setInterval(paintSpeaking, 250);
 
   // ---------------------------------------------------------------- boot
   function start() {
@@ -992,8 +1217,8 @@
   }
 
   checkInviteHash();
-  if (!me) { render(); profileModal(true); } else start();
+  if (!me) { profileModal(true); } else start();
 
   // handy for debugging in the console
-  window.dischord = { get me() { return me; }, servers: () => servers, members: () => members, meshes };
+  window.dischord = { get me() { return me; }, servers: () => servers, members: () => members, peers: () => peers, get voice() { return voice; }, speaking };
 })();

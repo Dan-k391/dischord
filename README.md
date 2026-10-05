@@ -6,7 +6,7 @@ A Discord-style chat app built on [VDO.Ninja](https://vdo.ninja). No accounts, n
 - **Servers** with text and voice channels, shareable **invite links**
 - **Text chat** sent peer-to-peer (Markdown-ish formatting, edit/delete, typing indicators, unread badges, desktop notifications)
 - **History sync**: when you come online, peers send you recent messages you missed
-- **Voice channels** with mic/deafen, **camera**, and **screen share** (VDO.Ninja rooms)
+- **Voice channels** with mute/deafen, **camera**, **screen share**, speaking indicators and **quality settings** (resolution, frame rate, upload/download bitrate)
 - **Presence**: member list, online/offline, who's in which voice channel
 
 ## Run it
@@ -32,6 +32,9 @@ To use it with friends over the internet, host the folder on any static host
   comes back online alongside the recipient.
 - Anyone with the invite can rename the server and add/delete channels — there are no roles.
 - Large rooms: voice is a WebRTC mesh, so it's best for small groups (≈ up to 8–10 people).
+
+## Testing with two identities
+Add `?as=alice` (or any name) to the URL to get a separate identity and storage in the same browser.
 
 ## Self-hosting VDO.Ninja (optional)
 Add this before `app.js` in `index.html`:
