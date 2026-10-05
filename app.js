@@ -29,6 +29,8 @@
   const REACTS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '🎉', '👀', '💯', '😎', '🙏', '🤔', '👏', '😡', '✅', '❌'];
   const IMG_CHUNK = 14000;        // chars per image chunk over the data channel
   const IMG_MAX = 4500000;        // max data-URL length (~3.3 MB image)
+  const FILE_BYTES = 10 * 1024 * 1024; // max file size; small enough that a whole file fits in the data channel's send buffer
+  const FILE_MAX = 14100000;      // max data-URL length for a file
 
   const AV_DEFAULTS = { camQ: '720', camFps: 30, camBr: 2500, ssQ: '1080', ssFps: 30, ssBr: 6000, ssHint: 'detail', recvCap: 0, codec: 'h264', selfPreview: 'full', showStats: false };
   const CAM_BRS = [300, 600, 1000, 1500, 2500, 4000, 6000, 8000];
@@ -85,6 +87,8 @@
     signal: '<path d="M4 20v-3M9 20v-7M14 20V9M19 20V4"/>',
     smile: '<circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0M9 9.5h.01M15 9.5h.01"/>',
     image: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-9 9"/>',
+    file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
+    download: '<path d="M12 4v11M7 11l5 5 5-5M5 20h14"/>',
     plusCircle: '<circle cx="12" cy="12" r="9.5"/><path d="M12 8v8M8 12h8"/>',
     volume: '<path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/>',
     eyeOff: '<path d="M3 3l18 18M10.6 6.1A9.8 9.8 0 0 1 12 6c5 0 9 6 9 6a17 17 0 0 1-3.2 3.8M6.6 6.6A17 17 0 0 0 3 12s4 6 9 6a9 9 0 0 0 4.2-1"/>',
@@ -166,6 +170,11 @@
     if (!i || typeof i !== 'object' || !isStr(i.id, 64) || !/^[a-z0-9]+$/i.test(i.id)) return undefined;
     return { id: i.id, w: clampInt(i.w, 1, 10000), h: clampInt(i.h, 1, 10000), n: clampInt(i.n, 1, IMG_MAX) };
   }
+  function cleanFile(f) {
+    if (!f || typeof f !== 'object' || !isStr(f.id, 64) || !/^[a-z0-9]+$/i.test(f.id) || typeof f.name !== 'string') return undefined;
+    const name = f.name.replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').trim().slice(0, 120) || 'file';
+    return { id: f.id, name, size: clampInt(f.size, 0, FILE_BYTES), n: clampInt(f.n, 1, FILE_MAX) };
+  }
   function cleanRe(re) {
     if (!re || typeof re !== 'object') return undefined;
     const out = {};
@@ -183,9 +192,9 @@
     if (!a) return null;
     if (m.del) return { id: m.id, cid: m.cid, ts: m.ts, a, del: true, text: '' };
     const text = typeof m.text === 'string' ? m.text : '';
-    const img = cleanImg(m.img);
-    if ((!text && !img) || text.length > 4000) return null;
-    return { id: m.id, cid: m.cid, ts: Math.min(m.ts, now() + 60000), a, text, img, re: cleanRe(m.re), ed: m.ed ? 1 : undefined };
+    const img = cleanImg(m.img), file = img ? undefined : cleanFile(m.file);
+    if ((!text && !img && !file) || text.length > 4000) return null;
+    return { id: m.id, cid: m.cid, ts: Math.min(m.ts, now() + 60000), a, text, img, file, re: cleanRe(m.re), ed: m.ed ? 1 : undefined };
   }
   function cleanServerDef(d) {
     if (!d || !isId(d.id) || !isStr(d.name, 64) || !Array.isArray(d.channels) || typeof d.v !== 'number') return null;
@@ -474,9 +483,13 @@
     renderAttachBar();
     if (!text && !imgs.length) return;
     if (text.length > 4000) { toast('Message is too long (4000 characters max).'); return; }
-    const parts = imgs.length ? imgs.map((im, i) => ({ img: im, text: i === imgs.length - 1 ? text : '' })) : [{ text }];
+    const parts = imgs.length ? imgs.map((im, i) => ({ [im.file ? 'file' : 'img']: im, text: i === imgs.length - 1 ? text : '' })) : [{ text }];
     for (const part of parts) {
       const m = { id: me.id + rid(8), cid: cur.cid, ts: now(), a: me, text: part.text };
+      if (part.file) { // files are not pushed to everyone: peers fetch them when they click Download
+        m.file = { id: part.file.id, name: part.file.file.name, size: part.file.file.size, n: part.file.url.length };
+        idb.put(part.file.id, part.file.url);
+      }
       if (part.img) {
         m.img = { id: part.img.id, w: part.img.w, h: part.img.h, n: part.img.url.length };
         imgCache.set(part.img.id, part.img.url);
@@ -549,7 +562,7 @@
     const s = server(sid), c = channel(s, m.cid);
     if (!s || !c) return;
     try {
-      const n = new Notification(`${m.a.name} (#${c.name}, ${s.name})`, { body: (m.text || (m.img ? '📷 Image' : '')).slice(0, 200), tag: sid + m.cid });
+      const n = new Notification(`${m.a.name} (#${c.name}, ${s.name})`, { body: (m.text || (m.img ? '📷 Image' : m.file ? '📎 ' + m.file.name : '')).slice(0, 200), tag: sid + m.cid });
       n.onclick = () => { window.focus(); selectServer(sid); selectChannel(m.cid); };
     } catch { }
   }
@@ -597,21 +610,31 @@
     const n = Math.ceil(url.length / IMG_CHUNK);
     for (let i = 0; i < n; i++) {
       send(sid, { t: 'imgc', id, i, n, d: url.slice(i * IMG_CHUNK, (i + 1) * IMG_CHUNK) }, uuid);
-      if (i % 6 === 5) await sleep(15); // don't flood the data channel
+      if (url.length > IMG_MAX) { if (i % 2) await sleep(25); } // big file: ~1 MB/s so the send buffer never overflows
+      else if (i % 6 === 5) await sleep(15); // don't flood the data channel
     }
   }
 
   const incoming = {};         // id -> { n, parts, got }
   const requested = {};        // id -> ts
   function onImgChunk(sid, p) {
-    if (!isStr(p.id, 64) || !Number.isInteger(p.i) || !Number.isInteger(p.n) || p.n < 1 || p.n > Math.ceil(IMG_MAX / IMG_CHUNK) || p.i < 0 || p.i >= p.n || typeof p.d !== 'string' || p.d.length > IMG_CHUNK) return;
+    const want = isStr(p.id, 64) && wantFile[p.id]; // only files I asked for may be big / non-image
+    if (!isStr(p.id, 64) || !Number.isInteger(p.i) || !Number.isInteger(p.n) || p.n < 1 || p.n > Math.ceil((want ? FILE_MAX : IMG_MAX) / IMG_CHUNK) || p.i < 0 || p.i >= p.n || typeof p.d !== 'string' || p.d.length > IMG_CHUNK) return;
     if (imgCache.has(p.id)) return;
     const b = (incoming[p.id] = incoming[p.id] || { n: p.n, parts: new Array(p.n), got: 0 });
     if (b.n !== p.n || b.parts[p.i] !== undefined) return;
     b.parts[p.i] = p.d; b.got++;
+    if (want && b.got < b.n) fileProgress(p.id, b.got / b.n);
     if (b.got < b.n) return;
     const url = b.parts.join('');
     delete incoming[p.id];
+    if (want) {
+      delete wantFile[p.id];
+      if (!/^data:[\w.+\/-]*(;[\w.+=-]+)*;base64,[A-Za-z0-9+/=]*$/.test(url)) return fileProgress(p.id, -1);
+      idb.put(p.id, url);
+      fileProgress(p.id, 2);
+      return saveFile(url, want.name);
+    }
     if (!/^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(url)) return;
     imgCache.set(p.id, url);
     idb.put(p.id, url);
@@ -621,6 +644,41 @@
     if (requested[id] && now() - requested[id] < 15000) return;
     requested[id] = now();
     send(sid, { t: 'imgreq', id });
+  }
+
+  // ---- files: sent as a message with metadata; the bytes travel only to peers who click Download
+  const wantFile = {};         // id -> { name } while I'm fetching it
+  const fileState = {};        // id -> status text shown on the file card
+  const fmtSize = (b) => (b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : b >= 1024 ? Math.round(b / 1024) + ' KB' : b + ' B');
+  function fileProgress(id, v) {
+    fileState[id] = v === 2 ? 'Saved' : v < 0 ? 'Unavailable right now' : v ? `Downloading ${Math.round(v * 100)}%` : 'Requesting…';
+    document.querySelectorAll('.msg-file').forEach((el) => { if (el.dataset.file === id) el.querySelector('.mf-sub').textContent = fileState[id]; });
+  }
+  function saveFile(url, name) {
+    fetch(url).then((r) => r.blob()).then((b) => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(b);
+      a.download = name;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    }).catch(() => toast('Could not save that file.'));
+  }
+  async function downloadFile(id) {
+    const m = (getMsgs(cur.sid)[cur.cid] || []).find((x) => x.file && x.file.id === id);
+    if (!m) return;
+    const url = await idb.get(id);
+    if (url) return saveFile(url, m.file.name);
+    if (wantFile[id]) return;
+    wantFile[id] = { name: m.file.name };
+    fileProgress(id, 0);
+    delete requested[id];
+    requestImg(cur.sid, id);
+    setTimeout(() => { // nobody answered: the sender (and everyone who has it) is offline
+      if (!wantFile[id] || incoming[id]) return;
+      delete wantFile[id];
+      fileProgress(id, -1);
+      toast('Nobody online has that file right now.');
+    }, 8000);
   }
 
   // fill <img data-img> elements from cache / IndexedDB / peers
@@ -660,7 +718,16 @@
     const s = server(cur.sid), c = channel(s, cur.cid);
     if (!c || c.type !== 'text') return;
     for (const f of [...files].slice(0, 4)) {
-      if (pending.length >= 4) { toast('Up to 4 images per message.'); break; }
+      if (pending.length >= 4) { toast('Up to 4 attachments per message.'); break; }
+      if (!f.type.startsWith('image/')) {
+        if (f.size > FILE_BYTES) { toast(`${f.name} is too large (${fmtSize(FILE_BYTES)} max).`); continue; }
+        if (!f.size) { toast(`${f.name} is empty.`); continue; }
+        try {
+          const url = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsDataURL(f); });
+          pending.push({ id: rid(16), url, file: { name: f.name, size: f.size } });
+        } catch { toast('Could not read ' + f.name); }
+        continue;
+      }
       try { pending.push(await prepImage(f)); } catch (e) { toast(e.message || 'Could not read that image.'); }
     }
     renderAttachBar();
@@ -669,7 +736,7 @@
   function renderAttachBar() {
     const bar = $('attachBar');
     bar.classList.toggle('hidden', !pending.length);
-    bar.innerHTML = pending.map((im, i) => `<div class="att"><img src="${im.url}" alt=""><button class="att-x" data-rm="${i}" title="Remove">${icon('x')}</button></div>`).join('');
+    bar.innerHTML = pending.map((im, i) => `<div class="att ${im.file ? 'file' : ''}">${im.file ? `${icon('file')}<span class="att-name">${esc(im.file.name)}</span><span class="att-size">${fmtSize(im.file.size)}</span>` : `<img src="${im.url}" alt="">`}<button class="att-x" data-rm="${i}" title="Remove">${icon('x')}</button></div>`).join('');
   }
   function lightbox(id) {
     getImg(id).then((url) => {
@@ -1528,13 +1595,14 @@
       const edited = m.ed ? ' <span class="time">(edited)</span>' : '';
       const img = m.img ? `<div class="msg-img loading" style="aspect-ratio:${m.img.w}/${m.img.h};width:min(100%, ${Math.min(420, m.img.w)}px)" data-open="${esc(m.img.id)}"><img data-img="${esc(m.img.id)}" alt=""></div>` : '';
       const text = m.text ? `<div class="text">${formatText(m.text)}${edited}</div>` : '';
+      const file = m.file ? `<div class="msg-file" data-file="${esc(m.file.id)}">${icon('file')}<div class="mf-text"><div class="mf-name" title="${esc(m.file.name)}">${esc(m.file.name)}</div><div class="mf-sub">${esc(fileState[m.file.id] || fmtSize(m.file.size))}</div></div><button class="icon-btn" data-dl="${esc(m.file.id)}" title="Download">${icon('download')}</button></div>` : '';
       const re = renderRe(m);
       if (head) {
         h += `<div class="msg head" data-mid="${esc(m.id)}"><div class="gutter" data-uid="${esc(m.a.id)}" data-ctx="user">${avatar(a)}</div><div class="body">
           <div class="meta"><span class="author" data-uid="${esc(m.a.id)}" data-ctx="user" style="color:${esc(a.color)}">${esc(a.name)}</span><span class="time" title="${esc(new Date(m.ts).toLocaleString())}">${esc(fmtStamp(m.ts))}</span></div>
-          ${text}${img}${re}</div>${acts}</div>`;
+          ${text}${img}${file}${re}</div>${acts}</div>`;
       } else {
-        h += `<div class="msg" data-mid="${esc(m.id)}"><div class="gutter time-side">${esc(fmtTime(m.ts))}</div><div class="body">${text}${img}${re}</div>${acts}</div>`;
+        h += `<div class="msg" data-mid="${esc(m.id)}"><div class="gutter time-side">${esc(fmtTime(m.ts))}</div><div class="body">${text}${img}${file}${re}</div>${acts}</div>`;
       }
       prev = m;
     }
@@ -1929,6 +1997,8 @@
   $('messages').onclick = (e) => {
     const rt = e.target.closest('[data-rtoggle]');
     if (rt) return toggleReaction(rt.dataset.rtoggle, rt.dataset.e);
+    const dl = e.target.closest('[data-dl]');
+    if (dl) return downloadFile(dl.dataset.dl);
     const ra = e.target.closest('[data-react]');
     if (ra) { e.stopPropagation(); return emojiPicker(ra, (emo) => toggleReaction(ra.dataset.react, emo)); }
     const op = e.target.closest('[data-open]');
