@@ -206,7 +206,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .msg.head { margin-top: 16px; }
 .msg .gutter { width: 40px; flex: none; }
 .msg .avatar { width: 40px; height: 40px; font-size: 16px; }
-.msg .time-side { visibility: hidden; font-size: 11px; color: var(--text-muted); text-align: right; padding-top: 4px; }
+.msg .time-side { visibility: hidden; font-size: 10px; line-height: 22px; height: 22px; color: var(--text-muted); text-align: right; white-space: nowrap; overflow: hidden; }
 .msg:hover .time-side { visibility: visible; }
 .msg .body { min-width: 0; flex: 1; }
 .msg .meta { display: flex; align-items: baseline; gap: 8px; }
@@ -385,6 +385,9 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .tool-btn:hover { background: rgba(0,0,0,.85); }
 .tool-btn .ico-svg { width: 16px; height: 16px; }
 .tile:fullscreen { border-radius: 0; }
+.tile:fullscreen .tile-tools { bottom: 16px; right: 16px; opacity: .45; z-index: 2; }
+.tile:fullscreen .tile-tools:hover { opacity: 1; }
+.tile:fullscreen .q-btn { display: none; }
 .tile:fullscreen .tile-media iframe { pointer-events: auto; }
 
 /* focus mode: one big tile, everyone else in a strip */
@@ -446,8 +449,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .re-pill.add { opacity: 0; color: var(--text-muted); }
 .re-pill.add .ico-svg { width: 16px; height: 16px; }
 .msg:hover .re-pill.add { opacity: 1; }
-#emojiMenu { position: fixed; z-index: 70; display: grid; grid-template-columns: repeat(8, 36px); gap: 2px; padding: 8px; background: var(--bg-float); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.55); }
-#emojiMenu button { width: 36px; height: 36px; border: 0; border-radius: 6px; background: none; font-size: 22px; }
+#emojiMenu { position: fixed; z-index: 70; max-width: calc(100vw - 16px); box-sizing: border-box; display: grid; grid-template-columns: repeat(8, minmax(0, 36px)); gap: 2px; padding: 8px; background: var(--bg-float); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.55); }
+#emojiMenu button { width: 100%; min-width: 0; padding: 0; overflow: hidden; height: 36px; border: 0; border-radius: 6px; background: none; font-size: 22px; }
 #emojiMenu button:hover { background: #2b2d31; transform: scale(1.1); }
 .tile-fx { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
 .float-emoji { position: absolute; bottom: 10%; font-size: 40px; animation: floatUp 2.5s ease-out forwards; filter: drop-shadow(0 2px 6px rgba(0,0,0,.5)); }
@@ -475,8 +478,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .ctx-select { display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-size: 14px; }
 .ctx-select span { flex: 1; }
 .ctx-select select { background: #1e1f22; color: var(--text); border: 0; border-radius: 4px; padding: 4px 6px; font: inherit; font-size: 13px; }
-.ctx-emojis { display: flex; gap: 2px; padding: 2px 2px 6px; border-bottom: 1px solid #2b2d31; margin-bottom: 4px; }
-.ctx-emojis button { flex: 1; height: 34px; border: 0; border-radius: 6px; background: #2b2d31; font-size: 18px; }
+.ctx-emojis { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 2px; padding: 2px 2px 6px; border-bottom: 1px solid #2b2d31; margin-bottom: 4px; }
+.ctx-emojis button { min-width: 0; padding: 0; height: 34px; border: 0; border-radius: 6px; background: #2b2d31; font-size: 18px; }
 .ctx-emojis button:hover { background: #404249; }
 
 /* ---------- v8: stream stats ---------- */

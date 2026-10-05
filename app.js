@@ -93,6 +93,7 @@
     chart: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
     check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
     expand: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
+    collapse: '<path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/>',
     live: '<rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><circle cx="12" cy="10.5" r="2" fill="currentColor"/>',
   };
   const icon = (name, cls = '') => `<svg class="ico-svg ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[name] || ''}</svg>`;
@@ -300,6 +301,7 @@
     if (!k[user.id] || k[user.id].name !== user.name || k[user.id].color !== user.color) {
       k[user.id] = user;
       store.set('known.' + sid, k);
+      if (sid === cur.sid) renderMessages(); // their old messages pick up the new name / colour
     }
     return { user, wasOnline };
   }
@@ -835,7 +837,7 @@
     if (changed) paintSpeaking();
   }
   function paintSpeaking() {
-    document.querySelectorAll('[data-uid]').forEach((el) => el.classList.toggle('speaking', speaking[el.dataset.uid] > now()));
+    document.querySelectorAll('[data-uid]:not([data-ctx])').forEach((el) => el.classList.toggle('speaking', speaking[el.dataset.uid] > now()));
   }
 
   // ---------------------------------------------------------------- iframe API listener
@@ -1153,7 +1155,7 @@
       if (nameEl.innerHTML !== name) nameEl.innerHTML = name;
       const tools = hasVid
         ? (t.self ? '' : `<button class="tool-btn q-btn" data-q="${esc(t.key)}" title="Stream quality">${esc(streamBr[t.vs] ? mbps(br) : 'Auto · ' + mbps(br))}</button>`) +
-          `<button class="tool-btn fs-btn" data-fs="${esc(t.key)}" title="Fullscreen">${icon('expand')}</button>`
+          `<button class="tool-btn fs-btn" data-fs="${esc(t.key)}" title="${document.fullscreenElement === el ? 'Exit fullscreen' : 'Fullscreen'}">${icon(document.fullscreenElement === el ? 'collapse' : 'expand')}</button>`
         : '';
       const toolsEl = el.querySelector('.tile-tools');
       if (toolsEl.innerHTML !== tools) toolsEl.innerHTML = tools;
@@ -1484,6 +1486,13 @@
     return t.replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[+i]);
   }
 
+  // messages keep a snapshot of their author; show the current profile when we know it
+  function liveUser(a) {
+    if (a.id === me.id) return { ...a, name: me.name, color: me.color };
+    const k = getKnown(cur.sid)[a.id];
+    return k ? { ...a, name: k.name, color: k.color } : a;
+  }
+
   function renderMessages(forceBottom) {
     const box = $('messages');
     const s = server(cur.sid), c = channel(s, cur.cid);
@@ -1497,6 +1506,7 @@
       if (newDay) h += `<div class="day-sep"><span>${new Date(m.ts).toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' })}</span></div>`;
       const head = newDay || !prev || prev.a.id !== m.a.id || m.ts - prev.ts > 7 * 60000;
       const mine = m.a.id === me.id;
+      const a = liveUser(m.a);
       const acts = `<div class="actions"><button class="icon-btn" data-react="${esc(m.id)}" title="Add reaction">${icon('smile')}</button>` +
         (mine ? `${m.text ? `<button class="icon-btn" data-edit="${esc(m.id)}" title="Edit">${icon('edit')}</button>` : ''}<button class="icon-btn danger" data-del="${esc(m.id)}" title="Delete">${icon('trash')}</button>` : '') + '</div>';
       const edited = m.ed ? ' <span class="time">(edited)</span>' : '';
@@ -1504,8 +1514,8 @@
       const text = m.text ? `<div class="text">${formatText(m.text)}${edited}</div>` : '';
       const re = renderRe(m);
       if (head) {
-        h += `<div class="msg head" data-mid="${esc(m.id)}"><div class="gutter" data-uid="${esc(m.a.id)}" data-ctx="user">${avatar(m.a)}</div><div class="body">
-          <div class="meta"><span class="author" data-uid="${esc(m.a.id)}" data-ctx="user" style="color:${esc(m.a.color)}">${esc(m.a.name)}</span><span class="time" title="${esc(new Date(m.ts).toLocaleString())}">${esc(fmtStamp(m.ts))}</span></div>
+        h += `<div class="msg head" data-mid="${esc(m.id)}"><div class="gutter" data-uid="${esc(m.a.id)}" data-ctx="user">${avatar(a)}</div><div class="body">
+          <div class="meta"><span class="author" data-uid="${esc(m.a.id)}" data-ctx="user" style="color:${esc(a.color)}">${esc(a.name)}</span><span class="time" title="${esc(new Date(m.ts).toLocaleString())}">${esc(fmtStamp(m.ts))}</span></div>
           ${text}${img}${re}</div>${acts}</div>`;
       } else {
         h += `<div class="msg" data-mid="${esc(m.id)}"><div class="gutter time-side">${esc(fmtTime(m.ts))}</div><div class="body">${text}${img}${re}</div>${acts}</div>`;
@@ -1538,7 +1548,7 @@
     m.classList.remove('hidden');
     const mw = m.offsetWidth, mh = m.offsetHeight;
     m.style.left = Math.max(8, Math.min(window.innerWidth - mw - 8, r.right - mw)) + 'px';
-    m.style.top = (r.top - mh - 6 > 8 ? r.top - mh - 6 : r.bottom + 6) + 'px';
+    m.style.top = Math.max(8, Math.min(window.innerHeight - mh - 8, r.top - mh - 6 > 8 ? r.top - mh - 6 : r.bottom + 6)) + 'px';
     m.onclick = (e) => { const b = e.target.closest('[data-emo]'); if (!b) return; m.classList.add('hidden'); onPick(b.dataset.emo); };
   }
 
@@ -1939,11 +1949,14 @@
     const q = e.target.closest('[data-q]');
     if (q) { e.stopPropagation(); return qualityMenu(q.dataset.q, q); }
     const fs = e.target.closest('[data-fs]');
-    if (fs) { const el = tileEls.get(fs.dataset.fs); if (el && el.requestFullscreen) el.requestFullscreen(); return; }
+    if (fs) { const el = tileEls.get(fs.dataset.fs); if (document.fullscreenElement) document.exitFullscreen(); else if (el && el.requestFullscreen) el.requestFullscreen(); return; }
     const t = e.target.closest('.tile.video');
     if (t) { focusUid = focusUid === t.dataset.key ? null : t.dataset.key; renderStage(); }
   });
   document.addEventListener('click', (e) => { if (!e.target.closest('#qMenu')) $('qMenu').classList.add('hidden'); });
+  document.addEventListener('fullscreenchange', () => {
+    if (voice) renderStage(); // swaps the button between expand / exit
+  });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && focusUid && $('modalBack').classList.contains('hidden')) { focusUid = null; renderStage(); } });
   $('devDone').onclick = () => { if (!voice) return; voice.devices = false; voicePost({ toggleSettings: false }); renderStage(); };
   $('micBtn').onclick = toggleMic;
