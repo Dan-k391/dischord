@@ -110,7 +110,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .chan .del .ico-svg { width: 15px; height: 15px; }
 .chan:hover .del { visibility: visible; }
 .chan .badge { background: var(--red); color: #fff; border-radius: 8px; font-size: 11px; padding: 1px 6px; font-weight: 700; }
-.chan .count { font-size: 11px; line-height: 16px; height: 18px; box-sizing: border-box; color: var(--text-muted); background: var(--bg-rail); border-radius: 9px; padding: 1px 6px; flex: none; }
+.chan .count { font-size: 11px; line-height: 16px; height: 18px; position: relative; top: 1px; box-sizing: border-box; color: var(--text-muted); background: var(--bg-rail); border-radius: 9px; padding: 1px 6px; flex: none; }
 .voice-users { margin: 0 0 6px 30px; }
 .voice-user { display: flex; align-items: center; gap: 8px; padding: 4px 6px; font-size: 14px; color: var(--text-muted); border-radius: 4px; }
 .voice-user:hover { background: var(--bg-hover); color: var(--text); }
@@ -718,7 +718,8 @@ body.resizing iframe { pointer-events: none !important; }
 .mini-grip[data-c="br"]::after { right: 4px; bottom: 4px; border-width: 0 2px 2px 0; border-bottom-right-radius: 4px; }
 #voiceStage.offstage.mini.resizing::after { opacity: 0; }
 
-.chan .chan-time { font: 600 11px/18px ui-monospace, Consolas, monospace; height: 18px; display: inline-block; color: var(--text-muted); flex: none; }
+/* same typeface as the channel name, and nudged so its digits sit on the name's baseline (smaller text centred in a row rides high) */
+.chan .chan-time { font-size: 12px; font-weight: 600; line-height: 18px; height: 18px; display: inline-block; position: relative; top: 1px; font-variant-numeric: tabular-nums; color: var(--text-muted); flex: none; }
 .chan.connected .chan-time { color: var(--green); }
 
 /* ---------- v35: drag channels to reorder, drag people between voice channels ---------- */
@@ -727,3 +728,5 @@ body.resizing iframe { pointer-events: none !important; }
 .chan.drop-before { box-shadow: 0 -2px 0 var(--accent); }
 .chan.drop-after { box-shadow: 0 2px 0 var(--accent); }
 .chan.drop-into { background: rgba(88,101,242,.3); color: var(--text-strong); }
+
+.ctx-note b { color: var(--text); font-variant-numeric: tabular-nums; }

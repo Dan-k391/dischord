@@ -499,6 +499,9 @@
           renderTyping();
         }
         break;
+      case 'kick':
+        if (p.to === me.id && voice && voice.sid === sid) { leaveVoice(); toast(`${t.user.name} removed you from the call`, 6000); }
+        break;
       case 'move': {
         const dest = channel(s, p.cid);
         if (p.to === me.id && dest && dest.type === 'voice' && voice && voice.sid === sid && voice.cid !== dest.id) {
@@ -1681,7 +1684,7 @@
       const mine = voice && voice.sid === s.id && voice.cid === c.id;
       h += `<div class="chan ${c.id === cur.cid ? 'active' : ''} ${mine ? 'connected' : ''}" data-cid="${esc(c.id)}" data-type="voice" draggable="true">
         <span class="ico">${icon('speaker')}</span><span class="name">${esc(c.name)}</span>
-        ${who.length && callStart(s.id, c.id) ? `<span class="chan-time" data-start="${callStart(s.id, c.id)}" title="Call running for">${fmtDur(now() - callStart(s.id, c.id))}</span>` : ''}
+        ${who.length && callStart(s.id, c.id) ? `<span class="chan-time" data-start="${callStart(s.id, c.id)}" title="Call running time (right-click the channel for the exact time)">${fmtShort(now() - callStart(s.id, c.id))}</span>` : ''}
         ${who.length ? `<span class="count">${who.length}</span>` : ''}
 </div>`;
       if (who.length) {
@@ -2296,6 +2299,8 @@
     if (!c) return;
     const inIt = !!(voice && voice.sid === s.id && voice.cid === c.id);
     let h = `<div class="ctx-head"><span>${c.type === 'text' ? '# ' : ''}${esc(c.name)}</span></div>`;
+    const started = c.type === 'voice' && voiceOccupants(s.id, c.id).length ? callStart(s.id, c.id) : null;
+    if (started) h += `<div class="ctx-note">Call running for <b class="call-clock" data-start="${started}">${fmtDur(now() - started)}</b></div>`;
     if (c.type === 'text') h += ctxItem('read', 'check', 'Mark as read');
     else h += inIt ? ctxItem('leave', 'hangup', 'Disconnect', 'danger') : ctxItem('join', 'speaker', 'Join voice') + ctxItem('joincam', 'camera', 'Join with camera');
     h += ctxItem('invite', 'userPlus', 'Invite people') + '<div class="ctx-sep"></div>';
@@ -2396,6 +2401,7 @@
         h += ctxSlider('vol', 'User volume', c.v ?? 100) + ctxCheck('mute', 'Mute', !!c.m) + '<div class="ctx-sep"></div>';
       }
       h += ctxItem('mention', 'at', 'Mention') + ctxItem('copyname', 'copy', 'Copy username');
+      if (ms && isOnline(ms) && ms.vc) h += '<div class="ctx-sep"></div>' + ctxItem('kick', 'hangup', 'Kick from voice', 'danger');
     }
     openCtx(x, y, h, (m) => {
       m.querySelectorAll('[data-slide]').forEach((r) => {
@@ -2439,6 +2445,7 @@
             else toast('Open a text channel to mention someone.');
             return;
           }
+          case 'kick': closeCtx(); send(sid, { t: 'kick', to: uid }); return toast(`Removing ${user.name} from the call`);
           case 'copyname': closeCtx(); navigator.clipboard && navigator.clipboard.writeText(user.name); return toast('Copied');
         }
       };
@@ -2772,9 +2779,17 @@
     const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, s = t % 60;
     return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s).padStart(2, '0');
   }
-  // the running time of each active call in the channel list
+  // compact form for the channel row: 42s, 6m, 1h 05m
+  function fmtShort(ms) {
+    const t = Math.max(0, Math.floor(ms / 1000));
+    if (t < 60) return t + 's';
+    const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60;
+    return h ? `${h}h ${String(m).padStart(2, '0')}m` : m + 'm';
+  }
+  // the running time of each active call: short in the channel list, exact in an open channel menu
   function paintChannelTimes() {
-    document.querySelectorAll('#channelList .chan-time').forEach((el) => { el.textContent = fmtDur(now() - (+el.dataset.start || now())); });
+    document.querySelectorAll('#channelList .chan-time').forEach((el) => { el.textContent = fmtShort(now() - (+el.dataset.start || now())); });
+    document.querySelectorAll('#ctxMenu .call-clock').forEach((el) => { el.textContent = fmtDur(now() - (+el.dataset.start || now())); });
   }
 
   function renderControls() {
