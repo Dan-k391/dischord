@@ -95,6 +95,8 @@
     eyeOff: '<path d="M3 3l18 18M10.6 6.1A9.8 9.8 0 0 1 12 6c5 0 9 6 9 6a17 17 0 0 1-3.2 3.8M6.6 6.6A17 17 0 0 0 3 12s4 6 9 6a9 9 0 0 0 4.2-1"/>',
     copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>',
     reply: '<path d="M9 4l-6 6 6 6M3 10h9a8 8 0 0 1 8 8"/>',
+    file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
+    download: '<path d="M12 4v11M7 11l5 5 5-5M5 20h14"/>',
     at: '<circle cx="12" cy="12" r="4"/><path d="M16 12v1.5a2.5 2.5 0 0 0 5 0V12a9 9 0 1 0-3.5 7.1"/>',
     chart: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
     check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
@@ -741,6 +743,8 @@
         } catch { return undefined; }
       },
       async put(k, url) {
+        // Only image previews may be written here; file bytes never touch browser storage.
+        if (typeof url !== 'string' || !url.startsWith('data:image/')) return false;
         try {
           const db = await open();
           return await new Promise((res) => {
@@ -751,12 +755,30 @@
           });
         } catch { return false; }
       },
+      // Older versions (v12) stored whole files here: delete anything that is not an image.
+      async purgeFiles() {
+        try {
+          const db = await open();
+          return await new Promise((res) => {
+            const tx = db.transaction('i', 'readwrite'), os = tx.objectStore('i');
+            os.openCursor().onsuccess = (e) => {
+              const c = e.target.result;
+              if (!c) return;
+              if (typeof c.value !== 'string' || !c.value.startsWith('data:image/')) c.delete();
+              c.continue();
+            };
+            tx.oncomplete = () => res(true);
+            tx.onerror = tx.onabort = () => res(false);
+          });
+        } catch { return false; }
+      },
     };
   })();
+  if (!store.get('filesPurged', false)) idb.purgeFiles().then((ok) => { if (ok) store.set('filesPurged', true); });
 
   const imageKey = (sid, m) => sid + '/' + m.cid + '/' + m.id + '/' + m.img.id;
   const imageMessageKey = (sid, cid, mid) => sid + '/' + cid + '/' + mid;
-  const imagePreparing = new Set(), imageErrors = new Set(), imageRetryAfter = new Map(), pendingImageSaves = new Set();
+  const imagePreparing = new Set(), imageErrors = new Set(), imageRetryAfter = new Map();
   function cacheImage(key, url) {
     imgCache.delete(key);
     imgCache.set(key, url);
@@ -876,29 +898,20 @@
     imageErrors.delete(imageMessageKey(sid, m.cid, m.id));
     imageRetryAfter.delete(imageMessageKey(sid, m.cid, m.id));
     paintImages();
-    if (request.save) saveLegacyImage(url);
   }
-  function requestImg(sid, id, save = false, cid, mid, force = false) {
+  function requestImg(sid, id, cid, mid, force = false) {
     const m = findImageMessage(sid, id, cid, mid);
     if (!m) return;
     const key = imageKey(sid, m);
-    if (save && !m.file) pendingImageSaves.add(key);
-    if (requested[key]) {
-      if (pendingImageSaves.has(key)) { requested[key].save = true; pendingImageSaves.delete(key); }
-      return;
-    }
+    if (requested[key]) return;
     if (Object.keys(requested).length >= 4) return; // bound preview buffers and mesh traffic
     const messageKey = imageMessageKey(sid, m.cid, m.id);
-    const shouldSave = pendingImageSaves.has(key) && !m.file;
-    if (!shouldSave && !force && (imageRetryAfter.get(messageKey) || 0) > now()) return;
-    pendingImageSaves.delete(key);
-    requested[key] = { key, sid, id, cid: m.cid, mid: m.id, length: m.img.n, save: shouldSave, timer: setTimeout(() => {
-      const expired = requested[key];
+    if (!force && (imageRetryAfter.get(messageKey) || 0) > now()) return;
+    requested[key] = { key, sid, id, cid: m.cid, mid: m.id, length: m.img.n, timer: setTimeout(() => {
       delete requested[key]; delete incoming[key];
       imageErrors.add(messageKey);
       imageRetryAfter.set(messageKey, now() + 15000);
       renderIfCurrent(sid, m.cid);
-      if (expired && expired.save) toast('Image unavailable. Someone who has it must be online.');
     }, 30000) };
     send(sid, { t: 'imgreq', id, cid: m.cid, mid: m.id });
   }
@@ -910,7 +923,6 @@
     }
     const prefix = sid ? sid + '/' + (cid ? cid + '/' + (mid ? mid + '/' : '') : '') : '';
     for (const key of imgCache.keys()) if (key.startsWith(prefix)) imgCache.delete(key);
-    for (const key of pendingImageSaves) if (key.startsWith(prefix)) pendingImageSaves.delete(key);
     for (const key of imageErrors) if ((key + '/').startsWith(prefix)) imageErrors.delete(key);
     for (const key of imageRetryAfter.keys()) if ((key + '/').startsWith(prefix)) imageRetryAfter.delete(key);
   }
@@ -922,7 +934,6 @@
       const url = await getImg(sid, m);
       if (!imageStillLive(sid, m)) return;
       if (url) {
-        if (!m.file && pendingImageSaves.delete(imageKey(sid, m))) saveLegacyImage(url);
         const status = el.parentElement.querySelector('.image-preview-status');
         el.onload = () => {
           el.parentElement.classList.remove('loading');
@@ -936,7 +947,7 @@
           if (status) { status.hidden = false; status.textContent = m.file ? 'Image preview unavailable. Download the original to open it.' : 'Image preview unavailable.'; }
         };
         el.src = url;
-      } else requestImg(sid, m.img.id, false, cid, mid);
+      } else requestImg(sid, m.img.id, cid, mid);
     });
   }
 
@@ -956,34 +967,17 @@
   function renderAttachBar() {
     const bar = $('attachBar');
     bar.classList.toggle('hidden', !pending.length);
-    bar.innerHTML = pending.map((att, i) => `<div class="att att-file">${icon('copy')}<span title="${esc(att.meta.name)}">${esc(att.meta.name)}</span><small>${esc(window.DischordFiles.formatSize(att.meta.size))}</small><button type="button" class="att-x" data-rm="${i}" title="Remove">${icon('x')}</button></div>`).join('') +
+    bar.innerHTML = pending.map((att, i) => `<div class="att file">${icon('file')}<span class="att-name" title="${esc(att.meta.name)}">${esc(att.meta.name)}</span><span class="att-size">${esc(window.DischordFiles.formatSize(att.meta.size))}</span><button type="button" class="att-x" data-rm="${i}" title="Remove">${icon('x')}</button></div>`).join('') +
       (pending.length ? '<span class="attachment-note">Images show previews automatically.<br>Files are shared on Download. Keep this tab open.</span>' : '');
-  }
-  function saveLegacyImage(url) {
-    const match = url.match(/^data:image\/(png|jpeg|webp|gif);base64,([A-Za-z0-9+/=]+)$/);
-    if (!match) return;
-    try {
-      const raw = atob(match[2]), bytes = Uint8Array.from(raw, (c) => c.charCodeAt(0));
-      saveFileDownload(new Blob([bytes], { type: 'application/octet-stream' }), 'image.' + match[1]);
-    } catch { toast('Could not download that image.'); }
-  }
-  async function downloadLegacyImage(sid, id, cid, mid) {
-    const m = findImageMessage(sid, id, cid, mid);
-    if (!m || m.file) return;
-    const url = await getImg(sid, m);
-    if (!imageStillLive(sid, m)) return;
-    if (url) saveLegacyImage(url); else requestImg(sid, id, true, m.cid, m.id);
   }
   async function openImage(sid, cid, mid) {
     const m = (getMsgs(sid)[cid] || []).find((m) => m.id === mid && !m.del && m.img);
     if (!m) return;
     const url = await getImg(sid, m);
     if (!imageStillLive(sid, m)) return;
-    if (!url) { requestImg(sid, m.img.id, false, cid, mid, true); return; }
+    if (!url) { requestImg(sid, m.img.id, cid, mid, true); return; }
     modal(`<div class="lightbox"><img src="${esc(url)}" alt="${esc(m.file ? m.file.name : 'Shared image')}"></div>
-      <div class="actions"><button class="btn" id="downloadOpenImage">${m.file ? 'Download original' : 'Download image'}</button><button class="btn primary" data-close>Close</button></div>`, () => {
-      $('downloadOpenImage').onclick = () => m.file ? fileTransfers.download(sid, cid, mid) : downloadLegacyImage(sid, m.img.id, cid, mid);
-    }, true, true);
+      <div class="actions"><button class="btn primary" data-close>Close</button></div>`, null, true, true);
     $('modal').classList.add('lb');
   }
 
@@ -993,18 +987,15 @@
     const saving = status.state === 'saving';
     const unavailable = m.a.id === me.id && !fileTransfers.hasLocal(sid, m.cid, m.id);
     const large = window.DischordFiles.strategyFor(m.file.size).stream && m.a.id !== me.id;
-    const hint = window.DischordImages.isImage(m.file) ? 'Preview shared automatically. Download saves the original.' : large ? typeof window.showSaveFilePicker === 'function'
-      ? 'Choose a save location when downloading. Contents are sent only after Download.'
-      : 'Contents are sent only after Download. Large files use browser memory here.'
-      : 'Contents are sent only when you download.';
-    const label = status.state === 'preparing' ? 'Choose where to save this file…' : saving ? 'Saving file…'
+    const size = window.DischordFiles.formatSize(m.file.size) + (large ? (typeof window.showSaveFilePicker === 'function'
+      ? ' · you choose a save location when downloading' : ' · large file: uses browser memory here') : '');
+    const sub = status.state === 'preparing' ? 'Choose where to save this file…' : saving ? 'Saving file…'
       : active ? `Downloading ${Math.round(status.progress)}%` : status.state === 'error' ? status.message
-      : status.state === 'complete' ? status.message || 'Sent to your browser for download.'
-      : unavailable ? 'File unavailable after reload. Attach it again.' : hint;
-    return `${icon('copy')}<div class="file-info"><strong>${esc(m.file.name)}</strong><span>${esc(window.DischordFiles.formatSize(m.file.size))}</span><small role="status">${esc(label)}</small></div>` +
-      (active ? `<button type="button" class="btn" data-file-cancel="${esc(m.id)}">Cancel</button>` : saving
-        ? '<button type="button" class="btn" disabled>Saving…</button>'
-        : `<button type="button" class="btn" data-file-download="${esc(m.id)}" ${unavailable ? 'disabled' : ''}>${status.state === 'error' ? 'Retry download' : 'Download'}</button>`);
+      : status.state === 'complete' ? status.message || 'Saved'
+      : unavailable ? 'Unavailable after reload. Attach it again.' : size;
+    const btn = active ? `<button type="button" class="icon-btn" data-file-cancel="${esc(m.id)}" title="Cancel">${icon('x')}</button>`
+      : `<button type="button" class="icon-btn" data-file-download="${esc(m.id)}" title="${status.state === 'error' ? 'Retry download' : 'Download'}" ${unavailable || saving ? 'disabled' : ''}>${icon('download')}</button>`;
+    return `${icon('file')}<div class="mf-text"><div class="mf-name" title="${esc(m.file.name)}">${esc(m.file.name)}</div><div class="mf-sub" role="status">${esc(sub)}</div></div>${btn}`;
   }
   function paintFileCards(mid) {
     document.querySelectorAll('[data-file-card]').forEach((el) => {
@@ -1928,8 +1919,7 @@
     let h = `<div class="ctx-emojis">${REACTS.slice(0, 8).map((e) => `<button data-emo="${e}">${e}</button>`).join('')}</div>`;
     h += ctxItem('reply', 'reply', 'Reply');
     if (m.text) h += ctxItem('copy', 'copy', 'Copy text');
-    if (m.file && window.DischordImages.isImage(m.file)) h += ctxItem('openimg', 'image', 'Download original');
-    else if (m.img) h += ctxItem('openimg', 'image', 'Download image');
+    if (m.img) h += ctxItem('openimg', 'image', 'Open image');
     if (!mine) h += ctxItem('mention', 'at', 'Mention ' + esc(m.a.name));
     if (mine && m.text) h += ctxItem('edit', 'edit', 'Edit message');
     if (mine) h += ctxItem('del', 'trash', 'Delete message', 'danger');
@@ -1943,7 +1933,7 @@
         switch (b.dataset.act) {
           case 'reply': return replyToMessage(mid);
           case 'copy': navigator.clipboard && navigator.clipboard.writeText(m.text); return toast('Copied');
-          case 'openimg': return m.file ? fileTransfers.download(cur.sid, m.cid, m.id) : downloadLegacyImage(cur.sid, m.img.id, m.cid, m.id);
+          case 'openimg': return openImage(cur.sid, m.cid, m.id);
           case 'mention': { const inp = $('msgInput'); inp.value += '@' + m.a.name.replace(/\s+/g, '') + ' '; return inp.focus(); }
           case 'edit': return editMessage(mid);
           case 'del': return deleteMessage(mid);
@@ -2051,10 +2041,10 @@
       const imageStateKey = imageMessageKey(s.id, m.cid, m.id);
       const failedPreview = imageErrors.has(imageStateKey);
       const img = m.img ? `<button type="button" class="msg-img ${failedPreview ? '' : 'loading'}" style="aspect-ratio:${m.img.w}/${m.img.h};width:min(100%, ${Math.min(420, m.img.w)}px)" data-image-open="${esc(m.id)}" aria-label="Open image preview">
-        <img data-img="${esc(m.img.id)}" data-img-sid="${esc(s.id)}" data-img-cid="${esc(m.cid)}" data-img-mid="${esc(m.id)}" loading="lazy" decoding="async" alt="${esc(m.file ? m.file.name : 'Shared image')}"><span class="image-preview-status" role="status">${failedPreview ? 'Preview unavailable. Someone with it must be online.' : 'Loading image preview…'}</span></button>` +
-        (!m.file ? `<div class="file-card">${icon('image')}<div class="file-info"><strong>Image</strong><small>Preview shared automatically.</small></div><button type="button" class="btn" data-legacy-download="${esc(m.img.id)}" data-legacy-mid="${esc(m.id)}">Download image</button></div>` : '') : m.file && window.DischordImages.isImage(m.file)
-        ? `<div class="image-preview-placeholder" role="status">${icon('image')}<span>${imagePreparing.has(imageStateKey) && !failedPreview ? 'Preparing image preview…' : 'Image preview unavailable. Download the original to open it.'}</span></div>` : '';
-      const file = m.file ? `<div class="file-card" data-file-card="${esc(m.id)}">${fileCardContent(s.id, m)}</div>` : '';
+        <img data-img="${esc(m.img.id)}" data-img-sid="${esc(s.id)}" data-img-cid="${esc(m.cid)}" data-img-mid="${esc(m.id)}" loading="lazy" decoding="async" alt="${esc(m.file ? m.file.name : 'Shared image')}"><span class="image-preview-status" role="status">${failedPreview ? 'Preview unavailable. Someone with it must be online.' : 'Loading image preview…'}</span></button>` : m.file && window.DischordImages.isImage(m.file)
+        ? `<div class="image-preview-placeholder" role="status">${icon('image')}<span>${imagePreparing.has(imageStateKey) && !failedPreview ? 'Preparing image preview…' : 'Image preview unavailable.'}</span></div>` : '';
+      // images are preview-only; every other file is a card that transfers on Download
+      const file = m.file && !window.DischordImages.isImage(m.file) ? `<div class="msg-file" data-file-card="${esc(m.id)}">${fileCardContent(s.id, m)}</div>` : '';
       const reply = renderReply(m);
       const text = m.text ? `<div class="text">${formatText(m.text)}${edited}</div>` : '';
       const re = renderRe(m);
@@ -2476,8 +2466,6 @@
     if (download) return fileTransfers.download(cur.sid, cur.cid, download.dataset.fileDownload);
     const cancel = e.target.closest('[data-file-cancel]');
     if (cancel) return fileTransfers.cancel(cur.sid, cur.cid, cancel.dataset.fileCancel);
-    const legacy = e.target.closest('[data-legacy-download]');
-    if (legacy) return downloadLegacyImage(cur.sid, legacy.dataset.legacyDownload, cur.cid, legacy.dataset.legacyMid);
     const rt = e.target.closest('[data-rtoggle]');
     if (rt) return toggleReaction(rt.dataset.rtoggle, rt.dataset.e);
     const ra = e.target.closest('[data-react]');
