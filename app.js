@@ -300,12 +300,23 @@
   const myVoiceIn = (sid) => (voice && voice.sid === sid ? voice.cid : null);
   const myState = () => ({ m: !micOn || deaf, d: deaf, c: !!(voice && voice.cam), s: !!(voice && voice.ss), cb: av.camBr, sb: voice && voice.ssSettings ? voice.ssSettings.ssBr : av.ssBr });
 
+  // When the call in a voice channel started. Nobody owns that fact, so everyone in the call keeps
+  // repeating how long it has been running as far as they know, and each client keeps the longest.
+  // Ages (not clock times) are exchanged, so computers with different clocks still agree.
+  const callStarts = {}; // 'sid/cid' -> local timestamp
+  const callStart = (sid, cid) => callStarts[sid + '/' + cid] || null;
+  function noteCallStart(sid, cid, at) {
+    const k = sid + '/' + cid;
+    if (!callStarts[k] || at < callStarts[k] - 1500) callStarts[k] = at; // ignore network jitter
+  }
+
   // Every payload carries who I am and my voice state, so presence is never stale.
   function send(sid, payload, uuid) {
     const m = meshes[sid];
     if (!m || !m.iframe.contentWindow) return false;
     const inV = myVoiceIn(sid);
-    const body = { v: PROTO, u: me, vc: inV, vs: inV ? voice.vs : null, vss: inV && voice.ss ? voice.ssVs : null, st: myState(), ...payload };
+    const started = inV ? callStart(sid, inV) : null;
+    const body = { v: PROTO, u: me, vc: inV, vs: inV ? voice.vs : null, vss: inV && voice.ss ? voice.ssVs : null, vt: started ? now() - started : null, st: myState(), ...payload };
     const o = { sendData: { dischord: body } };
     if (uuid) o.UUID = uuid;
     m.iframe.contentWindow.postMessage(o, '*');
@@ -389,6 +400,7 @@
     const m = prev || { uuids: new Set() };
     m.user = user;
     const vc = isId(body.vc) ? body.vc : null;
+    if (vc) noteCallStart(sid, vc, Number.isFinite(body.vt) && body.vt >= 0 && body.vt < 30 * 864e5 ? now() - body.vt : now());
     if (!m.conns) m.conns = new Map();
     m.conns.set(uuid || '_', { vc, vs: vc && isId(body.vs) ? body.vs : null, vss: vc && isId(body.vss) ? body.vss : null, st: cleanState(body.st), seen: now() });
     if (uuid) m.uuids.add(uuid);
@@ -1188,6 +1200,8 @@
     const f = document.createElement('iframe');
     f.allow = 'autoplay; camera; microphone; display-capture; fullscreen; picture-in-picture; clipboard-write';
     f.title = 'Voice connection';
+    if (!rejoin && !voiceOccupants(sid, cid).length) delete callStarts[sid + '/' + cid]; // nobody here: a new call begins now
+    noteCallStart(sid, cid, now());
     const call = { sid, cid, iframe: f, cam: !!withCam, ss: false, vs, ssFrame: null, ssVs: vs + 's', timers: new Set(), since: rejoin && voice.since ? voice.since : now(), ...(keepShare || {}) };
     voice = call;
     for (const k in sentVol) delete sentVol[k];
@@ -1655,9 +1669,11 @@
     h += `<div class="cat"><span>Voice channels</span><button class="icon-btn" data-add="voice" title="Create channel">${icon('plus')}</button></div>`;
     for (const c of vc) {
       const who = voiceOccupants(s.id, c.id);
+      if (!who.length) delete callStarts[s.id + '/' + c.id]; // the call ended when the last person left
       const mine = voice && voice.sid === s.id && voice.cid === c.id;
       h += `<div class="chan ${c.id === cur.cid ? 'active' : ''} ${mine ? 'connected' : ''}" data-cid="${esc(c.id)}">
         <span class="ico">${icon('speaker')}</span><span class="name">${esc(c.name)}</span>
+        ${who.length && callStart(s.id, c.id) ? `<span class="chan-time" data-start="${callStart(s.id, c.id)}" title="Call running for">${fmtDur(now() - callStart(s.id, c.id))}</span>` : ''}
         ${who.length ? `<span class="count">${who.length}</span>` : ''}
         <button class="icon-btn del" data-delc="${esc(c.id)}" title="Delete channel">${icon('trash')}</button></div>`;
       if (who.length) {
@@ -2740,9 +2756,16 @@
     const el = $('vsTime');
     if (!el) return;
     if (!voice || !voice.since) { el.textContent = ''; return; }
-    const t = Math.max(0, Math.floor((now() - voice.since) / 1000));
+    el.textContent = fmtDur(now() - voice.since);
+  }
+  function fmtDur(ms) {
+    const t = Math.max(0, Math.floor(ms / 1000));
     const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, s = t % 60;
-    el.textContent = (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s).padStart(2, '0');
+    return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s).padStart(2, '0');
+  }
+  // the running time of each active call in the channel list
+  function paintChannelTimes() {
+    document.querySelectorAll('#channelList .chan-time').forEach((el) => { el.textContent = fmtDur(now() - (+el.dataset.start || now())); });
   }
 
   function renderControls() {
@@ -3163,8 +3186,42 @@
       store.set('miniPos', { r: at.r, b: at.b });
     }, { passive: false });
     let spring = 0;
+    // drag any corner to resize: the opposite corner stays where it is and the 16:9 shape is kept
+    let sizing = null;
     stage.addEventListener('pointerdown', (e) => {
-      if (!stage.classList.contains('mini') || e.button) return;
+      const grip = e.target.closest && e.target.closest('.mini-grip');
+      if (!grip || !stage.classList.contains('mini') || e.button) return;
+      e.stopPropagation();
+      cancelAnimationFrame(spring);
+      const main = $('main').getBoundingClientRect(), c = grip.dataset.c;
+      sizing = { grip, x: e.clientX, y: e.clientY, w: width, r: at.r, b: at.b, left: c[1] === 'l', top: c[0] === 't', mw: main.width, mh: main.height };
+      stage.classList.add('resizing');
+      try { grip.setPointerCapture(e.pointerId); } catch { }
+    }, true);
+    stage.addEventListener('pointermove', (e) => {
+      if (!sizing) return;
+      const dx = (sizing.left ? -1 : 1) * (e.clientX - sizing.x), dy = (sizing.top ? -1 : 1) * (e.clientY - sizing.y) * 16 / 9;
+      let w = sizing.w + (Math.abs(dx) > Math.abs(dy) ? dx : dy);
+      // limits: sensible sizes, and the moving corner may not leave the chat area
+      const roomW = sizing.left ? sizing.mw - sizing.r : sizing.r + sizing.w;
+      const roomH = sizing.top ? sizing.mh - sizing.b : sizing.b + sizing.w * 9 / 16;
+      w = Math.round(Math.max(200, Math.min(720, roomW, roomH * 16 / 9, w)));
+      width = w;
+      stage.style.setProperty('--mini-w', w + 'px');
+      place(sizing.left ? sizing.r : sizing.r - (w - sizing.w), sizing.top ? sizing.b : sizing.b - (w - sizing.w) * 9 / 16);
+    });
+    const sized = () => {
+      if (!sizing) return;
+      sizing = null;
+      moved = true; // the click that ends a resize must not jump back to the call
+      stage.classList.remove('resizing');
+      store.set('miniW', width);
+      store.set('miniPos', { r: at.r, b: at.b });
+    };
+    stage.addEventListener('pointerup', sized);
+    stage.addEventListener('pointercancel', sized);
+    stage.addEventListener('pointerdown', (e) => {
+      if (!stage.classList.contains('mini') || e.button || sizing) return;
       cancelAnimationFrame(spring); // catch it mid-flight
       const main = $('main').getBoundingClientRect();
       // start from the tracked position, not the drawn box: the box may be mid-animation or scaled
@@ -3433,7 +3490,7 @@
     if (cur.sid) renderPresence();
   }, 3000);
   setInterval(paintSpeaking, 250);
-  setInterval(paintCallTime, 1000);
+  setInterval(() => { paintCallTime(); paintChannelTimes(); }, 1000);
   setInterval(pollStats, 2000);
   setInterval(() => applyVolumes(true), 4000);
   setInterval(paintImages, 15000); // retry visible uncached previews when a provider returns

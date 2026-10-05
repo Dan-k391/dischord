@@ -701,3 +701,22 @@ body.resizing iframe { pointer-events: none !important; }
 .tile:fullscreen .tile-zoom, #voiceStage.winfs .tile.winfull .tile-zoom { right: 16px; bottom: 60px; width: 176px; }
 #tiles.focus-mode .tile:not(.focused) .tile-zoom { display: none; }
 #vsTime { margin-left: 6px; font: 600 12px/1 ui-monospace, Consolas, monospace; color: var(--text-muted); }
+
+/* ---------- v33: drag a corner of the call preview to resize it ---------- */
+.mini-grip { display: none; }
+#voiceStage.offstage.mini .mini-grip { display: block; visibility: visible !important; position: absolute; width: 18px; height: 18px; z-index: 3; touch-action: none; }
+.mini-grip[data-c="tl"] { left: 0; top: 0; cursor: nwse-resize; }
+.mini-grip[data-c="br"] { right: 0; bottom: 0; cursor: nwse-resize; }
+.mini-grip[data-c="tr"] { right: 0; top: 0; cursor: nesw-resize; }
+.mini-grip[data-c="bl"] { left: 0; bottom: 0; cursor: nesw-resize; }
+/* a small corner mark shows where to grab, only while the mouse is over the preview */
+.mini-grip::after { content: ""; position: absolute; width: 9px; height: 9px; border: 0 solid rgba(255,255,255,.9); opacity: 0; transition: opacity .15s; }
+#voiceStage.offstage.mini:hover .mini-grip::after { opacity: 1; }
+.mini-grip[data-c="tl"]::after { left: 4px; top: 4px; border-width: 2px 0 0 2px; border-top-left-radius: 4px; }
+.mini-grip[data-c="tr"]::after { right: 4px; top: 4px; border-width: 2px 2px 0 0; border-top-right-radius: 4px; }
+.mini-grip[data-c="bl"]::after { left: 4px; bottom: 4px; border-width: 0 0 2px 2px; border-bottom-left-radius: 4px; }
+.mini-grip[data-c="br"]::after { right: 4px; bottom: 4px; border-width: 0 2px 2px 0; border-bottom-right-radius: 4px; }
+#voiceStage.offstage.mini.resizing::after { opacity: 0; }
+
+.chan .chan-time { font: 600 11px/1 ui-monospace, Consolas, monospace; color: var(--text-muted); flex: none; }
+.chan.connected .chan-time { color: var(--green); }
