@@ -7,7 +7,7 @@ A Discord-style chat app built on [VDO.Ninja](https://vdo.ninja). No accounts, n
 - **Text chat** sent peer-to-peer: Markdown-ish formatting, edit/delete, typing indicators, unread badges, desktop notifications
 - **Replies**: reply from message actions or the right-click menu; click the quote to jump to the original message
 - **Files**: attach, paste or drag & drop up to four files with no app-imposed file size limit. Non-image contents transfer directly from the sender only after **Download**, with progress and cancellation
-- **Image previews**: images automatically display a raster preview in chat. Previews are cached in the browser and available through chat history; **Download** saves the full-quality original
+- **Image previews**: images automatically display a raster preview in chat. Previews are cached in the browser and available through chat history. Images are shared as a high-quality preview (up to 4096 pixels on the longer side) with a download button that saves it
 - **Reactions** on messages, plus floating emoji reactions in voice calls
 - **History sync**: when you come online, peers send you recent messages you missed
 - **Voice channels** with mute/deafen, **camera** and **screen share at the same time**, speaking indicators, focus view + fullscreen
@@ -61,7 +61,7 @@ To use it with friends over the internet, host the folder on any static host
 
 ## Limits (by design, since there's no server)
 - Non-image file contents are never automatically transferred, previewed, or saved by Dischord. Recipients save originals only after clicking **Download**. File names, sizes, types and image-preview descriptors are included in local chat history; raster preview bytes are cached separately.
-- Image previews preserve aspect ratio and use a bounded raster thumbnail (up to 1024 pixels on the longer edge). This preview budget does not limit original file sizes. Formats the browser cannot decode retain a downloadable original with an unavailable-preview message.
+- Shared images preserve aspect ratio and are re-encoded in the browser as WebP up to 4096 pixels on the longer edge, within about 4.5 MB. Formats the browser cannot decode show an "Image preview unavailable" message.
 - Downloads below 100 MiB are assembled in browser memory. For larger remote files, browsers supporting the save-file picker let you choose a destination after clicking Download and write received batches directly there. Other browsers use memory, which can limit large downloads. No destination is opened and no file bytes are requested before Download.
 - Transfer strategy follows file size: below 1 MiB, use up to 8 chunks; from 1 MiB to below 100 MiB, use 32; at 100 MiB and above, start with 32 and adapt up to 128 as confirmations arrive. Each chunk holds 12 KiB. Active voice/video calls cap the window at 32 to reduce competing traffic. Older peers retain compatible pacing; both participants should refresh after an update for faster transfers.
 - Cancelling a direct-to-disk transfer aborts further writes. An empty destination created by the browser may remain. Completion is reported only after the writer finishes saving.

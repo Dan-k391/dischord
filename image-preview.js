@@ -1,9 +1,9 @@
-/* Image previews are shared with chat; original attachments stay available through Download. */
+/* Images are shared with chat as a high-quality preview that people can view and save. */
 (() => {
   'use strict';
 
-  const MAX_PREVIEW = 350000; // data URL characters, independent of the original file size
-  const MAX_SIDE = 1024;
+  const MAX_PREVIEW = 6000000; // data URL characters (~4.5 MB): generous, so shared images keep their quality
+  const MAX_SIDE = 4096;
   const DATA_IMAGE = /^data:image\/(?:png|jpeg|webp|gif);base64,/;
   const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
 
@@ -59,7 +59,7 @@
       let w = Math.max(1, Math.round(width * scale));
       let h = Math.max(1, Math.round(height * scale));
       canvas = document.createElement('canvas');
-      const qualities = [0.8, 0.65, 0.5, 0.35];
+      const qualities = [0.9, 0.7, 0.5];
       while (true) {
         canvas.width = w;
         canvas.height = h;
@@ -101,5 +101,5 @@
     }
   }
 
-  window.DischordImages = Object.freeze({ isImage, createPreview, validURL, MAX_PREVIEW });
+  window.DischordImages = Object.freeze({ isImage, createPreview, validURL, MAX_PREVIEW, MAX_SIDE });
 })();

@@ -61,7 +61,7 @@ function createClock() {
 function createElement(tag = 'div') {
   const classes = new Set();
   const node = eventTarget({
-    tagName: tag.toUpperCase(), children: [], dataset: {}, style: {},
+    tagName: tag.toUpperCase(), children: [], dataset: {}, style: { setProperty(name, value) { this[name] = value; } },
     innerHTML: '', textContent: '', value: '', src: '', srcHistory: [],
     classList: {
       add: (...names) => names.forEach((name) => classes.add(name)),

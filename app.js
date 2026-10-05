@@ -23,8 +23,10 @@
   const MAX_MSGS = 500;
   const HIST_SEND = 80;           // messages per channel sent during history sync
   const PING_MS = 8000;           // presence heartbeat
-  const STALE_CONNECTED = 90000;  // connected peer considered gone after this long silent
-  const STALE_LOOSE = 25000;      // peer with no live connection considered gone after this
+  const STALE_CONNECTED = 600000; // peer with a live connection: trust the connection; this is only a safety net if a disconnect event is ever missed
+  const STALE_LOOSE = 60000;      // peer with no live connection considered gone after this
+  const STALE_VOICE = 180000;     // same, for someone in a call
+  const PEER_GRACE = 20000;       // a dropped mesh connection may just be reconnecting: wait this long for the next ping
   const COLORS = ['#5865f2', '#7b61ff', '#9b59b6', '#eb459e', '#ed4245', '#f47b67', '#e67e22', '#faa61a',
     '#f1c40f', '#57f287', '#3ba55c', '#1abc9c', '#00a8fc', '#3498db', '#607d8b', '#99aab5'];
   const REACTS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '🎉', '👀', '💯', '😎', '🙏', '🤔', '👏', '😡', '✅', '❌'];
@@ -90,13 +92,13 @@
     signal: '<path d="M4 20v-3M9 20v-7M14 20V9M19 20V4"/>',
     smile: '<circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0M9 9.5h.01M15 9.5h.01"/>',
     image: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-9 9"/>',
-    file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
-    download: '<path d="M12 4v11M7 11l5 5 5-5M5 20h14"/>',
     plusCircle: '<circle cx="12" cy="12" r="9.5"/><path d="M12 8v8M8 12h8"/>',
     volume: '<path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/>',
     eyeOff: '<path d="M3 3l18 18M10.6 6.1A9.8 9.8 0 0 1 12 6c5 0 9 6 9 6a17 17 0 0 1-3.2 3.8M6.6 6.6A17 17 0 0 0 3 12s4 6 9 6a9 9 0 0 0 4.2-1"/>',
     copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>',
     reply: '<path d="M9 4l-6 6 6 6M3 10h9a8 8 0 0 1 8 8"/>',
+    file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
+    download: '<path d="M12 4v11M7 11l5 5 5-5M5 20h14"/>',
     at: '<circle cx="12" cy="12" r="4"/><path d="M16 12v1.5a2.5 2.5 0 0 0 5 0V12a9 9 0 1 0-3.5 7.1"/>',
     chart: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
     check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
@@ -186,7 +188,8 @@
     const preview = i.preview === 1;
     const maximum = preview ? window.DischordImages.MAX_PREVIEW : IMG_MAX;
     if (!Number.isInteger(i.n) || i.n < 1 || i.n > maximum) return undefined;
-    return { id: i.id, w: clampInt(i.w, 1, preview ? 1024 : 10000), h: clampInt(i.h, 1, preview ? 1024 : 10000), n: i.n, ...(preview ? { preview: 1 } : {}) };
+    const side = preview ? window.DischordImages.MAX_SIDE : 10000;
+    return { id: i.id, w: clampInt(i.w, 1, side), h: clampInt(i.h, 1, side), n: i.n, ...(preview ? { preview: 1 } : {}) };
   }
   function cleanRe(re) {
     if (!re || typeof re !== 'object') return undefined;
@@ -299,7 +302,8 @@
     const m = p && p.uid && members[sid] && members[sid][p.uid];
     if (m) {
       m.uuids.delete(uuid);
-      if (!m.uuids.size) m.seen = 0;
+      // Not offline at once: the connection may be reconnecting. The next ping revives them; silence expires them.
+      if (!m.uuids.size) m.seen = Math.min(m.seen, now() - (m.vc ? STALE_VOICE : STALE_LOOSE) + PEER_GRACE);
     }
     if (sid === cur.sid) renderPresence();
   }
@@ -314,7 +318,7 @@
 
   function isOnline(m) {
     if (!m || !m.seen) return false;
-    return now() - m.seen < (m.uuids && m.uuids.size ? STALE_CONNECTED : STALE_LOOSE);
+    return now() - m.seen < (m.uuids && m.uuids.size ? STALE_CONNECTED : m.vc ? STALE_VOICE : STALE_LOOSE);
   }
 
   function touch(sid, body, uuid) {
@@ -689,7 +693,7 @@
   const filePaints = new Map();
   let filePaintTimer = null;
   function queueFileCardPaint(sid, cid, mid) {
-    if (sid !== cur.sid || cid !== cur.cid) { paintFileCards(mid, sid, cid); return; }
+    if (sid !== cur.sid || cid !== cur.cid) return;
     const key = sid + '/' + cid + '/' + mid;
     const status = fileTransfers.status(sid, cid, mid);
     if (status.state !== 'receiving' || status.progress === 0) {
@@ -743,6 +747,8 @@
         } catch { return undefined; }
       },
       async put(k, url) {
+        // Only image previews may be written here; file bytes never touch browser storage.
+        if (typeof url !== 'string' || !url.startsWith('data:image/')) return false;
         try {
           const db = await open();
           return await new Promise((res) => {
@@ -753,12 +759,30 @@
           });
         } catch { return false; }
       },
+      // Older versions (v12) stored whole files here: delete anything that is not an image.
+      async purgeFiles() {
+        try {
+          const db = await open();
+          return await new Promise((res) => {
+            const tx = db.transaction('i', 'readwrite'), os = tx.objectStore('i');
+            os.openCursor().onsuccess = (e) => {
+              const c = e.target.result;
+              if (!c) return;
+              if (typeof c.value !== 'string' || !c.value.startsWith('data:image/')) c.delete();
+              c.continue();
+            };
+            tx.oncomplete = () => res(true);
+            tx.onerror = tx.onabort = () => res(false);
+          });
+        } catch { return false; }
+      },
     };
   })();
+  if (!store.get('filesPurged', false)) idb.purgeFiles().then((ok) => { if (ok) store.set('filesPurged', true); });
 
   const imageKey = (sid, m) => sid + '/' + m.cid + '/' + m.id + '/' + m.img.id;
   const imageMessageKey = (sid, cid, mid) => sid + '/' + cid + '/' + mid;
-  const imagePreparing = new Set(), imageErrors = new Set(), imageRetryAfter = new Map(), pendingImageSaves = new Set();
+  const imagePreparing = new Set(), imageErrors = new Set(), imageRetryAfter = new Map();
   function cacheImage(key, url) {
     imgCache.delete(key);
     imgCache.set(key, url);
@@ -878,29 +902,20 @@
     imageErrors.delete(imageMessageKey(sid, m.cid, m.id));
     imageRetryAfter.delete(imageMessageKey(sid, m.cid, m.id));
     paintImages();
-    if (request.save) saveLegacyImage(url);
   }
-  function requestImg(sid, id, save = false, cid, mid, force = false) {
+  function requestImg(sid, id, cid, mid, force = false) {
     const m = findImageMessage(sid, id, cid, mid);
     if (!m) return;
     const key = imageKey(sid, m);
-    if (save && !m.file) pendingImageSaves.add(key);
-    if (requested[key]) {
-      if (pendingImageSaves.has(key)) { requested[key].save = true; pendingImageSaves.delete(key); }
-      return;
-    }
+    if (requested[key]) return;
     if (Object.keys(requested).length >= 4) return; // bound preview buffers and mesh traffic
     const messageKey = imageMessageKey(sid, m.cid, m.id);
-    const shouldSave = pendingImageSaves.has(key) && !m.file;
-    if (!shouldSave && !force && (imageRetryAfter.get(messageKey) || 0) > now()) return;
-    pendingImageSaves.delete(key);
-    requested[key] = { key, sid, id, cid: m.cid, mid: m.id, length: m.img.n, save: shouldSave, timer: setTimeout(() => {
-      const expired = requested[key];
+    if (!force && (imageRetryAfter.get(messageKey) || 0) > now()) return;
+    requested[key] = { key, sid, id, cid: m.cid, mid: m.id, length: m.img.n, timer: setTimeout(() => {
       delete requested[key]; delete incoming[key];
       imageErrors.add(messageKey);
       imageRetryAfter.set(messageKey, now() + 15000);
       renderIfCurrent(sid, m.cid);
-      if (expired && expired.save) toast('Image unavailable. Someone who has it must be online.');
     }, 30000) };
     send(sid, { t: 'imgreq', id, cid: m.cid, mid: m.id });
   }
@@ -912,7 +927,6 @@
     }
     const prefix = sid ? sid + '/' + (cid ? cid + '/' + (mid ? mid + '/' : '') : '') : '';
     for (const key of imgCache.keys()) if (key.startsWith(prefix)) imgCache.delete(key);
-    for (const key of pendingImageSaves) if (key.startsWith(prefix)) pendingImageSaves.delete(key);
     for (const key of imageErrors) if ((key + '/').startsWith(prefix)) imageErrors.delete(key);
     for (const key of imageRetryAfter.keys()) if ((key + '/').startsWith(prefix)) imageRetryAfter.delete(key);
   }
@@ -924,10 +938,14 @@
       const url = await getImg(sid, m);
       if (!imageStillLive(sid, m)) return;
       if (url) {
-        if (!m.file && pendingImageSaves.delete(imageKey(sid, m))) saveLegacyImage(url);
         const status = el.parentElement.querySelector('.image-preview-status');
         el.onload = () => {
-          el.hidden = false;
+          // size the box from the real picture, so a wrong or outdated descriptor can never letterbox or crop it
+          if (el.naturalWidth && el.naturalHeight && el.parentElement.style) {
+            const k = Math.min(1, 550 / el.naturalWidth, 350 / el.naturalHeight);
+            el.parentElement.style.aspectRatio = el.naturalWidth + ' / ' + el.naturalHeight;
+            el.parentElement.style.width = `min(100%, ${Math.max(48, Math.round(el.naturalWidth * k))}px)`;
+          }
           el.parentElement.classList.remove('loading');
           imageErrors.delete(imageMessageKey(sid, cid, mid));
           if (status) status.hidden = true;
@@ -939,7 +957,7 @@
           if (status) { status.hidden = false; status.textContent = m.file ? 'Image preview unavailable. Download the original to open it.' : 'Image preview unavailable.'; }
         };
         el.src = url;
-      } else requestImg(sid, m.img.id, false, cid, mid);
+      } else requestImg(sid, m.img.id, cid, mid);
     });
   }
 
@@ -959,92 +977,58 @@
   function renderAttachBar() {
     const bar = $('attachBar');
     bar.classList.toggle('hidden', !pending.length);
-    bar.innerHTML = pending.map((att, i) => `<div class="att att-file">${icon('copy')}<span title="${esc(att.meta.name)}">${esc(att.meta.name)}</span><small>${esc(window.DischordFiles.formatSize(att.meta.size))}</small><button type="button" class="att-x" data-rm="${i}" title="Remove">${icon('x')}</button></div>`).join('') +
+    bar.innerHTML = pending.map((att, i) => `<div class="att file">${icon('file')}<span class="att-name" title="${esc(att.meta.name)}">${esc(att.meta.name)}</span><span class="att-size">${esc(window.DischordFiles.formatSize(att.meta.size))}</span><button type="button" class="att-x" data-rm="${i}" title="Remove">${icon('x')}</button></div>`).join('') +
       (pending.length ? '<span class="attachment-note">Images show previews automatically.<br>Files are shared on Download. Keep this tab open.</span>' : '');
   }
-  function saveLegacyImage(url) {
-    const match = url.match(/^data:image\/(png|jpeg|webp|gif);base64,([A-Za-z0-9+/=]+)$/);
-    if (!match) return;
-    try {
-      const raw = atob(match[2]), bytes = Uint8Array.from(raw, (c) => c.charCodeAt(0));
-      saveFileDownload(new Blob([bytes], { type: 'application/octet-stream' }), 'image.' + match[1]);
-    } catch { toast('Could not download that image.'); }
-  }
-  async function downloadLegacyImage(sid, id, cid, mid) {
-    const m = findImageMessage(sid, id, cid, mid);
-    if (!m || m.file) return;
+  // Images are shared as the preview itself (full quality, up to the preview cap): saving writes that data.
+  async function saveImage(sid, cid, mid) {
+    const m = (getMsgs(sid)[cid] || []).find((x) => x.id === mid && !x.del && x.img);
+    if (!m) return;
     const url = await getImg(sid, m);
-    if (!imageStillLive(sid, m)) return;
-    if (url) saveLegacyImage(url); else requestImg(sid, id, true, m.cid, m.id);
+    if (!url) { requestImg(sid, m.img.id, cid, mid, true); toast('Image is still loading. Try again in a moment.'); return; }
+    const ext = (url.match(/^data:image\/(\w+)/) || [, 'png'])[1].replace('jpeg', 'jpg');
+    const base = m.file ? m.file.name.replace(/\.[^.]*$/, '') : 'image';
+    try {
+      const bin = atob(url.slice(url.indexOf(',') + 1)), bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      saveFileDownload(new Blob([bytes], { type: 'image/' + ext }), (base || 'image') + '.' + ext);
+    } catch { toast('Could not save that image.'); }
   }
   async function openImage(sid, cid, mid) {
     const m = (getMsgs(sid)[cid] || []).find((m) => m.id === mid && !m.del && m.img);
     if (!m) return;
     const url = await getImg(sid, m);
     if (!imageStillLive(sid, m)) return;
-    if (!url) {
-      requestImg(sid, m.img.id, false, cid, mid, true);
-      if (!m.file) return;
-    }
-    const preview = url ? `<img src="${esc(url)}" alt="${esc(m.file ? m.file.name : 'Shared image')}">`
-      : `<img data-img="${esc(m.img.id)}" data-img-sid="${esc(sid)}" data-img-cid="${esc(cid)}" data-img-mid="${esc(mid)}" alt="${esc(m.file.name)}" hidden><span class="image-preview-status" role="status">Preview unavailable. Download the original to open it.</span>`;
-    modal(`<div class="lightbox">${preview}</div>
-      <div class="actions">${m.file ? `<div class="image-download" id="imageDownload" data-image-download="${esc(mid)}" data-image-sid="${esc(sid)}" data-image-cid="${esc(cid)}">${imageDownloadContent(sid, m)}</div>` : '<button class="btn" id="downloadOpenImage">Download image</button>'}<button class="btn primary" data-close>Close</button></div>`, () => {
-      if (m.file) $('imageDownload').onclick = (e) => {
-        const button = e.target.closest('[data-file-download], [data-file-cancel]');
-        if (!button || button.disabled) return;
-        if (button.dataset.fileCancel) fileTransfers.cancel(sid, cid, mid);
-        else fileTransfers.download(sid, cid, mid);
-      };
-      else $('downloadOpenImage').onclick = () => downloadLegacyImage(sid, m.img.id, cid, mid);
+    if (!url) { requestImg(sid, m.img.id, cid, mid, true); return; }
+    modal(`<div class="lightbox"><img src="${esc(url)}" alt="${esc(m.file ? m.file.name : 'Shared image')}"></div>
+      <div class="actions"><button class="btn" id="saveOpenImage">Download</button><button class="btn primary" data-close>Close</button></div>`, () => {
+      $('saveOpenImage').onclick = () => saveImage(sid, cid, mid);
     }, true, true);
     $('modal').classList.add('lb');
-    if (!url) paintImages();
   }
 
-  function fileDownloadState(sid, m) {
+  function fileCardContent(sid, m) {
     const status = fileTransfers.status(sid, m.cid, m.id);
     const active = status.state === 'receiving' || status.state === 'preparing';
     const saving = status.state === 'saving';
     const unavailable = m.a.id === me.id && !fileTransfers.hasLocal(sid, m.cid, m.id);
     const large = window.DischordFiles.strategyFor(m.file.size).stream && m.a.id !== me.id;
-    const hint = window.DischordImages.isImage(m.file) ? 'Preview shared automatically. Download saves the original.' : large ? typeof window.showSaveFilePicker === 'function'
-      ? 'Choose a save location when downloading. Contents are sent only after Download.'
-      : 'Contents are sent only after Download. Large files use browser memory here.'
-      : 'Contents are sent only when you download.';
-    const label = status.state === 'preparing' ? 'Choose where to save this file…' : saving ? 'Saving file…'
+    const size = window.DischordFiles.formatSize(m.file.size) + (large ? (typeof window.showSaveFilePicker === 'function'
+      ? ' · you choose a save location when downloading' : ' · large file: uses browser memory here') : '');
+    const sub = status.state === 'preparing' ? 'Choose where to save this file…' : saving ? 'Saving file…'
       : active ? `Downloading ${Math.round(status.progress)}%` : status.state === 'error' ? status.message
-      : status.state === 'complete' ? status.message || 'Sent to your browser for download.'
-      : unavailable ? 'File unavailable after reload. Attach it again.' : '';
-    return { active, saving, unavailable, hint, label, error: status.state === 'error' };
+      : status.state === 'complete' ? status.message || 'Saved'
+      : unavailable ? 'Unavailable after reload. Attach it again.' : size;
+    const btn = active ? `<button type="button" class="icon-btn" data-file-cancel="${esc(m.id)}" title="Cancel">${icon('x')}</button>`
+      : `<button type="button" class="icon-btn" data-file-download="${esc(m.id)}" title="${status.state === 'error' ? 'Retry download' : 'Download'}" ${unavailable || saving ? 'disabled' : ''}>${icon('download')}</button>`;
+    return `${icon('file')}<div class="mf-text"><div class="mf-name" title="${esc(m.file.name)}">${esc(m.file.name)}</div><div class="mf-sub" role="status">${esc(sub)}</div></div>${btn}`;
   }
-  function fileDownloadButton(m, state, compact = false) {
-    const label = state.active ? 'Cancel download' : state.saving ? 'Saving…'
-      : state.unavailable ? 'File unavailable' : state.error ? 'Retry download' : compact ? 'Download' : 'Download original';
-    return `<button type="button" class="${compact ? 'icon-btn file-action' : 'btn'}${state.saving ? ' is-saving' : ''}" data-file-${state.active ? 'cancel' : 'download'}="${esc(m.id)}" title="${esc(state.active ? label : state.label || state.hint)}" aria-label="${esc(label + ': ' + m.file.name)}" ${state.saving || state.unavailable ? 'disabled' : ''}>${compact ? icon(state.active ? 'x' : 'download') : esc(label)}</button>`;
-  }
-  function fileCardContent(sid, m) {
-    const state = fileDownloadState(sid, m);
-    return `${icon('file')}<div class="file-info"><button type="button" class="file-name" data-file-download="${esc(m.id)}" title="${esc(m.file.name)}" aria-label="${esc('Download ' + m.file.name)}" ${state.active || state.saving || state.unavailable ? 'disabled' : ''}>${esc(m.file.name)}</button><span class="file-size">${esc(window.DischordFiles.formatSize(m.file.size))}</span>${state.label ? `<small role="status">${esc(state.label)}</small>` : ''}</div>` + fileDownloadButton(m, state, true);
-  }
-  function imageDownloadContent(sid, m) {
-    const state = fileDownloadState(sid, m);
-    return `${state.label ? `<small role="status">${esc(state.label)}</small>` : ''}${fileDownloadButton(m, state)}`;
-  }
-  function paintFileCards(mid, sid = cur.sid, cid = cur.cid) {
+  function paintFileCards(mid) {
     document.querySelectorAll('[data-file-card]').forEach((el) => {
-      if (el.dataset.fileCard !== mid || sid !== cur.sid || cid !== cur.cid) return;
-      const m = (getMsgs(sid)[cid] || []).find((x) => x.id === el.dataset.fileCard);
+      if (el.dataset.fileCard !== mid) return;
+      const m = (getMsgs(cur.sid)[cur.cid] || []).find((x) => x.id === el.dataset.fileCard);
       if (m && !m.del && m.file) {
-        const html = fileCardContent(sid, m);
-        if (el.innerHTML !== html) el.innerHTML = html;
-      }
-    });
-    document.querySelectorAll('[data-image-download]').forEach((el) => {
-      if (el.dataset.imageDownload !== mid || el.dataset.imageSid !== sid || el.dataset.imageCid !== cid) return;
-      const m = (getMsgs(sid)[cid] || []).find((x) => x.id === mid);
-      if (m && !m.del && m.file) {
-        const html = imageDownloadContent(sid, m);
+        const html = fileCardContent(cur.sid, m);
         if (el.innerHTML !== html) el.innerHTML = html;
       }
     });
@@ -1057,6 +1041,8 @@
     let u = VDO + '?' + p.toString();
     u += '&autostart&webcam&novideo&nocontrolbar&hideheader&chatbutton=false&nohangupbutton';
     u += `&audiogain=${audioPercent(av.micGain)}`;
+    if (store.get('micLabel', '')) u += '&audiodevice=' + encodeURIComponent(store.get('micLabel', '')); // remembered microphone; falls back to default if unplugged
+    if (store.get('outLabel', '')) u += '&outputdevice=' + encodeURIComponent(store.get('outLabel', '')); // remembered speakers / headphones
     u += withCam ? `&quality=${CAM_Q[av.camQ] ?? 1}&maxframerate=${av.camFps}` : '&videodevice=0';
     u += `&screensharequality=${SS_Q[av.ssQ] ?? 0}&screensharefps=${av.ssFps}`;
     u += `&maxvideobitrate=${av.camBr}&exclude=${ssVs}`; // preserve exclusion when camera reconnects during a share
@@ -1356,6 +1342,7 @@
         scheduleVoice(call, () => syncVoiceState(call), 250);
       }
       if (d.loudness) { voice.loudnessReady = true; onLoudness(d.loudness); }
+      if (Array.isArray(d.deviceList) && d.cib === 'dischord-devs' && devWait) devWait.show(d.deviceList);
       if (d.stats) onSendStats(false, d.stats);
       return;
     }
@@ -1873,6 +1860,187 @@
   const ctxSelect = (act, label, val, opts) => `<div class="ctx-select"><span>${label}</span><select data-sel="${act}">${opts.map(([v, l]) => `<option value="${v}" ${String(v) === String(val) ? 'selected' : ''}>${l}</option>`).join('')}</select></div>`;
   const qOpts = (auto) => [[0, 'Auto' + (auto ? ' · ' + mbps(auto) : '')], ...VIEW_BRS.map((k) => [k, mbps(k)])];
 
+  // ---- device menus (the caret beside, or a right-click on, the mic and headphones buttons); all inside Dischord
+  let devWait = null;
+  const sameLabel = (a, b) => !!a && !!b && String(a).replace(/\W+/g, '_').toLowerCase() === String(b).replace(/\W+/g, '_').toLowerCase();
+  function deviceMenu(anchor, kind) { // kind: 'audioinput' | 'audiooutput'
+    closeCtx();
+    const input = kind === 'audioinput', key = input ? 'micLabel' : 'outLabel';
+    const rect = anchor.getBoundingClientRect();
+    const token = {};
+    clearTimeout(devWait && devWait.timer);
+    const show = (list) => {
+      if (!devWait || devWait.token !== token) return;
+      clearTimeout(devWait.timer); devWait = null;
+      const devs = (list || []).filter((d) => d.kind === kind && d.deviceId !== 'communications');
+      const named = devs.some((d) => d.label);
+      const saved = store.get(key, '');
+      let h = `<div class="ctx-head"><span>${input ? 'Input device' : 'Output device'}</span></div>`;
+      if (!devs.length) h += `<div class="ctx-note">${input ? 'No microphone found.' : 'This browser does not list output devices.'}</div>`;
+      else if (!named) h += '<div class="ctx-note">Join a voice channel and allow microphone access to see device names.</div>';
+      else h += devs.map((d, i) => {
+        const on = saved ? sameLabel(saved, d.label) : d.deviceId === 'default';
+        return `<button class="ctx-item check ${on ? 'on' : ''}" data-act="dev" data-i="${i}"><span>${esc(d.label)}</span><i class="box">${on ? icon('check') : ''}</i></button>`;
+      }).join('');
+      h += '<div class="ctx-sep"></div>';
+      h += input ? ctxSlider('micgain', 'Input volume', av.micGain) + ctxCheck('mic', 'Mute', !micOn || deaf) : ctxCheck('deaf', 'Deafen', deaf);
+      h += ctxItem('avset', 'gear', 'Voice & video settings');
+      openCtx(rect.left, rect.top, h, (menu) => {
+        // open upwards from bottom-of-screen buttons
+        if (rect.top > window.innerHeight / 2) menu.style.top = Math.max(6, rect.top - menu.offsetHeight - 8) + 'px';
+        menu.querySelectorAll('[data-slide]').forEach((r) => {
+          r.oninput = () => {
+            menu.querySelector(`[data-out="${r.dataset.slide}"]`).textContent = audioPercent(r.value) + '%';
+            setMicGain(r.value);
+          };
+        });
+        menu.onclick = (e) => {
+          const b = e.target.closest('[data-act]');
+          if (!b) return;
+          closeCtx();
+          switch (b.dataset.act) {
+            case 'dev': return pickDevice(kind, devs[+b.dataset.i]);
+            case 'mic': return toggleMic();
+            case 'deaf': return toggleDeaf();
+            case 'avset': return settingsModal('av');
+          }
+        };
+      });
+    };
+    devWait = { token, show, timer: null };
+    const ownList = () => (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices ? navigator.mediaDevices.enumerateDevices() : Promise.resolve([]))
+      .then((l) => show(l.map((d) => ({ kind: d.kind, deviceId: d.deviceId, label: d.label })))).catch(() => show([]));
+    if (voice && voice.iframe && voice.iframe.contentWindow) {
+      voicePost({ getDeviceList: true, cib: 'dischord-devs' });
+      devWait.timer = setTimeout(ownList, 2500); // the call frame did not answer
+    } else ownList();
+  }
+  function pickDevice(kind, d) {
+    if (!d) return;
+    const input = kind === 'audioinput';
+    store.set(input ? 'micLabel' : 'outLabel', d.label || '');
+    if (voice) {
+      // device ids are per-origin, so they come from the call frame's own list and are applied inside it
+      if (input) voicePost({ function: 'eval', value: `if (typeof changeAudioDeviceById === 'function') changeAudioDeviceById(${JSON.stringify(String(d.deviceId))});` });
+      else voicePost({ changeAudioOutputDevice: String(d.deviceId) });
+      const call = voice;
+      scheduleVoice(call, () => syncVoiceState(call), 1500); // re-apply mute / gain after the device swap
+    }
+    toast((input ? 'Microphone: ' : 'Output: ') + (d.label || 'selected'));
+  }
+
+  // ---- channel list menus
+  function renameChannelModal(cid) {
+    const s = server(cur.sid), c = channel(s, cid);
+    if (!c) return;
+    modal(`<h2>Rename channel</h2><label>Channel name</label><input type="text" id="mName" maxlength="40" value="${esc(c.name)}">
+      <div class="actions"><button class="btn link" data-close>Cancel</button><button class="btn primary" id="mOk">Save</button></div>`, () => {
+      const inp = $('mName');
+      inp.select();
+      const ok = () => {
+        let n = inp.value.trim();
+        if (c.type === 'text') n = n.toLowerCase().replace(/\s+/g, '-');
+        if (!n) return;
+        c.name = n.slice(0, 40);
+        bumpServer(s);
+        closeModal();
+      };
+      $('mOk').onclick = ok;
+      inp.onkeydown = (e) => { if (e.key === 'Enter') ok(); };
+    });
+  }
+  function deleteChannelConfirm(cid) {
+    const s = server(cur.sid), c = channel(s, cid);
+    if (!c) return;
+    confirmModal('Delete channel', `Delete ${c.type === 'text' ? '#' : ''}${c.name} for everyone?`, 'Delete channel', () => {
+      s.channels = s.channels.filter((x) => x.id !== c.id);
+      releaseChannelFiles(s.id, c.id);
+      if (voice && voice.sid === s.id && voice.cid === c.id) leaveVoice();
+      if (cur.cid === c.id) selectChannel((s.channels.find((x) => x.type === 'text') || s.channels[0] || {}).id || null);
+      bumpServer(s);
+    });
+  }
+  function copyInvite(s) {
+    const link = inviteLink(s);
+    (navigator.clipboard ? navigator.clipboard.writeText(link) : Promise.reject()).then(() => toast('Invite link copied'), () => { if (s.id === cur.sid) inviteModal(); });
+  }
+  function markServerRead(sid) {
+    const s = server(sid);
+    if (!s) return;
+    s.channels.forEach((c) => { if (c.type === 'text') markRead(sid, c.id); });
+    renderRail(); renderChannels();
+  }
+  function channelMenu(cid, x, y) {
+    const s = server(cur.sid), c = channel(s, cid);
+    if (!c) return;
+    const inIt = !!(voice && voice.sid === s.id && voice.cid === c.id);
+    let h = `<div class="ctx-head"><span>${c.type === 'text' ? '# ' : ''}${esc(c.name)}</span></div>`;
+    if (c.type === 'text') h += ctxItem('read', 'check', 'Mark as read');
+    else h += inIt ? ctxItem('leave', 'hangup', 'Disconnect', 'danger') : ctxItem('join', 'speaker', 'Join voice') + ctxItem('joincam', 'camera', 'Join with camera');
+    h += ctxItem('invite', 'userPlus', 'Invite people') + '<div class="ctx-sep"></div>';
+    h += ctxItem('rename', 'edit', 'Rename channel') + ctxItem('del', 'trash', 'Delete channel', 'danger');
+    openCtx(x, y, h, (menu) => {
+      menu.onclick = (e) => {
+        const b = e.target.closest('[data-act]');
+        if (!b) return;
+        closeCtx();
+        switch (b.dataset.act) {
+          case 'read': markRead(s.id, c.id); renderRail(); return renderChannels();
+          case 'join': selectChannel(c.id); return joinVoice(s.id, c.id, false);
+          case 'joincam': selectChannel(c.id); return joinVoice(s.id, c.id, true);
+          case 'leave': return leaveVoice();
+          case 'invite': return inviteModal();
+          case 'rename': return renameChannelModal(c.id);
+          case 'del': return deleteChannelConfirm(c.id);
+        }
+      };
+    });
+  }
+  // empty space in the channel list, a category header, or the server header
+  function serverAreaMenu(x, y) {
+    const s = server(cur.sid);
+    if (!s) return;
+    const h = `<div class="ctx-head"><span>${esc(s.name)}</span></div>` +
+      ctxItem('addText', 'hash', 'Create text channel') + ctxItem('addVoice', 'speaker', 'Create voice channel') +
+      ctxItem('invite', 'userPlus', 'Invite people') + ctxItem('read', 'check', 'Mark server as read') + '<div class="ctx-sep"></div>' +
+      ctxItem('rename', 'edit', 'Rename server') + ctxItem('leave', 'logout', 'Leave server', 'danger');
+    openCtx(x, y, h, (menu) => {
+      menu.onclick = (e) => {
+        const b = e.target.closest('[data-act]');
+        if (!b) return;
+        closeCtx();
+        switch (b.dataset.act) {
+          case 'addText': return channelModal('text');
+          case 'addVoice': return channelModal('voice');
+          case 'invite': return inviteModal();
+          case 'read': return markServerRead(s.id);
+          case 'rename': return renameModal();
+          case 'leave': return confirmLeave(s);
+        }
+      };
+    });
+  }
+  const confirmLeave = (s) => confirmModal(`Leave '${s.name}'`, 'You can rejoin later with an invite link. Your local message history for this server will be removed.', 'Leave server', () => leaveServer(s.id));
+  function railMenu(sid, x, y) {
+    const s = server(sid);
+    if (!s) return;
+    const h = `<div class="ctx-head"><span>${esc(s.name)}</span></div>` +
+      ctxItem('read', 'check', 'Mark as read') + ctxItem('invite', 'userPlus', 'Copy invite link') + '<div class="ctx-sep"></div>' +
+      ctxItem('leave', 'logout', 'Leave server', 'danger');
+    openCtx(x, y, h, (menu) => {
+      menu.onclick = (e) => {
+        const b = e.target.closest('[data-act]');
+        if (!b) return;
+        closeCtx();
+        switch (b.dataset.act) {
+          case 'read': return markServerRead(s.id);
+          case 'invite': return copyInvite(s);
+          case 'leave': return confirmLeave(s);
+        }
+      };
+    });
+  }
+
   function userMenu(uid, x, y) {
     const self = uid === me.id;
     const sid = cur.sid;
@@ -1958,11 +2126,10 @@
     const m = (getMsgs(cur.sid)[cur.cid] || []).find((z) => z.id === mid);
     if (!m) return;
     const mine = m.a.id === me.id;
-    let h = `<div class="ctx-emojis">${REACTS.slice(0, 8).map((e) => `<button data-emo="${e}">${e}</button>`).join('')}</div>`;
-    h += ctxItem('reply', 'reply', 'Reply');
+    let h = `<div class="ctx-emojis">${REACTS.slice(0, 6).map((e) => `<button data-emo="${e}">${e}</button>`).join('')}</div>`;
+    h += ctxItem('react', 'smile', 'Add reaction') + ctxItem('reply', 'reply', 'Reply');
     if (m.text) h += ctxItem('copy', 'copy', 'Copy text');
-    if (m.file && window.DischordImages.isImage(m.file)) h += ctxItem('openimg', 'image', 'Download original');
-    else if (m.img) h += ctxItem('openimg', 'image', 'Download image');
+    if (m.img) h += ctxItem('openimg', 'image', 'Open image') + ctxItem('saveimg', 'download', 'Download image');
     if (!mine) h += ctxItem('mention', 'at', 'Mention ' + esc(m.a.name));
     if (mine && m.text) h += ctxItem('edit', 'edit', 'Edit message');
     if (mine) h += ctxItem('del', 'trash', 'Delete message', 'danger');
@@ -1974,9 +2141,11 @@
         if (!b) return;
         closeCtx();
         switch (b.dataset.act) {
+          case 'react': return emojiPicker({ getBoundingClientRect: () => ({ left: x, right: x, top: y, bottom: y }) }, (emo) => toggleReaction(mid, emo));
           case 'reply': return replyToMessage(mid);
           case 'copy': navigator.clipboard && navigator.clipboard.writeText(m.text); return toast('Copied');
-          case 'openimg': return m.file ? fileTransfers.download(cur.sid, m.cid, m.id) : downloadLegacyImage(cur.sid, m.img.id, m.cid, m.id);
+          case 'openimg': return openImage(cur.sid, m.cid, m.id);
+          case 'saveimg': return saveImage(cur.sid, m.cid, m.id);
           case 'mention': { const inp = $('msgInput'); inp.value += '@' + m.a.name.replace(/\s+/g, '') + ' '; return inp.focus(); }
           case 'edit': return editMessage(mid);
           case 'del': return deleteMessage(mid);
@@ -2083,11 +2252,12 @@
       const edited = m.ed ? ' <span class="time">(edited)</span>' : '';
       const imageStateKey = imageMessageKey(s.id, m.cid, m.id);
       const failedPreview = imageErrors.has(imageStateKey);
-      const isImage = !!m.img || (m.file && window.DischordImages.isImage(m.file));
-      const img = m.img ? `<button type="button" class="msg-img ${failedPreview ? '' : 'loading'}" style="aspect-ratio:${m.img.w}/${m.img.h};width:min(100%, ${Math.min(420, m.img.w)}px)" data-image-open="${esc(m.id)}" aria-label="Open image preview">
-        <img data-img="${esc(m.img.id)}" data-img-sid="${esc(s.id)}" data-img-cid="${esc(m.cid)}" data-img-mid="${esc(m.id)}" loading="lazy" decoding="async" alt="${esc(m.file ? m.file.name : 'Shared image')}"><span class="image-preview-status" role="status">${failedPreview ? 'Preview unavailable. Someone with it must be online.' : 'Loading image preview…'}</span></button>` : m.file && isImage
-        ? `<div class="image-preview-placeholder">${icon('image')}<span role="status">${imagePreparing.has(imageStateKey) && !failedPreview ? 'Preparing image preview…' : 'Image preview unavailable. Download the original to open it.'}</span><div class="image-download" data-image-download="${esc(m.id)}" data-image-sid="${esc(s.id)}" data-image-cid="${esc(m.cid)}">${imageDownloadContent(s.id, m)}</div></div>` : '';
-      const file = m.file && !isImage ? `<div class="file-card" data-file-card="${esc(m.id)}">${fileCardContent(s.id, m)}</div>` : '';
+      const imgW = m.img ? Math.max(48, Math.round(m.img.w * Math.min(1, 550 / m.img.w, 350 / m.img.h))) : 0;
+      const img = m.img ? `<button type="button" class="msg-img ${failedPreview ? '' : 'loading'}" style="aspect-ratio:${m.img.w}/${m.img.h};width:min(100%, ${imgW}px)" data-image-open="${esc(m.id)}" aria-label="Open image preview">
+        <img data-img="${esc(m.img.id)}" data-img-sid="${esc(s.id)}" data-img-cid="${esc(m.cid)}" data-img-mid="${esc(m.id)}" loading="lazy" decoding="async" alt="${esc(m.file ? m.file.name : 'Shared image')}"><span class="image-preview-status" role="status">${failedPreview ? 'Preview unavailable. Someone with it must be online.' : 'Loading image preview…'}</span><span class="img-save" data-image-save="${esc(m.id)}" role="button" tabindex="0" title="Download image">${icon('download')}</span></button>` : m.file && window.DischordImages.isImage(m.file)
+        ? `<div class="image-preview-placeholder" role="status">${icon('image')}<span>${imagePreparing.has(imageStateKey) && !failedPreview ? 'Preparing image preview…' : 'Image preview unavailable.'}</span></div>` : '';
+      // images are preview-only; every other file is a card that transfers on Download
+      const file = m.file && !window.DischordImages.isImage(m.file) ? `<div class="msg-file" data-file-card="${esc(m.id)}">${fileCardContent(s.id, m)}</div>` : '';
       const reply = renderReply(m);
       const text = m.text ? `<div class="text">${formatText(m.text)}${edited}</div>` : '';
       const re = renderRe(m);
@@ -2312,7 +2482,7 @@
         </div>
         <label class="inline-check"><input type="checkbox" id="aStats" ${av.showStats ? 'checked' : ''}> Always show stream stats (resolution · fps · bitrate · codec) on video tiles</label>
         <p class="hint">Higher bitrate improves detail, and every viewer needs that much upload bandwidth. Change any stream's quality from its tile. ${voice ? 'Camera changes reconnect your call. Screen share changes apply after you stop and share again.' : ''}</p>
-        ${voice ? '<button class="btn" id="aDevices">Choose microphone / camera…</button>' : '<p class="hint">Join a voice channel to pick your microphone and camera.</p>'}
+        ${voice ? '<button class="btn" id="aDevices">Choose camera…</button><p class="hint">Use the small arrows beside the microphone and headphones buttons to choose your input and output devices.</p>' : '<p class="hint">Join a voice channel to pick your camera. Use the small arrows beside the microphone and headphones buttons to choose your input and output devices.</p>'}
       </div>
       <div class="actions"><button class="btn link" data-close>Cancel</button><button class="btn primary" id="mOk">Save</button></div>`, () => {
       const show = (t) => {
@@ -2468,7 +2638,7 @@
       case 'addText': channelModal('text'); break;
       case 'addVoice': channelModal('voice'); break;
       case 'rename': renameModal(); break;
-      case 'leave': confirmModal(`Leave '${s.name}'`, 'You can rejoin later with an invite link. Your local message history for this server will be removed.', 'Leave server', () => leaveServer(s.id)); break;
+      case 'leave': confirmLeave(s); break;
     }
   };
 
@@ -2476,17 +2646,7 @@
     const add = e.target.closest('[data-add]');
     if (add) return channelModal(add.dataset.add);
     const del = e.target.closest('[data-delc]');
-    if (del) {
-      e.stopPropagation();
-      const s = server(cur.sid), c = channel(s, del.dataset.delc);
-      return confirmModal('Delete channel', `Delete ${c.type === 'text' ? '#' : ''}${c.name} for everyone?`, 'Delete channel', () => {
-        s.channels = s.channels.filter((x) => x.id !== c.id);
-        releaseChannelFiles(s.id, c.id);
-        if (voice && voice.sid === s.id && voice.cid === c.id) leaveVoice();
-        if (cur.cid === c.id) selectChannel((s.channels.find((x) => x.type === 'text') || s.channels[0] || {}).id || null);
-        bumpServer(s);
-      });
-    }
+    if (del) { e.stopPropagation(); return deleteChannelConfirm(del.dataset.delc); }
     const sv = e.target.closest('[data-sid]');
     if (sv) return selectServer(sv.dataset.sid);
     const ch = e.target.closest('[data-cid]');
@@ -2499,6 +2659,8 @@
   };
 
   $('messages').onclick = (e) => {
+    const save = e.target.closest('[data-image-save]');
+    if (save) { e.stopPropagation(); return saveImage(cur.sid, cur.cid, save.dataset.imageSave); }
     const image = e.target.closest('[data-image-open]');
     if (image) return openImage(cur.sid, cur.cid, image.dataset.imageOpen);
     const rp = e.target.closest('[data-reply]');
@@ -2509,8 +2671,6 @@
     if (download) return fileTransfers.download(cur.sid, cur.cid, download.dataset.fileDownload);
     const cancel = e.target.closest('[data-file-cancel]');
     if (cancel) return fileTransfers.cancel(cur.sid, cur.cid, cancel.dataset.fileCancel);
-    const legacy = e.target.closest('[data-legacy-download]');
-    if (legacy) return downloadLegacyImage(cur.sid, legacy.dataset.legacyDownload, cur.cid, legacy.dataset.legacyMid);
     const rt = e.target.closest('[data-rtoggle]');
     if (rt) return toggleReaction(rt.dataset.rtoggle, rt.dataset.e);
     const ra = e.target.closest('[data-react]');
@@ -2559,6 +2719,9 @@
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && focusUid && $('modalBack').classList.contains('hidden')) { focusUid = null; renderStage(); } });
   $('devDone').onclick = () => { if (!voice) return; voice.devices = false; voicePost({ toggleSettings: false }); renderStage(); };
+  for (const [id, kind] of [['micCaret', 'audioinput'], ['cbMicCaret', 'audioinput'], ['deafCaret', 'audiooutput'], ['cbDeafCaret', 'audiooutput']]) {
+    $(id).onclick = (e) => { e.stopPropagation(); deviceMenu($(id), kind); };
+  }
   $('micBtn').onclick = toggleMic;
   $('cbMic').onclick = toggleMic;
   $('deafBtn').onclick = toggleDeaf;
@@ -2569,9 +2732,22 @@
 
   // right-click menus
   document.addEventListener('contextmenu', (e) => {
+    const mic = e.target.closest('#cbMic, #micBtn, #micCaret, #cbMicCaret');
+    if (mic) { e.preventDefault(); return deviceMenu(mic, 'audioinput'); }
+    const out = e.target.closest('#cbDeaf, #deafBtn, #deafCaret, #cbDeafCaret');
+    if (out) { e.preventDefault(); return deviceMenu(out, 'audiooutput'); }
     const u = e.target.closest('#channelList .voice-user[data-uid], #members .mem[data-uid], #tiles .tile[data-key], [data-ctx="user"][data-uid], #userPanel');
     const msg = !u && e.target.closest('#messages .msg[data-mid]');
-    if (!u && !msg) return closeCtx();
+    // never show the browser's own menu, except in text fields where it provides paste / spellcheck
+    if (!e.target.closest('input, textarea, [contenteditable="true"]')) e.preventDefault();
+    if (!u && !msg) {
+      const chan = e.target.closest('#channelList .chan[data-cid]');
+      if (chan) return channelMenu(chan.dataset.cid, e.clientX, e.clientY);
+      const rail = e.target.closest('#serverList [data-sid]');
+      if (rail) return railMenu(rail.dataset.sid, e.clientX, e.clientY);
+      if (e.target.closest('#channelList, #serverHeader') && server(cur.sid)) return serverAreaMenu(e.clientX, e.clientY);
+      return closeCtx();
+    }
     e.preventDefault();
     if (msg) return messageMenu(msg.dataset.mid, e.clientX, e.clientY);
     const uid = u.id === 'userPanel' ? me.id : (u.dataset.uid || (u.dataset.key || '').split(':')[0]);
@@ -2599,6 +2775,41 @@
   $('textView').addEventListener('drop', (e) => { e.preventDefault(); $('textView').classList.remove('drop'); addAttachments(e.dataTransfer.files); });
   $('attachBar').onclick = (e) => { const b = e.target.closest('[data-rm]'); if (b) { pending.splice(+b.dataset.rm, 1); renderAttachBar(); } };
 
+  // drag the inner edge of the channel sidebar / member list to resize; double-click resets
+  const PANEL_MIN = 180, PANEL_MAX = 420;
+  function applyPanelWidths() {
+    for (const [key, prop] of [['sideW', '--side-w'], ['memW', '--mem-w']]) {
+      const w = +store.get(key, 0);
+      $('app').style.setProperty(prop, w ? Math.max(PANEL_MIN, Math.min(PANEL_MAX, w)) + 'px' : ''); // '' falls back to the stylesheet default
+    }
+  }
+  applyPanelWidths();
+  for (const [id, key, panel, fromLeft] of [['sideResizer', 'sideW', 'sidebar', true], ['memResizer', 'memW', 'members', false]]) {
+    const handle = $(id);
+    handle.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      try { handle.setPointerCapture(e.pointerId); } catch { }
+      handle.classList.add('dragging'); document.body.classList.add('resizing');
+      const move = (ev) => {
+        const r = $(panel).getBoundingClientRect();
+        const w = Math.max(PANEL_MIN, Math.min(PANEL_MAX, Math.round(fromLeft ? ev.clientX - r.left : r.right - ev.clientX)));
+        store.set(key, w);
+        applyPanelWidths();
+      };
+      const up = () => {
+        handle.classList.remove('dragging'); document.body.classList.remove('resizing');
+        handle.removeEventListener('pointermove', move);
+        handle.removeEventListener('pointerup', up);
+        handle.removeEventListener('pointercancel', up);
+      };
+      handle.addEventListener('pointermove', move);
+      handle.addEventListener('pointerup', up);
+      handle.addEventListener('pointercancel', up);
+    });
+    handle.addEventListener('dblclick', () => { store.del(key); applyPanelWidths(); });
+  }
+
   // in-call reactions
   $('stripToggle').onclick = () => { hideStrip = !hideStrip; store.set('hideStrip', hideStrip); renderStage(); };
   $('cbReact').onclick = (e) => { e.stopPropagation(); emojiPicker($('cbReact'), sendCallReaction); };
@@ -2622,7 +2833,18 @@
   let pendingInvite = null;
 
   // ---------------------------------------------------------------- timers
-  setInterval(broadcastState, PING_MS);
+  // Heartbeat from a worker: browsers slow main-thread timers in background tabs (to once a minute),
+  // which made people who were presenting from another window look offline to everyone else.
+  (function startHeartbeat() {
+    try {
+      if (typeof Worker !== 'function') throw new Error('no workers');
+      const url = URL.createObjectURL(new Blob(['setInterval(function () { postMessage(0); }, ' + PING_MS + ');'], { type: 'text/javascript' }));
+      const worker = new Worker(url);
+      URL.revokeObjectURL(url);
+      worker.onmessage = broadcastState;
+      worker.onerror = () => { worker.terminate(); setInterval(broadcastState, PING_MS); };
+    } catch { setInterval(broadcastState, PING_MS); }
+  })();
   setInterval(() => {
     renderTyping();
     if (cur.sid) renderPresence();

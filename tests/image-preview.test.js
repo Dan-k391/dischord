@@ -13,7 +13,7 @@ const tests = [];
 const test = (name, run) => tests.push({ name, run });
 const dataURL = (bytes, type = 'webp') => 'data:image/' + type + ';base64,' + Buffer.from(bytes).toString('base64');
 const smallURL = dataURL(Buffer.from('small raster preview'));
-const oversizedURL = dataURL(Buffer.alloc(270000));
+const oversizedURL = dataURL(Buffer.alloc(4600000));
 
 function fixture(options = {}) {
   const state = { bitmapCalls: 0, bitmapCloses: 0, images: [], urls: [], revoked: [], canvases: [], encodes: [], draws: [] };
@@ -82,7 +82,7 @@ test('image detection accepts MIME and supported filename hints while leaving ot
 
 test('preview URLs require bounded canonical raster data and reject executable or remote URLs', () => {
   const { api } = fixture();
-  assert.strictEqual(api.MAX_PREVIEW, 350000);
+  assert.strictEqual(api.MAX_PREVIEW, 6000000);
   for (const type of ['png', 'jpeg', 'webp', 'gif']) assert(api.validURL(dataURL(Buffer.from([0, 255, 1]), type)));
   for (const url of [null, 'https://example.test/image.png', 'javascript:alert(1)',
     'data:text/html;base64,PGgxPng8L2gxPg==', 'data:image/svg+xml;base64,PHN2Zy8+',
@@ -101,12 +101,12 @@ test('a canonical 267 KB thumbnail validates without overflowing the regular-exp
 test('a large original receives a bounded aspect-preserving preview and releases its bitmap/canvas', async () => {
   const { api, file, state } = fixture();
   const preview = await api.createPreview(file);
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(preview)), { url: smallURL, w: 1024, h: 512, n: smallURL.length, preview: 1 });
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(preview)), { url: smallURL, w: 4096, h: 2048, n: smallURL.length, preview: 1 });
   assert.strictEqual(state.bitmapCalls, 1);
   assert.strictEqual(state.bitmapCloses, 1);
   assert.strictEqual(state.draws[0].w / state.draws[0].h, 2);
   assert.strictEqual(state.encodes[0].type, 'image/webp');
-  assert.strictEqual(state.encodes[0].quality, 0.8);
+  assert.strictEqual(state.encodes[0].quality, 0.9);
   assert.strictEqual(state.canvases[0].width, 0);
   assert.strictEqual(state.canvases[0].height, 0);
   assert.strictEqual(state.urls.length, 0);
@@ -114,24 +114,24 @@ test('a large original receives a bounded aspect-preserving preview and releases
 
 test('an oversized preview lowers quality then dimensions without increasing either side', async () => {
   const { api, file, state } = fixture({ width: 9000, height: 4000,
-    encode: (attempt) => attempt.w === 1024 ? oversizedURL : smallURL });
+    encode: (attempt) => attempt.w === 4096 ? oversizedURL : smallURL });
   const preview = await api.createPreview(file);
   assert(preview.n <= api.MAX_PREVIEW);
-  assert.deepStrictEqual(state.encodes.slice(0, 4).map((attempt) => attempt.quality), [0.8, 0.65, 0.5, 0.35]);
-  assert.strictEqual(state.encodes[4].w, 768);
+  assert.deepStrictEqual(state.encodes.slice(0, 3).map((attempt) => attempt.quality), [0.9, 0.7, 0.5]);
+  assert.strictEqual(state.encodes[3].w, 3072);
   assert(Math.abs(preview.w / preview.h - 9000 / 4000) < 0.01);
-  assert(state.encodes.every((attempt) => attempt.w <= 1024 && attempt.h <= 1024));
+  assert(state.encodes.every((attempt) => attempt.w <= 4096 && attempt.h <= 4096));
   assert.strictEqual(state.bitmapCloses, 1);
   assert.strictEqual(state.canvases[0].width, 0);
 });
 
 test('a PNG-only browser downscales directly instead of retrying ineffective quality changes', async () => {
-  const largePNG = dataURL(Buffer.alloc(270000), 'png'), smallPNG = dataURL(Buffer.from('png preview'), 'png');
+  const largePNG = dataURL(Buffer.alloc(4600000), 'png'), smallPNG = dataURL(Buffer.from('png preview'), 'png');
   const { api, file, state } = fixture({ width: 2048, height: 2048,
-    encode: (attempt) => attempt.w > 576 ? largePNG : smallPNG });
+    encode: (attempt) => attempt.w > 1152 ? largePNG : smallPNG });
   const preview = await api.createPreview(file);
-  assert.deepStrictEqual(state.encodes.map((attempt) => attempt.w), [1024, 768, 576]);
-  assert(state.encodes.every((attempt) => attempt.quality === 0.8));
+  assert.deepStrictEqual(state.encodes.map((attempt) => attempt.w), [2048, 1536, 1152]);
+  assert(state.encodes.every((attempt) => attempt.quality === 0.9));
   assert.strictEqual(preview.w, preview.h);
   assert.strictEqual(preview.url, smallPNG);
 });

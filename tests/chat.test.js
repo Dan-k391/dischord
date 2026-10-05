@@ -32,7 +32,7 @@ function eventTarget(target = {}) {
 function createElement(tag = 'div', onClick = () => {}) {
   const classes = new Set();
   return eventTarget({
-    tagName: tag.toUpperCase(), children: [], dataset: {}, style: {},
+    tagName: tag.toUpperCase(), children: [], dataset: {}, style: { setProperty(name, value) { this[name] = value; } },
     innerHTML: '', textContent: '', value: '', scrollHeight: 100,
     scrollTop: 0, clientHeight: 100,
     classList: {
@@ -208,9 +208,12 @@ function createApp(windowOverrides = {}) {
   window.captureWire = (envelope) => sent.push({ sid: 'testserver', packet: plain(envelope.sendData.dischord), uuid: envelope.UUID });
   const source = appSource.replace(boot, '').replace(/\}\)\(\);\s*$/, hooks + '\n})();');
   vm.runInContext(source, context, { filename: 'app.js' });
+  // The one-time startup cleanup of files left in IndexedDB by older versions opens the database once;
+  // everything the tests do afterwards must still leave it untouched.
+  const idbBaseline = idbOpens;
   return { api: window.chatTest, sent, downloads, objectUrls, persisted, stored, document, advance,
     imageStored, imagePuts, imageGets, get imageElements() { return imageElements; },
-    get idbOpens() { return idbOpens; },
+    get idbOpens() { return idbOpens - idbBaseline; },
     message(overrides = {}) {
       return { id: 'message1', cid: 'general', ts: 500, a: { id: 'bob', name: 'Bob', color: '#57f287' }, text: 'Original message', ...overrides };
     },
@@ -423,14 +426,32 @@ test('image preview: older image history displays an inline preview and requests
   app.api.addMsg('testserver', message);
   app.api.renderMessages();
   await settle();
-  assert(!app.node('messages').innerHTML.includes('class="file-card"'));
+  assert(!/data-file-download|legacy-download/.test(app.node('messages').innerHTML), 'Images have no file-transfer download');
+  assert(app.node('messages').innerHTML.includes('data-image-save='), 'The preview can be saved');
   assert(app.node('messages').innerHTML.includes('data-img='));
   assert.deepStrictEqual(app.sent.map((item) => item.packet.t), ['imgreq']);
   assert.strictEqual(app.sent[0].packet.cid, 'general');
   assert.strictEqual(app.sent[0].packet.mid, message.id);
-  assert.strictEqual(app.idbOpens, 1);
+  assert.strictEqual(app.idbOpens, 0, 'The cache lookup reuses the connection opened at startup');
   assert.strictEqual(app.downloads.length, 0);
   assert.strictEqual(app.objectUrls.length, 0);
+});
+
+test('images are saved from their preview while other files keep the download card', async () => {
+  const app = createApp();
+  const url = 'data:image/png;base64,' + Buffer.alloc(2000, 0x41).toString('base64');
+  const image = previewMessage(app, url, { id: 'imagemsg' });
+  const doc = receivedFile(app, 4096);
+  app.api.addMsg('testserver', image);
+  app.api.renderMessages();
+  await settle();
+  const html = app.node('messages').innerHTML;
+  assert(html.includes('data-image-open='), 'The image still shows its preview');
+  assert.strictEqual((html.match(/data-file-download=/g) || []).length, 1, 'Only the non-image file uses the transfer download');
+  assert(html.includes('data-image-save='), 'The image offers saving its preview');
+  assert(html.includes('class="msg-file"') && html.includes('recording.mp4'));
+  assert(!html.includes('picture.png</div>'), 'No file card for the image');
+  assert(!/data-legacy-download|Download original/.test(html));
 });
 
 test('image preview: unsolicited legacy chunks cannot cache or save bytes', () => {
@@ -449,7 +470,7 @@ test('image preview: known thumbnail chunks render and cache automatically witho
   const url = 'data:image/png;base64,' + Buffer.alloc(12000, 0x83).toString('base64');
   const message = previewMessage(app, url);
   app.api.addMsg('testserver', message);
-  app.api.requestImg('testserver', message.img.id, false, message.cid, message.id);
+  app.api.requestImg('testserver', message.img.id, message.cid, message.id);
   assert.deepStrictEqual(app.sent.map((item) => item.packet.t), ['imgreq']);
   const chunks = imageChunks(message, url);
   app.api.onImgChunk('differentserver', chunks[0], 'bobuuid');
@@ -483,10 +504,10 @@ test('image preview: identical image IDs in different channels retain independen
   const other = previewMessage(app, url, { id: 'message2', cid: 'other' });
   app.api.addMsg('testserver', general);
   app.api.addMsg('testserver', other);
-  app.api.requestImg('testserver', general.img.id, false, general.cid, general.id);
+  app.api.requestImg('testserver', general.img.id, general.cid, general.id);
   app.api.onImgChunk('testserver', imageChunks(general, url)[0], 'bobuuid');
   await settle();
-  app.api.requestImg('testserver', other.img.id, false, other.cid, other.id);
+  app.api.requestImg('testserver', other.img.id, other.cid, other.id);
   app.api.onImgChunk('testserver', imageChunks(general, url)[0], 'bobuuid');
   assert.strictEqual(app.api.imgCache.size, 1);
   assert.strictEqual(app.api.imgCache.get(app.api.imageKey('testserver', other)), undefined);
@@ -546,7 +567,7 @@ test('image preview: invalid raster payloads never enter the cache or browser do
   const app = createApp(), url = 'data:text/html;base64,' + Buffer.from('<script>bad()</script>').toString('base64');
   const message = previewMessage(app, url);
   app.api.addMsg('testserver', message);
-  app.api.requestImg('testserver', message.img.id, false, message.cid, message.id);
+  app.api.requestImg('testserver', message.img.id, message.cid, message.id);
   app.api.onImgChunk('testserver', imageChunks(message, url)[0], 'bobuuid');
   await settle();
   assert.strictEqual(app.api.imgCache.size, 0);
