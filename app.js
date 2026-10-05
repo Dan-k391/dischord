@@ -547,17 +547,26 @@
     } catch { }
   }
 
-  // loudness from VDO.Ninja is keyed by stream id; map it back to users
+  // loudness from VDO.Ninja is keyed by stream id (including our own); map it back to users.
+  // A slow-moving noise floor per stream keeps background hum from lighting people up.
+  const floor = {};
   function onLoudness(obj) {
     if (!obj || typeof obj !== 'object' || !voice) return;
     const ms = members[voice.sid] || {};
-    const byVs = {};
+    const byVs = { [voice.vs]: me.id };
     for (const id in ms) if (ms[id].vs) byVs[ms[id].vs] = id;
     let changed = false;
     for (const key in obj) {
       const uid = byVs[key];
       const level = +obj[key];
-      if (uid && level > 5) { if (!(speaking[uid] > now())) changed = true; speaking[uid] = now() + 500; }
+      if (!uid || !isFinite(level)) continue;
+      const f = floor[key] == null ? level : floor[key];
+      floor[key] = level < f ? f * 0.7 + level * 0.3 : f * 0.98 + level * 0.02;
+      if (uid === me.id && (!micOn || deaf)) continue;
+      if (level > Math.max(18, floor[key] + 10)) {
+        if (!(speaking[uid] > now())) changed = true;
+        speaking[uid] = now() + 450;
+      }
     }
     if (changed) paintSpeaking();
   }
@@ -688,8 +697,9 @@
     renderMembers();
     renderUserPanel();
     renderControls();
+    renderStage();
   }
-  function renderPresence() { renderChannels(); renderMembers(); renderUserPanel(); renderVoiceIdle(); }
+  function renderPresence() { renderChannels(); renderMembers(); renderUserPanel(); renderVoiceIdle(); renderStage(); }
 
   function renderRail() {
     if (!me) return;
@@ -772,6 +782,20 @@
       renderMessages();
       renderTyping();
     } else renderVoiceIdle();
+  }
+
+  // Audio-only calls: show Discord-style avatar tiles over the (blank) VDO.Ninja stage.
+  function renderStage() {
+    if (!voice) return;
+    const who = voiceOccupants(voice.sid, voice.cid);
+    const anyVideo = voice.devices || who.some((o) => o.st && (o.st.c || o.st.s));
+    $('devDone').classList.toggle('hidden', !voice.devices);
+    const tiles = $('voiceTiles');
+    tiles.classList.toggle('hidden', anyVideo);
+    if (anyVideo) return;
+    tiles.dataset.n = Math.min(who.length, 9);
+    tiles.innerHTML = who.map((o) => `<div class="tile" data-uid="${esc(o.user.id)}" style="--c:${esc(o.user.color)}">${avatar(o.user, false, 'big')}<div class="tile-name">${o.st && (o.st.m || o.st.d) ? icon(o.st.d ? 'deaf' : 'micOff', 'mini off') : ''}${esc(o.user.name)}</div></div>`).join('');
+    paintSpeaking();
   }
 
   function renderVoiceIdle() {
@@ -985,7 +1009,7 @@
       show(tab);
       wireColors((c) => (color = c));
       if ($('mNotif')) $('mNotif').onclick = () => Notification.requestPermission().then(() => toast('Notifications: ' + Notification.permission));
-      if ($('aDevices')) $('aDevices').onclick = () => { closeModal(); showVoice(); voicePost({ toggleSettings: 'toggle' }); };
+      if ($('aDevices')) $('aDevices').onclick = () => { closeModal(); showVoice(); voice.devices = true; voicePost({ toggleSettings: true }); renderStage(); };
       $('mOk').onclick = () => {
         const name = $('mName').value.trim().slice(0, 32);
         if (!name) { show('profile'); return $('mName').focus(); }
@@ -1176,6 +1200,7 @@
   $('vsShare').onclick = toggleShare;
   $('cbShare').onclick = toggleShare;
   $('voiceWhere').onclick = showVoice;
+  $('devDone').onclick = () => { if (!voice) return; voice.devices = false; voicePost({ toggleSettings: false }); renderStage(); };
   $('micBtn').onclick = toggleMic;
   $('cbMic').onclick = toggleMic;
   $('deafBtn').onclick = toggleDeaf;
