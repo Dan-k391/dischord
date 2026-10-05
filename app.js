@@ -43,7 +43,7 @@
   const IMG_CHUNK = 14000;        // chars per image chunk over the data channel
   const IMG_MAX = 4500000;        // max data-URL length (~3.3 MB image)
 
-  const AV_DEFAULTS = { camQ: '720', camFps: 30, camBr: 2500, ssQ: '1080', ssFps: 60, ssBr: 12000, ssHint: 'motion', recvCap: 0, codec: 'h264', selfPreview: 'low', showStats: false, micGain: 100, ssAudio: false };
+  const AV_DEFAULTS = { camQ: '720', camFps: 30, camBr: 2500, ssQ: '1080', ssFps: 60, ssBr: 12000, ssHint: 'motion', recvCap: 0, codec: 'h264', selfPreview: 'low', showStats: false, micGain: 100, ssAudio: true };
   function audioPercent(value) {
     const n = typeof value === 'number' || (typeof value === 'string' && value.trim()) ? Number(value) : NaN;
     return Number.isFinite(n) ? Math.max(0, Math.min(200, Math.round(n))) : 100;
@@ -176,6 +176,7 @@
   delete av.sendBr; delete av.recvBr;
   // Keep explicit saved choices, including Auto codec. Fresh profiles use the FPS-oriented defaults.
   if (!av.v8 || !av.v9) { av.v8 = 1; av.v9 = 1; store.set('av', av); }
+  if (!av.v48) { av.ssAudio = true; av.v48 = 1; store.set('av', av); } // v48: computer sound is shared again, guarded by the call filter
   const cur = { sid: store.get('lastSid', null), cid: null };
   const msgs = {};       // sid -> { cid: [msg] }
   const known = {};      // sid -> { userId: user }   (persisted)
@@ -1261,10 +1262,9 @@
     return VDO + '?' + p.toString() + `&screenshare&autostart&noaudio&novideo&nopreview&nocontrolbar&hideheader&chatbutton=false&nohangupbutton` +
       `&quality=${q}&screensharequality=${q}&maxframerate=${av.ssFps}&screensharefps=${av.ssFps}` +
       `&outboundvideobitrate=${av.ssBr}&maxvideobitrate=${av.ssBr}&screensharecontenthint=${hint}&contenthint=${hint}` +
-      // Whole-computer sound includes the voices of this call, which everyone then hears a second time.
-      // Unless the sharer asks for it, the browser is told not to offer it (a shared tab keeps its own sound).
-      // When it is on, echo cancellation is requested on the captured sound as a best effort.
-      (av.ssAudio ? '&aec=1' : '&systemaudio=exclude');
+      // Whole-computer sound includes the voices of this call. It is only sent when the browser filters
+      // the call out of it (see checkShareAudio); with the switch off the browser does not offer it at all.
+      (av.ssAudio ? '' : '&systemaudio=exclude');
   }
 
   // Each video/screen on the stage is its own view-only connection, so we control layout + bitrate.
@@ -1489,6 +1489,31 @@
     window.__dischordOwnAudio = true;
     try { window.parent.postMessage({ dischordOwnAudio: 'ready' }, '*'); } catch (_) { }
   }
+  // Runs inside the share frame once sharing has started. Whole-screen sound is kept only if the browser
+  // confirms it is filtering this page's audio out of it; otherwise it is silenced, because it would carry
+  // everyone's voice straight back to them. A shared tab or window has no call audio in it and is left alone.
+  function shareAudioCheck() {
+    var report = { audio: false, filtered: false, silenced: false, surface: '' };
+    try {
+      var stream = typeof session !== 'undefined' && session ? session.streamSrc : null;
+      var video = stream && stream.getVideoTracks()[0];
+      report.surface = (video && video.getSettings && video.getSettings().displaySurface) || '';
+      var tracks = stream ? stream.getAudioTracks() : [];
+      report.audio = tracks.length > 0;
+      for (var i = 0; i < tracks.length; i++) {
+        var settings = tracks[i].getSettings ? tracks[i].getSettings() : {};
+        if (settings.restrictOwnAudio === true) report.filtered = true;
+        else if (report.surface === 'monitor' || report.surface === '') { tracks[i].enabled = false; report.silenced = true; }
+      }
+    } catch (error) { report.error = String(error && error.message || error); }
+    try { window.parent.postMessage({ dischordShareAudio: report }, '*'); } catch (_) { }
+  }
+  function checkShareAudio(frame, origin) {
+    try { frame.contentWindow.postMessage({ function: 'eval', value: '(' + shareAudioCheck.toString() + ')();' }, origin); } catch { }
+  }
+  function onShareAudioReport(r) {
+    if (r && r.silenced) toast("Computer sound was left out of this share: this browser can't filter the call's voices out of it, so everyone would hear themselves. A recent Chrome or Edge can.", 12000);
+  }
   function protectShareAudio(frame, origin) {
     const code = '(' + shareOwnAudioPatch.toString() + ')();';
     let tries = 0;
@@ -1701,6 +1726,7 @@
     }
     if (voice && voice.ssFrame && e.source === voice.ssFrame.contentWindow) {
       if (d.dischordOwnAudio === 'ready') { voice.ssFrame.dataset.ownAudio = 'ready'; return; }
+      if (d.dischordShareAudio) { onShareAudioReport(d.dischordShareAudio); return; }
       const state = voice.ssQuality;
       if (d.dischordScreenQuality && state && state.pending && d.dischordScreenQuality.requestId === state.pending.requestId && e.origin === state.origin) {
         finishShareQuality(state, d.dischordScreenQuality);
@@ -1713,6 +1739,7 @@
           if (state && state.pending) state.pending.stoppedDuringRestart = false;
           voice.ss = true; broadcastState(); renderControls(); renderPresence();
           updateScreenShareQuality();
+          { const frame = voice.ssFrame, origin = (state && state.origin) || e.origin; setTimeout(() => { if (voice && voice.ssFrame === frame) checkShareAudio(frame, origin); }, 600); }
         }
         else if (state && state.pending && state.pending.operation === 'restart') state.pending.stoppedDuringRestart = true;
         else stopShare(); // cancelled the picker, or hit Chrome's "Stop sharing"
@@ -2577,7 +2604,7 @@
     h += '<div class="ctx-sep"></div>' + ctxSelect('ssQ', 'Resolution', av.ssQ, SS_RES) + ctxSelect('ssFps', 'Frame rate', av.ssFps, fpsOpts([5, 15, 30, 60])) +
       ctxSelect('ssBr', 'Bitrate', av.ssBr, SS_BRS.map((k) => [k, mbps(k)])) + ctxSelect('ssHint', 'Optimize for', av.ssHint, [['motion', 'Smoothness'], ['detail', 'Clarity']]);
     h += ctxCheck('ssAudio', 'Share computer sound', !!av.ssAudio);
-    h += `<div class="ctx-note">${av.ssAudio ? 'When you share your whole screen, people in the call may hear their own voices come back. Sharing a browser tab avoids that.' : 'Off: a shared browser tab still shares its own sound, without echo.'}</div>`;
+    h += `<div class="ctx-note">${av.ssAudio ? 'The voices of this call are filtered out of the shared sound. If your browser cannot do that, the sound is left out and you are told.' : 'Off: only a shared browser tab keeps its own sound.'}</div>`;
     if (sharing) h += '<div class="ctx-note">Picture settings apply to your current share. Sound applies the next time you share.</div>';
     h += ctxItem('avset', 'gear', 'Voice & video settings');
     openAnchored(anchor, h, (menu) => {
@@ -3377,7 +3404,7 @@
           ssAudio: !!av.ssAudio, // set from the screen share menu, not this form
           micGain: audioPercent($('aMicGain').value),
           camQ: $('aCamQ').value, camFps: +$('aCamFps').value, camBr: +$('aCamBr').value,
-          ssQ: $('aSsQ').value, ssFps: +$('aSsFps').value, ssBr: +$('aSsBr').value, ssHint: $('aSsHint').value, recvCap: +$('aRecv').value, codec: $('aCodec').value, selfPreview: $('aSelf').value, showStats: $('aStats').checked, v8: 1, v9: 1,
+          ssQ: $('aSsQ').value, ssFps: +$('aSsFps').value, ssBr: +$('aSsBr').value, ssHint: $('aSsHint').value, recvCap: +$('aRecv').value, codec: $('aCodec').value, selfPreview: $('aSelf').value, showStats: $('aStats').checked, v8: 1, v9: 1, v48: 1,
         };
         const sendKeys = ['camQ', 'camFps', 'camBr'];
         const viewKeys = ['codec', 'selfPreview'];
