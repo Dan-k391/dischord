@@ -89,6 +89,7 @@
     volume: '<path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/>',
     eyeOff: '<path d="M3 3l18 18M10.6 6.1A9.8 9.8 0 0 1 12 6c5 0 9 6 9 6a17 17 0 0 1-3.2 3.8M6.6 6.6A17 17 0 0 0 3 12s4 6 9 6a9 9 0 0 0 4.2-1"/>',
     copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>',
+    reply: '<path d="M9 4l-6 6 6 6M3 10h9a8 8 0 0 1 8 8"/>',
     at: '<circle cx="12" cy="12" r="4"/><path d="M16 12v1.5a2.5 2.5 0 0 0 5 0V12a9 9 0 1 0-3.5 7.1"/>',
     chart: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
     check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
@@ -134,6 +135,9 @@
   const userVol = store.get('vol', {});      // uid -> { v: 0-100 voice, sv: 0-100 stream, m: muted }
   const hiddenVid = store.get('hidevid', {}); // uid -> true (don't receive their camera)
   const imgCache = new Map();                // image id -> data URL
+  let replyTarget = null;
+  const composerDrafts = new Map(); // channel drafts, including local file references; never persisted
+  const fileProviders = new Map(); // offer -> originating connection, never saved in chat history
 
   const server = (sid) => servers.find((s) => s.id === sid);
   const channel = (s, cid) => s && s.channels.find((c) => c.id === cid);
@@ -185,8 +189,15 @@
     if (m.del) return { id: m.id, cid: m.cid, ts: m.ts, a, del: true, text: '' };
     const text = typeof m.text === 'string' ? m.text : '';
     const img = cleanImg(m.img);
-    if ((!text && !img) || text.length > 4000) return null;
-    return { id: m.id, cid: m.cid, ts: Math.min(m.ts, now() + 60000), a, text, img, re: cleanRe(m.re), ed: m.ed ? 1 : undefined };
+    const file = window.DischordFiles.cleanMeta(m.file);
+    if ((!text && !img && !file) || text.length > 4000) return null;
+    return { id: m.id, cid: m.cid, ts: Math.min(m.ts, now() + 60000), a, text, img, file, reply: cleanReply(m.reply), re: cleanRe(m.re), ed: m.ed ? 1 : undefined };
+  }
+  function cleanReply(r) {
+    if (!r || !isStr(r.id, 64) || !/^[a-z0-9]+$/i.test(r.id)) return undefined;
+    const a = cleanUser(r.a);
+    if (!a || typeof r.text !== 'string' || r.text.length > 240) return undefined;
+    return { id: r.id, a, text: r.text, attachment: isStr(r.attachment, 255) ? r.attachment : undefined };
   }
   function cleanServerDef(d) {
     if (!d || !isId(d.id) || !isStr(d.name, 64) || !Array.isArray(d.channels) || typeof d.v !== 'number') return null;
@@ -312,7 +323,7 @@
   }
 
   function onPeerData(sid, p, uuid) {
-    if (!p || typeof p !== 'object' || !p.u) return;
+    if (!p || typeof p !== 'object' || !p.u || typeof p.t !== 'string') return;
     const s = server(sid);
     if (!s) return;
     const t = touch(sid, p, uuid);
@@ -340,7 +351,13 @@
         break;
       case 'msg': {
         const msg = cleanMsg(p.m);
-        if (msg && msg.a.id === t.user.id && addMsg(sid, msg)) onNewMsg(sid, msg);
+        if (msg && msg.a.id === t.user.id) {
+          const fresh = !(getMsgs(sid)[msg.cid] || []).some((m) => m.id === msg.id);
+          if (addMsg(sid, msg)) {
+            if (fresh && msg.file && uuid) fileProviders.set(sid + '/' + msg.cid + '/' + msg.id, uuid);
+            onNewMsg(sid, msg);
+          }
+        }
         break;
       }
       case 'hist': {
@@ -366,10 +383,17 @@
         break;
       }
       case 'imgc':
-        onImgChunk(sid, p);
+        onImgChunk(sid, p, uuid);
         break;
       case 'imgreq':
         if (isStr(p.id, 64)) getImg(p.id).then((url) => { if (url) setTimeout(() => pushImage(sid, p.id, uuid), Math.random() * 500); });
+        break;
+      case 'f-request':
+      case 'f-chunk':
+      case 'f-ack':
+      case 'f-error':
+      case 'f-cancel':
+        fileTransfers.onPacket(sid, p, uuid, t.user.id);
         break;
       case 'creact':
         if (isStr(p.e, 16) && voice && voice.sid === sid && p.vc === voice.cid) floatReaction(t.user.id, p.e);
@@ -388,17 +412,21 @@
         break;
       }
     }
-    if (sid === cur.sid && p.t !== 'imgc') renderPresence();
+    if (sid === cur.sid && p.t !== 'imgc' && !p.t?.startsWith('f-')) renderPresence();
   }
 
   function mergeServer(sid, def) {
     const d = cleanServerDef(def);
     const s = server(sid);
     if (!d || !s || d.id !== sid || d.v <= s.v) return;
+    const removed = s.channels.filter((c) => !d.channels.some((next) => next.id === c.id && next.type === c.type));
     s.name = d.name; s.channels = d.channels; s.v = d.v;
+    removed.forEach((c) => releaseChannelFiles(sid, c.id));
     saveServers();
     if (voice && voice.sid === sid && !channel(s, voice.cid)) leaveVoice();
-    if (cur.sid === sid && !channel(s, cur.cid)) cur.cid = (s.channels.find((c) => c.type === 'text') || s.channels[0] || {}).id || null;
+    if (cur.sid === sid && (!channel(s, cur.cid) || removed.some((c) => c.id === cur.cid))) {
+      selectChannel((s.channels.find((c) => c.type === 'text') || s.channels[0] || {}).id || null);
+    }
     render();
   }
 
@@ -416,10 +444,11 @@
     const i = list.findIndex((x) => x.id === m.id);
     if (i >= 0) {
       const old = list[i];
+      if (old.a.id !== m.a.id) return false;
       if (old.del) return false;
-      if (m.del) { list[i] = m; saveMsgs(sid); return true; }
+      if (m.del) { list[i] = m; fileTransfers.release(sid, m.cid, m.id); fileProviders.delete(sid + '/' + m.cid + '/' + m.id); saveMsgs(sid); return true; }
       let changed = false;
-      if (m.ed && m.text !== old.text) { list[i] = { ...m, re: old.re }; changed = true; }
+      if (m.ed && m.text !== old.text) { list[i] = { ...old, text: m.text, ed: 1 }; changed = true; }
       if (m.re && mergeRe(list[i], m.re)) changed = true;
       if (changed) saveMsgs(sid);
       return changed;
@@ -427,7 +456,10 @@
     let j = list.length;
     while (j > 0 && list[j - 1].ts > m.ts) j--;
     list.splice(j, 0, m);
-    if (list.length > MAX_MSGS) list.splice(0, list.length - MAX_MSGS);
+    if (list.length > MAX_MSGS) list.splice(0, list.length - MAX_MSGS).forEach((old) => {
+      fileTransfers.release(sid, old.cid, old.id);
+      fileProviders.delete(sid + '/' + old.cid + '/' + old.id);
+    });
     saveMsgs(sid);
     return true;
   }
@@ -469,27 +501,78 @@
 
   function sendMessage(text) {
     const s = server(cur.sid);
-    if (!s || !cur.cid) return;
+    const c = channel(s, cur.cid);
+    if (!s || !c || c.type !== 'text') return false;
     text = text.replace(/\s+$/, '').replace(/^\n+/, '');
-    const imgs = pending.splice(0);
-    renderAttachBar();
-    if (!text && !imgs.length) return;
-    if (text.length > 4000) { toast('Message is too long (4000 characters max).'); return; }
-    const parts = imgs.length ? imgs.map((im, i) => ({ img: im, text: i === imgs.length - 1 ? text : '' })) : [{ text }];
+    if (!text && !pending.length) return false;
+    if (text.length > 4000) { toast('Message is too long (4000 characters max).'); return false; }
+    const attachments = [...pending];
+    const reply = replyTarget && replyTarget.sid === cur.sid && replyTarget.cid === cur.cid ? replyTarget.reply : undefined;
+    const parts = attachments.length ? attachments.map((att, i) => ({ att, text: i === attachments.length - 1 ? text : '' })) : [{ text }];
+    let sent = 0;
     for (const part of parts) {
-      const m = { id: me.id + rid(8), cid: cur.cid, ts: now(), a: me, text: part.text };
-      if (part.img) {
-        m.img = { id: part.img.id, w: part.img.w, h: part.img.h, n: part.img.url.length };
-        imgCache.set(part.img.id, part.img.url);
-        idb.put(part.img.id, part.img.url);
+      const m = { id: me.id + rid(8), cid: cur.cid, ts: now(), a: me, text: part.text, reply };
+      if (part.att) {
+        m.file = part.att.meta;
+        if (!fileTransfers.register(s.id, cur.cid, m.id, m.file, part.att.file)) {
+          toast('Too many available files in this tab. Delete an older file message, then send again.');
+          break;
+        }
+        pending.shift();
       }
       addMsg(s.id, m);
       send(s.id, { t: 'msg', m });
-      if (part.img) pushImage(s.id, part.img.id);
+      sent++;
     }
+    if (sent === parts.length) cancelReply();
+    renderAttachBar();
     markRead(s.id, cur.cid);
     lastTypingSent = 0;
     renderMessages(true);
+    return sent === parts.length;
+  }
+
+  function replyToMessage(mid) {
+    const m = (getMsgs(cur.sid)[cur.cid] || []).find((x) => x.id === mid);
+    if (!m || m.del) return;
+    replyTarget = { sid: cur.sid, cid: cur.cid, reply: {
+      id: m.id, a: { ...m.a }, text: m.text.replace(/\s+/g, ' ').slice(0, 240),
+      attachment: m.file ? m.file.name : m.img ? 'Image' : undefined,
+    } };
+    renderReplyBar();
+    $('msgInput').focus();
+  }
+  function cancelReply() { replyTarget = null; renderReplyBar(); }
+  function renderReplyBar() {
+    const r = replyTarget && replyTarget.sid === cur.sid && replyTarget.cid === cur.cid ? replyTarget.reply : null;
+    const bar = $('replyBar');
+    bar.classList.toggle('hidden', !r);
+    bar.innerHTML = r ? `<span>Replying to <b>${esc(r.a.name)}</b></span><span class="reply-excerpt">${esc(r.text || r.attachment || 'Message')}</span><button type="button" class="icon-btn" id="cancelReplyBtn" title="Cancel reply">${icon('x')}</button>` : '';
+  }
+
+  function saveComposerDraft() {
+    if (channel(server(cur.sid), cur.cid)?.type !== 'text') return;
+    composerDrafts.set(cur.sid + '/' + cur.cid, { text: $('msgInput').value, pending: [...pending], replyTarget });
+  }
+  function restoreComposerDraft() {
+    const key = cur.sid + '/' + cur.cid;
+    const d = composerDrafts.get(key);
+    composerDrafts.delete(key); // the active composer owns these references until navigation
+    $('msgInput').value = d ? d.text : '';
+    pending.splice(0, pending.length, ...(d ? d.pending : []));
+    replyTarget = d ? d.replyTarget : null;
+    renderReplyBar(); renderAttachBar();
+  }
+  function releaseChannelFiles(sid, cid) {
+    for (const m of getMsgs(sid)[cid] || []) fileTransfers.release(sid, cid, m.id);
+    const prefix = sid + '/' + cid + '/';
+    for (const key of fileProviders.keys()) if (key.startsWith(prefix)) fileProviders.delete(key);
+    composerDrafts.delete(sid + '/' + cid);
+    if (cur.sid === sid && cur.cid === cid) {
+      $('msgInput').value = '';
+      pending.splice(0, pending.length);
+      replyTarget = null;
+    }
   }
 
   function deleteMessage(id) {
@@ -498,6 +581,7 @@
     if (!m || m.a.id !== me.id) return;
     const d = { id: m.id, cid: m.cid, ts: m.ts, a: me, del: true, text: '' };
     addMsg(cur.sid, d);
+    fileTransfers.release(cur.sid, cur.cid, id);
     send(cur.sid, { t: 'del', m: d });
     renderMessages();
   }
@@ -550,12 +634,36 @@
     const s = server(sid), c = channel(s, m.cid);
     if (!s || !c) return;
     try {
-      const n = new Notification(`${m.a.name} (#${c.name}, ${s.name})`, { body: (m.text || (m.img ? '📷 Image' : '')).slice(0, 200), tag: sid + m.cid });
+      const n = new Notification(`${m.a.name} (#${c.name}, ${s.name})`, { body: (m.text || (m.file ? '📎 ' + m.file.name : m.img ? '📷 Image' : '')).slice(0, 200), tag: sid + m.cid });
       n.onclick = () => { window.focus(); selectServer(sid); selectChannel(m.cid); };
     } catch { }
   }
 
-  // ---------------------------------------------------------------- images (P2P, chunked, stored in IndexedDB)
+  // ---------------------------------------------------------------- files (metadata offers; bytes move only on Download)
+  function saveFileDownload(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name; a.hidden = true;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
+  const fileTransfers = window.DischordFiles.create({
+    send,
+    getMessage: (sid, cid, mid) => channel(server(sid), cid)?.type === 'text' ? (getMsgs(sid)[cid] || []).find((m) => m.id === mid) : undefined,
+    isPeer: (sid, uid, uuid) => peers[sid] && peers[sid].get(uuid)?.uid === uid,
+    resolvePeer: (sid, uid, cid, mid) => {
+      const origin = fileProviders.get(sid + '/' + cid + '/' + mid);
+      if (origin && peers[sid]?.get(origin)?.uid === uid) return origin;
+      const matches = [...(peers[sid] || new Map())].filter(([, p]) => p.uid === uid);
+      return matches.length ? matches[0][0] : null;
+    },
+    userId: () => me && me.id,
+    randomId: () => rid(20),
+    onChange: (sid, cid) => { if (sid === cur.sid && cid === cur.cid) paintFileCards(); },
+    saveDownload: saveFileDownload,
+  });
+
+  // Legacy image offers remain downloadable, but are never fetched or stored automatically.
   const idb = (() => {
     let dbp = null;
     const open = () => dbp || (dbp = new Promise((res, rej) => {
@@ -571,12 +679,6 @@
           return await new Promise((res) => { const q = db.transaction('i').objectStore('i').get(k); q.onsuccess = () => res(q.result); q.onerror = () => res(undefined); });
         } catch { return undefined; }
       },
-      async put(k, v) {
-        try {
-          const db = await open();
-          return await new Promise((res) => { const tx = db.transaction('i', 'readwrite'); tx.objectStore('i').put(v, k); tx.oncomplete = () => res(true); tx.onerror = () => res(false); });
-        } catch { return false; }
-      },
     };
   })();
 
@@ -590,6 +692,7 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const pushing = new Map();   // id/uuid -> ts (avoid duplicate sends)
   async function pushImage(sid, id, uuid) {
+    if (!uuid) return; // legacy bytes only answer an explicit, targeted request
     const k = id + '/' + (uuid || '*');
     if (pushing.has(k) && now() - pushing.get(k) < 20000) return;
     pushing.set(k, now());
@@ -603,66 +706,40 @@
   }
 
   const incoming = {};         // id -> { n, parts, got }
-  const requested = {};        // id -> ts
-  function onImgChunk(sid, p) {
+  const requested = {};        // legacy image id -> explicit download consent + timeout
+  function onImgChunk(sid, p, uuid) {
+    const request = requested[p.id];
+    if (!request || request.sid !== sid || !uuid || (request.uuid && request.uuid !== uuid)) return;
     if (!isStr(p.id, 64) || !Number.isInteger(p.i) || !Number.isInteger(p.n) || p.n < 1 || p.n > Math.ceil(IMG_MAX / IMG_CHUNK) || p.i < 0 || p.i >= p.n || typeof p.d !== 'string' || p.d.length > IMG_CHUNK) return;
-    if (imgCache.has(p.id)) return;
+    request.uuid = uuid;
     const b = (incoming[p.id] = incoming[p.id] || { n: p.n, parts: new Array(p.n), got: 0 });
     if (b.n !== p.n || b.parts[p.i] !== undefined) return;
     b.parts[p.i] = p.d; b.got++;
     if (b.got < b.n) return;
     const url = b.parts.join('');
     delete incoming[p.id];
+    clearTimeout(request.timer); delete requested[p.id];
     if (!/^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(url)) return;
-    imgCache.set(p.id, url);
-    idb.put(p.id, url);
-    paintImages();
+    saveLegacyImage(url);
   }
   function requestImg(sid, id) {
-    if (requested[id] && now() - requested[id] < 15000) return;
-    requested[id] = now();
+    if (requested[id]) return;
+    requested[id] = { sid, timer: setTimeout(() => {
+      delete requested[id]; delete incoming[id];
+      toast('Image unavailable. Someone who has it must be online.');
+    }, 30000) };
     send(sid, { t: 'imgreq', id });
   }
 
-  // fill <img data-img> elements from cache / IndexedDB / peers
-  function paintImages() {
-    document.querySelectorAll('img[data-img]:not([src])').forEach(async (el) => {
-      const id = el.dataset.img;
-      const url = await getImg(id);
-      if (url) { el.src = url; el.parentElement.classList.remove('loading'); }
-      else if (cur.sid) requestImg(cur.sid, id);
-    });
-  }
-
-  // shrink big images before sending (keeps GIFs as-is when small enough)
-  async function prepImage(file) {
-    if (!file || !/^image\//.test(file.type)) throw new Error('That file is not an image.');
-    const readUrl = (f) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsDataURL(f); });
-    const dims = (url) => new Promise((res, rej) => { const im = new Image(); im.onload = () => res({ w: im.naturalWidth, h: im.naturalHeight }); im.onerror = rej; im.src = url; });
-    if (file.type === 'image/gif' && file.size <= 3000000) {
-      const url = await readUrl(file);
-      return { id: rid(16), url, ...(await dims(url)) };
-    }
-    const bmp = await createImageBitmap(file);
-    const scale = Math.min(1, 2560 / Math.max(bmp.width, bmp.height));
-    const w = Math.max(1, Math.round(bmp.width * scale)), h = Math.max(1, Math.round(bmp.height * scale));
-    const c = document.createElement('canvas');
-    c.width = w; c.height = h;
-    c.getContext('2d').drawImage(bmp, 0, 0, w, h);
-    let q = 0.92, url = c.toDataURL('image/webp', q);
-    if (!url.startsWith('data:image/webp')) url = c.toDataURL('image/jpeg', q);
-    while (url.length > IMG_MAX && q > 0.45) { q -= 0.12; url = c.toDataURL(url.startsWith('data:image/webp') ? 'image/webp' : 'image/jpeg', q); }
-    if (url.length > IMG_MAX) throw new Error('Image is too large even after compression.');
-    return { id: rid(16), url, w, h };
-  }
-
-  const pending = [];          // images waiting in the composer
-  async function addAttachments(files) {
+  const pending = [];          // selected File references; no reading, encoding or persistence
+  function addAttachments(files) {
     const s = server(cur.sid), c = channel(s, cur.cid);
     if (!c || c.type !== 'text') return;
     for (const f of [...files].slice(0, 4)) {
-      if (pending.length >= 4) { toast('Up to 4 images per message.'); break; }
-      try { pending.push(await prepImage(f)); } catch (e) { toast(e.message || 'Could not read that image.'); }
+      if (pending.length >= 4) { toast('Up to 4 files per message.'); break; }
+      const meta = window.DischordFiles.cleanMeta({ id: rid(16), name: f.name, size: f.size, type: f.type });
+      if (!meta) { toast('Files must be 100 MB or smaller.'); continue; }
+      pending.push({ meta, file: f });
     }
     renderAttachBar();
     $('msgInput').focus();
@@ -670,15 +747,34 @@
   function renderAttachBar() {
     const bar = $('attachBar');
     bar.classList.toggle('hidden', !pending.length);
-    bar.innerHTML = pending.map((im, i) => `<div class="att"><img src="${im.url}" alt=""><button class="att-x" data-rm="${i}" title="Remove">${icon('x')}</button></div>`).join('');
+    bar.innerHTML = pending.map((att, i) => `<div class="att att-file">${icon('copy')}<span title="${esc(att.meta.name)}">${esc(att.meta.name)}</span><small>${esc(window.DischordFiles.formatSize(att.meta.size))}</small><button type="button" class="att-x" data-rm="${i}" title="Remove">${icon('x')}</button></div>`).join('') +
+      (pending.length ? '<span class="attachment-note">Shared on Download.<br>Keep this tab open.</span>' : '');
   }
-  function lightbox(id) {
-    getImg(id).then((url) => {
-      if (!url) return;
-      const ext = (url.match(/^data:image\/(\w+)/) || [, 'png'])[1];
-      modal(`<div class="lightbox"><img src="${url}" alt=""></div>
-        <div class="actions"><a class="btn" href="${url}" download="dischord-${id}.${ext}">Download</a><button class="btn primary" data-close>Close</button></div>`, null, true, true);
-      $('modal').classList.add('lb');
+  function saveLegacyImage(url) {
+    const match = url.match(/^data:image\/(png|jpeg|webp|gif);base64,([A-Za-z0-9+/=]+)$/);
+    if (!match) return;
+    try {
+      const raw = atob(match[2]), bytes = Uint8Array.from(raw, (c) => c.charCodeAt(0));
+      saveFileDownload(new Blob([bytes], { type: 'application/octet-stream' }), 'image.' + match[1]);
+    } catch { toast('Could not download that image.'); }
+  }
+  async function downloadLegacyImage(sid, id) {
+    const url = await getImg(id);
+    if (url) saveLegacyImage(url); else requestImg(sid, id);
+  }
+
+  function fileCardContent(sid, m) {
+    const status = fileTransfers.status(sid, m.cid, m.id);
+    const active = status.state === 'receiving';
+    const unavailable = m.a.id === me.id && !fileTransfers.hasLocal(sid, m.cid, m.id);
+    const label = active ? `Downloading ${Math.round(status.progress)}%` : status.state === 'error' ? status.message : status.state === 'complete' ? 'Sent to your browser for download.' : unavailable ? 'File unavailable after reload. Attach it again.' : 'Contents are sent only when you download.';
+    return `${icon('copy')}<div class="file-info"><strong>${esc(m.file.name)}</strong><span>${esc(window.DischordFiles.formatSize(m.file.size))}</span><small role="status">${esc(label)}</small></div>` +
+      (active ? `<button type="button" class="btn" data-file-cancel="${esc(m.id)}">Cancel</button>` : `<button type="button" class="btn" data-file-download="${esc(m.id)}" ${unavailable ? 'disabled' : ''}>${status.state === 'error' ? 'Retry download' : 'Download'}</button>`);
+  }
+  function paintFileCards() {
+    document.querySelectorAll('[data-file-card]').forEach((el) => {
+      const m = (getMsgs(cur.sid)[cur.cid] || []).find((x) => x.id === el.dataset.fileCard);
+      if (m && !m.del && m.file) el.innerHTML = fileCardContent(cur.sid, m);
     });
   }
 
@@ -931,6 +1027,7 @@
 
   // ---------------------------------------------------------------- navigation
   function selectServer(sid) {
+    saveComposerDraft();
     cur.sid = sid;
     store.set('lastSid', sid);
     const s = server(sid);
@@ -939,11 +1036,14 @@
       const firstText = s.channels.find((c) => c.type === 'text');
       cur.cid = channel(s, want) ? want : (firstText || s.channels[0] || {}).id || null;
     } else cur.cid = null;
+    restoreComposerDraft();
     render();
     if (cur.cid) afterChannelSelect();
   }
   function selectChannel(cid) {
+    saveComposerDraft();
     cur.cid = cid;
+    restoreComposerDraft();
     lastChan[cur.sid] = cid;
     store.set('lastChan', lastChan);
     render();
@@ -1003,6 +1103,9 @@
   function leaveServer(sid) {
     if (voice && voice.sid === sid) leaveVoice();
     disconnectMesh(sid);
+    fileTransfers.closeServer(sid);
+    for (const key of fileProviders.keys()) if (key.startsWith(sid + '/')) fileProviders.delete(key);
+    for (const key of composerDrafts.keys()) if (key.startsWith(sid + '/')) composerDrafts.delete(key);
     servers = servers.filter((s) => s.id !== sid);
     saveServers();
     store.del('msgs.' + sid); store.del('known.' + sid);
@@ -1476,8 +1579,9 @@
     if (!m) return;
     const mine = m.a.id === me.id;
     let h = `<div class="ctx-emojis">${REACTS.slice(0, 8).map((e) => `<button data-emo="${e}">${e}</button>`).join('')}</div>`;
+    h += ctxItem('reply', 'reply', 'Reply');
     if (m.text) h += ctxItem('copy', 'copy', 'Copy text');
-    if (m.img) h += ctxItem('openimg', 'image', 'Open image');
+    if (m.img) h += ctxItem('openimg', 'image', 'Download image');
     if (!mine) h += ctxItem('mention', 'at', 'Mention ' + esc(m.a.name));
     if (mine && m.text) h += ctxItem('edit', 'edit', 'Edit message');
     if (mine) h += ctxItem('del', 'trash', 'Delete message', 'danger');
@@ -1489,8 +1593,9 @@
         if (!b) return;
         closeCtx();
         switch (b.dataset.act) {
+          case 'reply': return replyToMessage(mid);
           case 'copy': navigator.clipboard && navigator.clipboard.writeText(m.text); return toast('Copied');
-          case 'openimg': return lightbox(m.img.id);
+          case 'openimg': return downloadLegacyImage(cur.sid, m.img.id);
           case 'mention': { const inp = $('msgInput'); inp.value += '@' + m.a.name.replace(/\s+/g, '') + ' '; return inp.focus(); }
           case 'edit': return editMessage(mid);
           case 'del': return deleteMessage(mid);
@@ -1560,6 +1665,24 @@
     return k ? { ...a, name: k.name, color: k.color } : a;
   }
 
+  function renderReply(m) {
+    if (!m.reply) return '';
+    const r = m.reply;
+    const original = (getMsgs(cur.sid)[m.cid] || []).find((x) => x.id === r.id);
+    const excerpt = original && original.del ? 'Original message deleted' : original
+      ? original.text || (original.file && original.file.name) || (original.img ? 'Image' : 'Message')
+      : r.text || r.attachment || 'Message';
+    const a = liveUser(original ? original.a : r.a);
+    return `<button type="button" class="msg-reply" data-reply-jump="${esc(r.id)}" title="Jump to original message">${icon('reply')}<b>${esc(a.name)}</b><span>${esc(excerpt.replace(/\s+/g, ' ').slice(0, 240))}</span></button>`;
+  }
+  function jumpToMessage(mid) {
+    const el = [...$('messages').querySelectorAll('[data-mid]')].find((x) => x.dataset.mid === mid);
+    if (!el) return toast('Original message is no longer in local history.');
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.add('reply-highlight');
+    setTimeout(() => el.classList.remove('reply-highlight'), 2000);
+  }
+
   function renderMessages(forceBottom) {
     const box = $('messages');
     const s = server(cur.sid), c = channel(s, cur.cid);
@@ -1571,27 +1694,29 @@
     for (const m of list) {
       const newDay = !prev || new Date(prev.ts).toDateString() !== new Date(m.ts).toDateString();
       if (newDay) h += `<div class="day-sep"><span>${new Date(m.ts).toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' })}</span></div>`;
-      const head = newDay || !prev || prev.a.id !== m.a.id || m.ts - prev.ts > 7 * 60000;
+      const head = newDay || !prev || !!m.reply || prev.a.id !== m.a.id || m.ts - prev.ts > 7 * 60000;
       const mine = m.a.id === me.id;
       const a = liveUser(m.a);
-      const acts = `<div class="actions"><button class="icon-btn" data-react="${esc(m.id)}" title="Add reaction">${icon('smile')}</button>` +
+      const acts = `<div class="actions"><button class="icon-btn" data-reply="${esc(m.id)}" title="Reply">${icon('reply')}</button><button class="icon-btn" data-react="${esc(m.id)}" title="Add reaction">${icon('smile')}</button>` +
         (mine ? `${m.text ? `<button class="icon-btn" data-edit="${esc(m.id)}" title="Edit">${icon('edit')}</button>` : ''}<button class="icon-btn danger" data-del="${esc(m.id)}" title="Delete">${icon('trash')}</button>` : '') + '</div>';
       const edited = m.ed ? ' <span class="time">(edited)</span>' : '';
-      const img = m.img ? `<div class="msg-img loading" style="aspect-ratio:${m.img.w}/${m.img.h};width:min(100%, ${Math.min(420, m.img.w)}px)" data-open="${esc(m.img.id)}"><img data-img="${esc(m.img.id)}" alt=""></div>` : '';
+      const img = m.img ? `<div class="file-card">${icon('image')}<div class="file-info"><strong>Image</strong><small>Contents are sent only when you download.</small></div><button type="button" class="btn" data-legacy-download="${esc(m.img.id)}">Download</button></div>` : '';
+      const file = m.file ? `<div class="file-card" data-file-card="${esc(m.id)}">${fileCardContent(s.id, m)}</div>` : '';
+      const reply = renderReply(m);
       const text = m.text ? `<div class="text">${formatText(m.text)}${edited}</div>` : '';
       const re = renderRe(m);
       if (head) {
         h += `<div class="msg head" data-mid="${esc(m.id)}"><div class="gutter" data-uid="${esc(m.a.id)}" data-ctx="user">${avatar(a)}</div><div class="body">
           <div class="meta"><span class="author" data-uid="${esc(m.a.id)}" data-ctx="user" style="color:${esc(a.color)}">${esc(a.name)}</span><span class="time" title="${esc(new Date(m.ts).toLocaleString())}">${esc(fmtStamp(m.ts))}</span></div>
-          ${text}${img}${re}</div>${acts}</div>`;
+          ${reply}${text}${file}${img}${re}</div>${acts}</div>`;
       } else {
-        h += `<div class="msg" data-mid="${esc(m.id)}"><div class="gutter time-side">${esc(fmtTime(m.ts))}</div><div class="body">${text}${img}${re}</div>${acts}</div>`;
+        h += `<div class="msg" data-mid="${esc(m.id)}"><div class="gutter time-side">${esc(fmtTime(m.ts))}</div><div class="body">${reply}${text}${file}${img}${re}</div>${acts}</div>`;
       }
       prev = m;
     }
     box.innerHTML = h;
     if (forceBottom || nearBottom) box.scrollTop = box.scrollHeight;
-    paintImages();
+    renderReplyBar();
   }
 
   function renderRe(m) {
@@ -1962,8 +2087,9 @@
       const s = server(cur.sid), c = channel(s, del.dataset.delc);
       return confirmModal('Delete channel', `Delete ${c.type === 'text' ? '#' : ''}${c.name} for everyone?`, 'Delete channel', () => {
         s.channels = s.channels.filter((x) => x.id !== c.id);
+        releaseChannelFiles(s.id, c.id);
         if (voice && voice.sid === s.id && voice.cid === c.id) leaveVoice();
-        if (cur.cid === c.id) cur.cid = (s.channels.find((x) => x.type === 'text') || s.channels[0] || {}).id || null;
+        if (cur.cid === c.id) selectChannel((s.channels.find((x) => x.type === 'text') || s.channels[0] || {}).id || null);
         bumpServer(s);
       });
     }
@@ -1979,12 +2105,20 @@
   };
 
   $('messages').onclick = (e) => {
+    const rp = e.target.closest('[data-reply]');
+    if (rp) return replyToMessage(rp.dataset.reply);
+    const jump = e.target.closest('[data-reply-jump]');
+    if (jump) return jumpToMessage(jump.dataset.replyJump);
+    const download = e.target.closest('[data-file-download]');
+    if (download) return fileTransfers.download(cur.sid, cur.cid, download.dataset.fileDownload);
+    const cancel = e.target.closest('[data-file-cancel]');
+    if (cancel) return fileTransfers.cancel(cur.sid, cur.cid, cancel.dataset.fileCancel);
+    const legacy = e.target.closest('[data-legacy-download]');
+    if (legacy) return downloadLegacyImage(cur.sid, legacy.dataset.legacyDownload);
     const rt = e.target.closest('[data-rtoggle]');
     if (rt) return toggleReaction(rt.dataset.rtoggle, rt.dataset.e);
     const ra = e.target.closest('[data-react]');
     if (ra) { e.stopPropagation(); return emojiPicker(ra, (emo) => toggleReaction(ra.dataset.react, emo)); }
-    const op = e.target.closest('[data-open]');
-    if (op) return lightbox(op.dataset.open);
     const d = e.target.closest('[data-del]');
     if (d) return deleteMessage(d.dataset.del);
     const ed = e.target.closest('[data-edit]');
@@ -1997,8 +2131,7 @@
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
-      sendMessage(input.value);
-      input.value = '';
+      if (sendMessage(input.value)) input.value = '';
       autosize();
     }
   });
@@ -2055,11 +2188,14 @@
   window.addEventListener('blur', closeCtx);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeCtx(); $('emojiMenu').classList.add('hidden'); if (winFs) { winFs = null; renderStage(); } } });
 
-  // images: button, paste, drag & drop
+  $('replyBar').onclick = (e) => { if (e.target.closest('#cancelReplyBtn')) cancelReply(); };
+  input.addEventListener('keydown', (e) => { if (e.key === 'Escape' && replyTarget) cancelReply(); });
+
+  // Files, including images: offer metadata via button, paste, or drag & drop.
   $('attachBtn').onclick = () => $('fileInput').click();
   $('fileInput').onchange = () => { addAttachments($('fileInput').files); $('fileInput').value = ''; };
   $('msgInput').addEventListener('paste', (e) => {
-    const files = [...(e.clipboardData ? e.clipboardData.files : [])].filter((f) => f.type.startsWith('image/'));
+    const files = [...(e.clipboardData ? e.clipboardData.files : [])];
     if (files.length) { e.preventDefault(); addAttachments(files); }
   });
   $('textView').addEventListener('dragover', (e) => { if ([...e.dataTransfer.types].includes('Files')) { e.preventDefault(); $('textView').classList.add('drop'); } });
@@ -2078,7 +2214,7 @@
     broadcastState();
     if (cur.sid && cur.cid) { markRead(cur.sid, cur.cid); renderRail(); renderChannels(); }
   });
-  window.addEventListener('pagehide', () => { for (const sid in meshes) send(sid, { t: 'bye' }); });
+  window.addEventListener('pagehide', () => { fileTransfers.close(); for (const sid in meshes) send(sid, { t: 'bye' }); });
 
   function checkInviteHash() {
     const m = location.hash.match(/invite=([A-Za-z0-9_-]+)/);

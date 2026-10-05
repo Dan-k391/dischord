@@ -163,6 +163,7 @@ function createApp({ micOn = true, deaf = false, av = {}, legacyAv = false } = {
     };
   `;
   const source = appSource.replace(boot, '').replace(/\}\)\(\);\s*$/, hooks + '\n})();');
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'file-transfer.js'), 'utf8'), context, { filename: 'file-transfer.js' });
   vm.runInContext(source, context, { filename: 'app.js' });
   const api = window.mediaTest;
   const emit = (frame, data, origin = 'https://vdo.ninja') => window.dispatch('message', { source: frame.contentWindow, data, origin });

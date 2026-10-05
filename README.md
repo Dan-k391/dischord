@@ -5,7 +5,8 @@ A Discord-style chat app built on [VDO.Ninja](https://vdo.ninja). No accounts, n
 ## Features
 - **Servers** with text and voice channels, shareable **invite links**
 - **Text chat** sent peer-to-peer: Markdown-ish formatting, edit/delete, typing indicators, unread badges, desktop notifications
-- **Images**: attach, paste or drag & drop; compressed in the browser, sent peer-to-peer in chunks, stored in IndexedDB; people who join later fetch them from whoever has them
+- **Replies**: reply from message actions or the right-click menu; click the quote to jump to the original message
+- **Files and images**: attach, paste or drag & drop up to four files (100 MB each). Only metadata is shared until the recipient clicks **Download**; contents transfer directly from the sender, with progress and cancellation
 - **Reactions** on messages, plus floating emoji reactions in voice calls
 - **History sync**: when you come online, peers send you recent messages you missed
 - **Voice channels** with mute/deafen, **camera** and **screen share at the same time**, speaking indicators, focus view + fullscreen
@@ -33,9 +34,11 @@ To use it with friends over the internet, host the folder on any static host
   view-only connection (`&view=…&solo&noaudio&scale=100`), so Dischord controls the layout and the
   bitrate of each stream, and videos are never downscaled to the tile size.
   The call stays connected while you browse text channels.
-- Everything is saved in your browser's `localStorage` (last 500 messages per channel).
+- Your profile, settings, server definitions and recent chat history are saved in your browser's `localStorage` (last 500 messages per channel). File contents and attachment drafts are never persisted by Dischord.
 
 ## Limits (by design, since there's no server)
+- File contents are never automatically transferred, previewed, or saved by Dischord. Recipients only save files after clicking **Download**. Only file names, sizes and types are included in local chat history.
+- Keep the original sender tab open for downloads. Reloading or closing it removes its file offers; files cannot be recovered from other recipients or chat history. A recipient can cancel a transfer, and incomplete downloads are discarded from memory.
 - If nobody else is online, messages you send are only delivered when someone who has them
   comes back online alongside the recipient.
 - Anyone with the invite can rename the server and add/delete channels — there are no roles.
@@ -53,7 +56,10 @@ Add `?as=alice` (or any name) to the URL to get a separate identity and storage 
 Run the dependency-free regression checks with Node.js:
 ```sh
 node --check app.js
+node --check file-transfer.js
 node tests/media.test.js
+node tests/files.test.js
+node tests/chat.test.js
 ```
 
 ## Self-hosting VDO.Ninja (optional)
@@ -66,3 +72,4 @@ Add this before `app.js` in `index.html`:
 - `index.html` – layout
 - `style.css` – Discord-like dark theme
 - `app.js` – all app logic (servers, mesh protocol, rendering, voice)
+- `file-transfer.js` – explicit-download file transfers with bounded chunks and no persistent file cache

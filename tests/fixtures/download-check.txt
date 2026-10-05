@@ -1,0 +1,2 @@
+Dischord explicit-download test.
+These contents must transfer only after the recipient presses Download.
