@@ -1571,6 +1571,7 @@
   const mobileLayout = () => !!(mobileMedia && mobileMedia.matches);
   let mobilePane = null;
   let mobileViewportBaseline = window.innerHeight;
+  let mobileFocusFrame = null;
   function renderMobileNavigation() {
     const narrow = mobileLayout();
     if (!narrow) mobilePane = null;
@@ -1609,6 +1610,20 @@
     if (!editing) mobileViewportBaseline = height;
     document.body.classList.toggle('keyboard-open', mobileLayout() && !!editing && height < mobileViewportBaseline - 120);
     renderMobileNavigation();
+    if (mobileFocusFrame !== null) { cancelAnimationFrame(mobileFocusFrame); mobileFocusFrame = null; }
+    if (mobileLayout() && editing && !$('modalBack').classList.contains('hidden') && $('modal').contains(document.activeElement)) {
+      const field = document.activeElement;
+      // The keyboard can shrink the viewport after the browser's initial focus
+      // scroll. Reveal the field inside its panel once the new size has laid out.
+      mobileFocusFrame = requestAnimationFrame(() => {
+        mobileFocusFrame = null;
+        if (document.activeElement !== field || !field.isConnected || $('modalBack').classList.contains('hidden')) return;
+        const scroller = field.closest('.settings-content') || $('modal');
+        const area = scroller.getBoundingClientRect(), rect = field.getBoundingClientRect();
+        if (rect.bottom > area.bottom - 8) scroller.scrollTop += rect.bottom - area.bottom + 8;
+        else if (rect.top < area.top + 8) scroller.scrollTop += rect.top - area.top - 8;
+      });
+    }
   }
   function selectServer(sid) {
     saveComposerDraft();
@@ -2244,7 +2259,7 @@
   const SS_RES = [['source', 'Source (native)'], ['2160', '4K'], ['1440', '1440p'], ['1080', '1080p'], ['720', '720p']];
   const fpsOpts = (list) => list.map((f) => [f, f + ' fps']);
   function saveAv(patch) { av = { ...av, ...patch }; store.set('av', av); broadcastState(); }
-  function deviceMenu(anchor, kind) { // kind: 'audioinput' | 'audiooutput' | 'videoinput'
+  function deviceMenu(anchor, kind, devicesOnly = false) { // kind: 'audioinput' | 'audiooutput' | 'videoinput'
     closeCtx();
     const info = DEV[kind];
     const token = {};
@@ -2262,14 +2277,16 @@
         const on = saved ? sameLabel(saved, d.label) : (d.deviceId === 'default' || (kind === 'videoinput' && i === 0));
         return `<button class="ctx-item check ${on ? 'on' : ''}" data-act="dev" data-i="${i}"><span>${esc(d.label)}</span><i class="box">${on ? icon('check') : ''}</i></button>`;
       }).join('');
-      h += '<div class="ctx-sep"></div>';
-      if (kind === 'audioinput') h += ctxSlider('micgain', 'Input volume', av.micGain) + ctxCheck('mic', 'Mute', !micOn || deaf);
-      else if (kind === 'audiooutput') h += ctxCheck('deaf', 'Deafen', deaf);
-      else {
-        h += ctxSelect('camQ', 'Resolution', av.camQ, CAM_RES) + ctxSelect('camFps', 'Frame rate', av.camFps, fpsOpts([15, 30, 60]));
-        if (voice) h += ctxCheck('cam', 'Camera on', !!voice.cam);
+      if (!devicesOnly) {
+        h += '<div class="ctx-sep"></div>';
+        if (kind === 'audioinput') h += ctxSlider('micgain', 'Input volume', av.micGain) + ctxCheck('mic', 'Mute', !micOn || deaf);
+        else if (kind === 'audiooutput') h += ctxCheck('deaf', 'Deafen', deaf);
+        else {
+          h += ctxSelect('camQ', 'Resolution', av.camQ, CAM_RES) + ctxSelect('camFps', 'Frame rate', av.camFps, fpsOpts([15, 30, 60]));
+          if (voice) h += ctxCheck('cam', 'Camera on', !!voice.cam);
+        }
+        h += ctxItem('avset', 'gear', 'Voice & video settings');
       }
-      h += ctxItem('avset', 'gear', 'Voice & video settings');
       openAnchored(anchor, h, (menu) => {
         menu.querySelectorAll('[data-slide]').forEach((r) => {
           r.oninput = () => {
@@ -2930,16 +2947,29 @@
 
   // ---------------------------------------------------------------- modals
   function modal(html, mount, dismissable = true, wide = false) {
+    if (mobileLayout() && document.activeElement && typeof document.activeElement.blur === 'function') document.activeElement.blur();
     setMobilePane(null);
+    closeCtx();
+    clearTimeout(devWait && devWait.timer); devWait = null;
+    $('emojiMenu').classList.add('hidden');
     $('modal').innerHTML = html;
-    $('modal').classList.toggle('wide', wide);
+    $('modal').className = wide ? 'wide' : '';
+    $('modal').scrollTop = 0;
     $('modalBack').classList.remove('hidden');
     $('modalBack').dataset.dismiss = dismissable ? '1' : '';
     $('modal').querySelectorAll('[data-close]').forEach((b) => (b.onclick = closeModal));
     paintIcons($('modal'));
     if (mount) mount();
+    updateMobileViewport();
   }
-  function closeModal() { $('modalBack').classList.add('hidden'); $('modal').innerHTML = ''; }
+  function closeModal() {
+    if (mobileLayout() && $('modal').contains(document.activeElement) && typeof document.activeElement.blur === 'function') document.activeElement.blur();
+    closeCtx();
+    clearTimeout(devWait && devWait.timer); devWait = null;
+    $('modalBack').classList.add('hidden'); $('modalBack').dataset.dismiss = '';
+    $('modal').innerHTML = ''; $('modal').className = '';
+    updateMobileViewport();
+  }
   $('modalBack').addEventListener('mousedown', (e) => { if (e.target === $('modalBack') && $('modalBack').dataset.dismiss) closeModal(); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('modalBack').dataset.dismiss) closeModal(); });
 
@@ -3016,12 +3046,13 @@
 
   function settingsModal(tab = 'profile') {
     const state = { color: me.color };
-    modal(`<div class="tabs"><button data-tab="profile">My profile</button><button data-tab="av">Voice &amp; Video</button></div>
-      <div class="tab-body" data-body="profile">
+    modal(`<div class="tabs settings-tabs" role="tablist" aria-label="Settings sections"><button id="settingsProfileTab" data-tab="profile" role="tab" aria-controls="settingsProfile">My profile</button><button id="settingsAvTab" data-tab="av" role="tab" aria-controls="settingsAv">Voice &amp; Video</button></div>
+      <div class="settings-content">
+      <div class="tab-body" id="settingsProfile" data-body="profile" role="tabpanel" aria-labelledby="settingsProfileTab">
         ${profileEditor(me.name, me.color)}
         ${'Notification' in window && Notification.permission !== 'granted' ? '<label>Notifications</label><button class="btn" id="mNotif">Enable desktop notifications</button>' : ''}
       </div>
-      <div class="tab-body" data-body="av">
+      <div class="tab-body" id="settingsAv" data-body="av" role="tabpanel" aria-labelledby="settingsAvTab">
         <h3>Microphone</h3>
         <label for="aMicGain">Microphone volume · <output id="aMicGainValue">${audioPercent(av.micGain)}%</output></label>
         <input type="range" id="aMicGain" min="0" max="200" step="1" value="${audioPercent(av.micGain)}" aria-label="Microphone volume">
@@ -3050,17 +3081,35 @@
         <p class="hint">Higher bitrate improves detail, and every viewer needs that much upload bandwidth. Change any stream's quality from its tile. ${voice ? 'Camera changes reconnect your call. Screen share changes apply after you stop and share again.' : ''}</p>
         ${voice ? '<button class="btn" id="aDevices">Choose camera…</button><p class="hint">Use the small arrows beside the microphone and headphones buttons to choose your input and output devices.</p>' : '<p class="hint">Join a voice channel to pick your camera. Use the small arrows beside the microphone and headphones buttons to choose your input and output devices.</p>'}
       </div>
-      <div class="actions"><button class="btn link" data-close>Cancel</button><button class="btn primary" id="mOk">Save</button></div>`, () => {
+      </div>
+      <div class="actions settings-actions"><button class="btn link" data-close>Cancel</button><button class="btn primary" id="mOk">Save</button></div>`, () => {
+      $('modal').classList.add('settings-dialog');
+      const content = $('modal').querySelector('.settings-content');
+      const positions = { profile: 0, av: 0 };
+      let currentTab = null;
       const show = (t) => {
-        $('modal').querySelectorAll('[data-tab]').forEach((b) => b.classList.toggle('sel', b.dataset.tab === t));
-        $('modal').querySelectorAll('[data-body]').forEach((b) => b.classList.toggle('hidden', b.dataset.body !== t));
+        if (content && currentTab) positions[currentTab] = content.scrollTop;
+        $('modal').querySelectorAll('[data-tab]').forEach((b) => {
+          b.classList.toggle('sel', b.dataset.tab === t);
+          b.setAttribute('aria-selected', String(b.dataset.tab === t));
+        });
+        $('modal').querySelectorAll('[data-body]').forEach((b) => {
+          b.classList.toggle('hidden', b.dataset.body !== t);
+          b.setAttribute('aria-hidden', String(b.dataset.body !== t));
+        });
+        currentTab = t;
+        if (content) content.scrollTop = positions[t] || 0;
       };
       $('modal').querySelectorAll('[data-tab]').forEach((b) => (b.onclick = () => show(b.dataset.tab)));
       show(tab);
       wireProfileEditor(state);
       $('aMicGain').oninput = () => { $('aMicGainValue').textContent = audioPercent($('aMicGain').value) + '%'; };
       if ($('mNotif')) $('mNotif').onclick = () => Notification.requestPermission().then(() => toast('Notifications: ' + Notification.permission));
-      if ($('aDevices')) $('aDevices').onclick = () => { closeModal(); showVoice(); voice.devices = true; voicePost({ toggleSettings: true }); renderStage(); };
+      if ($('aDevices')) $('aDevices').onclick = (e) => {
+        if (!voice) return toast('Join a voice channel to choose a camera.');
+        if (e) e.stopPropagation();
+        deviceMenu($('aDevices'), 'videoinput', true);
+      };
       $('mOk').onclick = () => {
         const name = $('mName').value.trim().slice(0, 32);
         if (!name) { show('profile'); return $('mName').focus(); }
