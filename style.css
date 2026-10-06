@@ -951,3 +951,8 @@ body.dm-view #inviteTop, body.dm-view #membersToggle { display: none; }
 body.tile-out #main { overflow: visible; z-index: 41; }
 body.tile-out #voiceStage { overflow: visible; }
 body.tile-out #tiles .tile { z-index: 1; }
+
+/* short join code in the invite dialog */
+.join-code { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin-top: 4px; }
+.join-code b { font-size: 22px; letter-spacing: 2px; font-family: ui-monospace, Consolas, monospace; color: var(--text-strong); user-select: all; }
+.join-code span { flex: 1 1 220px; font-size: 13px; line-height: 1.4; color: var(--text-muted); }

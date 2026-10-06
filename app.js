@@ -277,7 +277,9 @@
     if (!d || !isId(d.id) || !isStr(d.name, 64) || !Array.isArray(d.channels) || typeof d.v !== 'number') return null;
     const channels = d.channels.slice(0, 60).filter((c) => c && isId(c.id) && isStr(c.name, 40) && (c.type === 'text' || c.type === 'voice'))
       .map((c) => ({ id: c.id, name: c.name, type: c.type }));
-    return { id: d.id, name: d.name, channels, v: d.v };
+    const jc = d.jc && typeof d.jc === 'object' && typeof d.jc.c === 'string' && /^[a-z0-9]{8}$/.test(d.jc.c) && Number.isFinite(d.jc.x)
+      ? { c: d.jc.c, x: Math.min(d.jc.x, now() + 31 * 864e5) } : undefined;
+    return { id: d.id, name: d.name, channels, v: d.v, ...(jc ? { jc } : {}) };
   }
   function cleanState(st) {
     st = st && typeof st === 'object' ? st : {};
@@ -289,6 +291,55 @@
 
   // ---------------------------------------------------------------- mesh (hidden VDO.Ninja rooms)
   const roomFor = (s, suffix = '') => 'dischord' + s.id + suffix;
+
+  // ---- short join codes. A code cannot contain the server's address and key the way the long invite
+  // link does, and there is no directory to look it up in. So while a server has a live code, every
+  // member who is online also sits in a small "lobby" room named after the code; someone who types the
+  // code enters that room and is handed the real invite by whoever is there.
+  const JOIN_CODE_MS = 7 * 864e5;
+  const cleanCode = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const showCode = (c) => (c.slice(0, 4) + '-' + c.slice(4)).toUpperCase();
+  const liveCode = (s) => (s && s.jc && s.jc.x > now() ? s.jc.c : null);
+  const serverDef = (s) => ({ id: s.id, name: s.name, channels: s.channels, v: s.v, ...(s.jc ? { jc: s.jc } : {}) });
+  const lobbies = {};    // code -> { iframe, sid }: the lobby rooms I am sitting in for my servers
+  let joining = null;    // { code, iframe, timer }: a code I typed and am waiting on
+  function lobbyFrame(code) {
+    const p = new URLSearchParams({ room: 'dischordjoin' + code, password: 'join' + code, label: 'lobby' });
+    const f = document.createElement('iframe');
+    f.src = VDO + '?' + p.toString() + '&videodevice=0&audiodevice=0&webcam&autostart&cleanoutput';
+    f.title = 'lobby';
+    $('meshHost').appendChild(f);
+    return f;
+  }
+  function syncLobbies() {
+    const want = {};
+    if (me) for (const s of servers) { const c = liveCode(s); if (c) want[c] = s.id; }
+    for (const c in lobbies) if (want[c] !== lobbies[c].sid) { lobbies[c].iframe.remove(); delete lobbies[c]; }
+    for (const c in want) if (!lobbies[c]) lobbies[c] = { iframe: lobbyFrame(c), sid: want[c] };
+  }
+  // someone arrived in a lobby: hand them the invite (repeated, as the data channel can lag the event)
+  function lobbyGreet(code, uuid) {
+    for (const delay of [0, 800, 2500, 6000]) setTimeout(() => {
+      const l = lobbies[code], s = l && server(l.sid);
+      if (!s || liveCode(s) !== code || !l.iframe.contentWindow) return;
+      l.iframe.contentWindow.postMessage({ sendData: { dischordJoin: inviteCode(s) }, UUID: uuid }, '*');
+    }, delay);
+  }
+  function endJoining() {
+    if (!joining) return;
+    clearTimeout(joining.timer);
+    joining.iframe.remove();
+    joining = null;
+  }
+  function joinByCode(code) {
+    if (!me) return false;
+    const mine = servers.find((s) => liveCode(s) === code);
+    if (mine) { selectServer(mine.id); return true; }
+    endJoining();
+    toast('Looking for that server…', 20000);
+    joining = { code, iframe: lobbyFrame(code), timer: setTimeout(() => { endJoining(); toast('No server answered that code. It may be mistyped or expired, or nobody from the server is online right now.', 9000); }, 20000) };
+    return true;
+  }
 
   function meshUrl(s) {
     const p = new URLSearchParams({ room: roomFor(s), password: s.key, label: me.name });
@@ -345,7 +396,7 @@
   function hello(sid, uuid, want) {
     const s = server(sid);
     if (!s) return;
-    send(sid, { t: 'hello', want: !!want, s: { id: s.id, name: s.name, channels: s.channels, v: s.v } }, uuid);
+    send(sid, { t: 'hello', want: !!want, s: serverDef(s) }, uuid);
   }
 
   // Greet a newly connected peer, retrying until we hear back (the data channel can lag the event).
@@ -666,8 +717,10 @@
     if (!d || !s || d.id !== sid || d.v <= s.v) return;
     const removed = s.channels.filter((c) => !d.channels.some((next) => next.id === c.id && next.type === c.type));
     s.name = d.name; s.channels = d.channels; s.v = d.v;
+    if (d.jc) s.jc = d.jc; else delete s.jc;
     removed.forEach((c) => releaseChannelFiles(sid, c.id));
     saveServers();
+    syncLobbies();
     if (voice && voice.sid === sid && !channel(s, voice.cid)) leaveVoice();
     if (cur.sid === sid && (!channel(s, cur.cid) || removed.some((c) => c.id === cur.cid))) {
       selectChannel((s.channels.find((c) => c.type === 'text') || s.channels[0] || {}).id || null);
@@ -678,7 +731,7 @@
   function bumpServer(s) {
     s.v = now();
     saveServers();
-    send(s.id, { t: 'server', s: { id: s.id, name: s.name, channels: s.channels, v: s.v } });
+    send(s.id, { t: 'server', s: serverDef(s) });
     render();
   }
 
@@ -1993,6 +2046,16 @@
       }
     }
 
+    if (joining && e.source === joining.iframe.contentWindow) {
+      const invite = d.dataReceived && d.dataReceived.dischordJoin;
+      if (typeof invite === 'string' && invite.length < 20000) { endJoining(); joinFromInvite(invite); }
+      return;
+    }
+    for (const code in lobbies) if (lobbies[code].iframe.contentWindow === e.source) {
+      if (d.UUID && ['push-connection', 'view-connection', 'new-push-connection', 'new-view-connection', 'guest-connected'].includes(d.action) && d.value !== false) lobbyGreet(code, d.UUID);
+      return;
+    }
+
     let sid = null;
     for (const id in meshes) if (meshes[id].iframe.contentWindow === e.source) { sid = id; break; }
     if (!sid) return;
@@ -2160,16 +2223,17 @@
     return s;
   }
 
-  function inviteCode(s) { return b64e({ i: s.id, k: s.key, n: s.name, c: s.channels, v: s.v }); }
+  function inviteCode(s) { return b64e({ i: s.id, k: s.key, n: s.name, c: s.channels, v: s.v, ...(liveCode(s) ? { j: s.jc } : {}) }); }
   function inviteLink(s) { return location.origin + location.pathname + '#invite=' + inviteCode(s); }
 
   function joinFromInvite(input) {
     let code = String(input || '').trim();
+    if (code.length <= 12 && cleanCode(code).length === 8) return joinByCode(cleanCode(code)); // a short join code, not a link
     const m = code.match(/invite=([A-Za-z0-9_-]+)/);
     if (m) code = m[1];
     let d;
     try { d = b64d(code); } catch { return toast('That invite link doesn\'t look right.'); }
-    const def = cleanServerDef({ id: d.i, name: d.n, channels: d.c, v: d.v });
+    const def = cleanServerDef({ id: d.i, name: d.n, channels: d.c, v: d.v, jc: d.j });
     if (!def || !isStr(d.k, 64)) return toast('That invite link doesn\'t look right.');
     let s = server(def.id);
     if (!s) {
@@ -2179,6 +2243,7 @@
       toast(`Joined ${s.name}`);
     }
     if (me) connectMesh(s);
+    syncLobbies();
     selectServer(s.id);
     return true;
   }
@@ -2192,6 +2257,7 @@
     for (const key of composerDrafts.keys()) if (key.startsWith(sid + '/')) composerDrafts.delete(key);
     servers = servers.filter((s) => s.id !== sid);
     saveServers();
+    syncLobbies();
     store.del('msgs.' + sid); store.del('known.' + sid);
     delete msgs[sid]; delete members[sid];
     selectServer(servers[0] ? servers[0].id : null);
@@ -3775,8 +3841,8 @@
   }
 
   function joinModal() {
-    modal(`<h2>Join a server</h2><p>Paste an invite link or code.</p>
-      <label>Invite link</label><input type="text" id="mCode" placeholder="https://…#invite=…">
+    modal(`<h2>Join a server</h2><p>Type a join code, or paste an invite link.</p>
+      <label>Join code or invite link</label><input type="text" id="mCode" placeholder="ABCD-EFGH  or  https://…#invite=…">
       <div class="actions"><button class="btn link" data-close>Cancel</button><button class="btn primary" id="mOk">Join</button></div>`, () => {
       const inp = $('mCode');
       inp.focus();
@@ -3794,7 +3860,15 @@
     modal(`<h2>Invite friends to ${esc(s.name)}</h2>
       <p>Anyone with this link can join, chat and hop into voice. Keep it private.${local ? '<br><br><b>Heads up:</b> this copy is running on your own computer, so the link only works here. Use the hosted site to invite people.' : ''}</p>
       <label>Invite link</label><input type="text" id="mLink" readonly value="${esc(link)}">
-      <div class="actions"><button class="btn link" data-close>Done</button><button class="btn primary" id="mCopy">Copy</button></div>`, () => {
+      <label>Join code</label>
+      <div class="join-code">${liveCode(s)
+        ? `<b>${showCode(liveCode(s))}</b><span>Expires ${new Date(s.jc.x).toLocaleDateString([], { month: 'short', day: 'numeric' })}. Works while someone from this server is online.</span><button class="btn primary" id="mCodeCopy">Copy code</button><button class="btn link" id="mCodeOff">Turn off</button>`
+        : `<span>A short code friends can type instead of the link. It lasts 7 days and works while someone from this server is online.</span><button class="btn primary" id="mCodeNew">Create code</button>`}</div>
+      <div class="actions"><button class="btn link" data-close>Done</button><button class="btn primary" id="mCopy">Copy link</button></div>`, () => {
+      const setCode = (jc) => { if (jc) s.jc = jc; else delete s.jc; bumpServer(s); syncLobbies(); inviteModal(); };
+      if ($('mCodeNew')) $('mCodeNew').onclick = () => setCode({ c: rid(8), x: now() + JOIN_CODE_MS });
+      if ($('mCodeOff')) $('mCodeOff').onclick = () => setCode(null);
+      if ($('mCodeCopy')) $('mCodeCopy').onclick = () => { const text = showCode(liveCode(s) || ''); (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject()).then(() => toast('Join code copied'), () => toast(text)); };
       $('mLink').select();
       $('mCopy').onclick = () => {
         (navigator.clipboard ? navigator.clipboard.writeText(link) : Promise.reject()).then(() => toast('Invite link copied'), () => { $('mLink').select(); document.execCommand('copy'); toast('Invite link copied'); });
@@ -4466,6 +4540,8 @@
   // ---------------------------------------------------------------- boot
   function start() {
     servers.forEach(connectMesh);
+    syncLobbies();
+    setInterval(syncLobbies, 60000); // drops the lobby of a code that has expired
     if (pendingInvite) { const p = pendingInvite; pendingInvite = null; joinFromInvite(p); }
     else selectServer(server(cur.sid) ? cur.sid : (servers[0] ? servers[0].id : null));
   }
