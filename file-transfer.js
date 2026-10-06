@@ -102,7 +102,21 @@
     }
 
     const envelope = (t, type, extra = {}) => ({ t: type, cid: t.cid, mid: t.mid, fid: t.meta.id, token: t.token, ...extra });
+    // ---- fast path: when both sides have it (context.fast), the bytes travel over a dedicated binary data
+    // channel instead of base64 chat packets. The packets still carry consent, errors and cancellation,
+    // and remain the fallback: after any fast failure this tab goes back to them.
+    const FAST_MIN = 256 * 1024;
+    let fastBroken = false;
+    const fastOk = (sid, uuid, size) => !fastBroken && size >= FAST_MIN && !!context.fast &&
+      typeof context.fast.ready === 'function' && context.fast.ready(sid, uuid) === true;
+    function stopFast(t) {
+      const fast = t.fast;
+      t.fast = null;
+      if (fast) try { fast.stop(); } catch {}
+    }
+
     function stopSender(t) {
+      stopFast(t);
       clearTimeout(t.timer);
       if (senders.get(t.key) === t) senders.delete(t.key);
       t.file = null;
@@ -116,6 +130,7 @@
 
     function stopReceiver(t, state, message, tellPeer) {
       if (receivers.get(t.key) !== t) return;
+      stopFast(t);
       clearTimeout(t.timer);
       receivers.delete(t.key);
       t.parts.length = 0;
@@ -260,14 +275,80 @@
       t.started = true;
       const strategy = t.strategy;
       const window = mediaWindow(strategy.maxWindow);
+      const fast = fastOk(t.sid, t.uuid, t.meta.size) && startFastReceiver(t);
       if (!sendPacket(t.sid, envelope(t, 'f-request', {
         window, initialWindow: Math.min(window, strategy.initialWindow),
-        adaptive: strategy.name === 'large', ackEvery: strategy.ackEvery,
+        adaptive: strategy.name === 'large', ackEvery: strategy.ackEvery, ...(fast ? { fast: 1 } : {}),
       }), t.uuid)) {
         stopReceiver(t, 'error', 'Unable to contact the sender.', false);
         return false;
       }
       return true;
+    }
+
+    // The receiving end of the fast channel is opened before asking, so nothing the sender sends is missed.
+    function startFastReceiver(t) {
+      let chain = Promise.resolve();
+      try {
+        t.fast = context.fast.receive(t.sid, t.uuid, t.token, t.meta.size, {
+          data: (bytes) => { chain = chain.then(() => acceptFast(t, bytes)); },
+          error: () => {
+            if (receivers.get(t.key) !== t || t.committing) return;
+            fastBroken = true;
+            stopReceiver(t, 'error', 'Download interrupted. Try Download again.', true);
+          },
+        }) || null;
+      } catch { t.fast = null; }
+      return !!t.fast;
+    }
+
+    async function acceptFast(t, bytes) {
+      // An older sender ignores the fast request and sends ordinary chunks; whichever arrives first is used.
+      if (receivers.get(t.key) !== t || !t.fast || t.committing || t.index > 0) return;
+      if (!(bytes instanceof Uint8Array) || !bytes.length || t.bytes + bytes.length > t.meta.size) {
+        stopReceiver(t, 'error', 'File transfer failed.', true);
+        return;
+      }
+      if (!aliveReceiver(t)) {
+        stopReceiver(t, 'error', 'This file was removed or the sender disconnected.', true);
+        return;
+      }
+      t.fastUsed = true;
+      try {
+        if (t.sink) await t.sink.write(bytes); else t.parts.push(bytes);
+      } catch {
+        stopReceiver(t, 'error', 'The browser could not write or save this file.', true);
+        return;
+      }
+      if (receivers.get(t.key) !== t || !t.fast) return;
+      t.bytes += bytes.length;
+      t.acceptedBytes = t.bytes;
+      armReceiver(t);
+      t.fast.credit(t.bytes); // lets the sender release more, and tells it when everything has arrived
+      if (t.bytes < t.meta.size) {
+        change(t.sid, t.cid, t.mid, 'receiving', Math.floor(t.bytes / t.meta.size * 100));
+        return;
+      }
+      t.committing = true;
+      clearTimeout(t.timer);
+      try {
+        if (t.sink) {
+          change(t.sid, t.cid, t.mid, 'saving', 100, 'Saving file…');
+          if (receivers.get(t.key) !== t) return;
+          await t.sink.close();
+          if (closed || receivers.get(t.key) !== t) return;
+          t.sink = null;
+          stopReceiver(t, 'complete', 'File saved to your chosen location.', false);
+        } else {
+          const blob = new Blob(t.parts, { type: t.meta.type || 'application/octet-stream' });
+          if (blob.size !== t.meta.size) throw new Error('Incomplete file.');
+          stopReceiver(t, 'complete', '', false);
+          context.saveDownload(blob, t.meta.name);
+        }
+      } catch {
+        stopReceiver(t, 'error', 'The browser could not save this file.', true);
+        change(t.sid, t.cid, t.mid, 'error', 0, 'The browser could not save this file.');
+      }
     }
 
     function prepareReceiver(t) {
@@ -368,6 +449,21 @@
       senders.set(key, t);
       // Only acknowledged progress extends this deadline; reads and queued sends do not.
       armSender(t);
+      if (p.fast === 1 && fastOk(sid, uuid, offer.meta.size)) {
+        try {
+          t.fast = context.fast.send(sid, uuid, p.token, offer.file, {
+            progress: () => { if (senders.get(t.key) === t) armSender(t); },
+            done: () => { if (senders.get(t.key) === t) stopSender(t); },
+            error: () => {
+              if (senders.get(t.key) !== t) return;
+              fastBroken = true;
+              sendPacket(t.sid, envelope(t, 'f-error', { message: 'File transfer was interrupted. Try Download again.' }), t.uuid);
+              stopSender(t);
+            },
+          }) || null;
+        } catch { t.fast = null; }
+        if (t.fast) return;
+      }
       void pump(t);
     }
 
@@ -433,7 +529,7 @@
 
     function onChunk(sid, p, uuid, uid) {
       const t = receivers.get(keyOf(sid, p.cid, p.mid));
-      if (!t || !t.ready || t.uuid !== uuid || t.uid !== uid || t.token !== p.token || t.meta.id !== p.fid ||
+      if (!t || t.fastUsed || !t.ready || t.uuid !== uuid || t.uid !== uid || t.token !== p.token || t.meta.id !== p.fid ||
           !Number.isSafeInteger(p.index) || p.index !== t.index ||
           p.index >= Math.max(1, Math.ceil(t.meta.size / CHUNK_BYTES)) || typeof p.data !== 'string') return;
       if (!aliveReceiver(t)) {

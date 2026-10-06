@@ -932,8 +932,133 @@
       for (const update of updates) paintFileCards(update.mid, update.sid, update.cid);
     }, 100);
   }
+  // ---- fast file channel. File bytes do not go through chat packets (text, small, acknowledged one batch
+  // at a time): each server's hidden connection frame opens one extra binary data channel per person on
+  // the peer connection that is already there, and streams the file over it at whatever the link carries.
+  // vdoFastFiles runs inside that frame; the page hands it the File and gets received bytes back in batches.
+  function vdoFastFiles() {
+    if (window.__dischordFast || typeof session === 'undefined' || !session) return;
+    window.__dischordFast = true;
+    var ID = 900, PIECE = 64 * 1024, READ = 1 << 20, HIGH = 8 << 20, LOW = 1 << 20, WINDOW = 48 << 20, BATCH = 2 << 20;
+    var recv = {}, send = {}; // transfer id -> job, for the files I am receiving / sending
+    var tell = function (m, transfer) { try { window.parent.postMessage({ dischordFast: m }, '*', transfer || []); } catch (_) { } };
+    var each = function (map, ch, fn) { Object.keys(map).forEach(function (x) { if (map[x].ch === ch) fn(map[x], x); }); };
+    function fail(ch) {
+      [recv, send].forEach(function (map) { each(map, ch, function (j, x) { delete map[x]; j.stop = true; if (j.wake) j.wake(); tell({ ev: 'error', xid: x }); }); });
+    }
+    // Both ends create the channel with the same fixed number, so it needs no handshake of its own.
+    function channel(pc) {
+      if (!pc || typeof pc.createDataChannel !== 'function') return null;
+      var ch = pc.__dischordFiles;
+      if (ch && (ch.readyState === 'open' || ch.readyState === 'connecting')) return ch;
+      try { ch = pc.createDataChannel('dischord-files', { negotiated: true, id: ID }); } catch (_) { return null; }
+      ch.binaryType = 'arraybuffer';
+      ch.bufferedAmountLowThreshold = LOW;
+      ch.onbufferedamountlow = function () { each(send, ch, function (j) { if (j.wake) j.wake(); }); };
+      ch.onmessage = function (e) { incoming(ch, e.data); };
+      ch.onclose = ch.onerror = function () { fail(ch); };
+      pc.__dischordFiles = ch;
+      return ch;
+    }
+    function incoming(ch, data) {
+      if (typeof data === 'string') {
+        var x = data.slice(1);
+        if (data[0] === 'H') { ch.__file = x; if (recv[x] && recv[x].ch === ch) recv[x].on = true; } // the bytes that follow belong to this file
+        else if (data[0] === 'A') { // the receiver has safely stored this many bytes
+          var cut = x.lastIndexOf(':'), s = send[x.slice(0, cut)];
+          if (s && s.ch === ch) { s.acked = Math.max(s.acked, +x.slice(cut + 1) || 0); if (s.wake) s.wake(); tell({ ev: 'progress', xid: x.slice(0, cut) }); }
+        }
+        return;
+      }
+      var r = recv[ch.__file];
+      if (!r || !r.on || r.ch !== ch || !(data instanceof ArrayBuffer)) return;
+      r.parts.push(data); r.held += data.byteLength; r.got += data.byteLength;
+      if (r.held < BATCH && r.got < r.size) return;
+      var out = new Uint8Array(r.held), at = 0;
+      r.parts.forEach(function (part) { out.set(new Uint8Array(part), at); at += part.byteLength; });
+      r.parts = []; r.held = 0;
+      tell({ ev: 'data', xid: ch.__file, buf: out.buffer }, [out.buffer]);
+    }
+    function start(c) {
+      var ch = channel(session.pcs && session.pcs[c.uuid]);
+      if (!ch || !c.file || typeof c.file.slice !== 'function') return tell({ ev: 'error', xid: c.xid });
+      var j = send[c.xid] = { ch: ch, acked: 0, stop: false, wake: null };
+      var pause = function (ms) { return new Promise(function (done) { j.wake = done; setTimeout(done, ms); }); };
+      (async function () {
+        try {
+          for (var n = 0; ch.readyState === 'connecting' && n < 50 && !j.stop; n++) await pause(100);
+          if (j.stop) return;
+          if (ch.readyState !== 'open') throw new Error('closed');
+          ch.send('H' + c.xid);
+          var size = c.file.size, sent = 0;
+          while (sent < size) {
+            var buf = await c.file.slice(sent, Math.min(size, sent + READ)).arrayBuffer();
+            for (var o = 0; o < buf.byteLength; o += PIECE) {
+              // wait while the channel's own queue is full, or the receiver is too far behind writing to disk
+              while (!j.stop && ch.readyState === 'open' && (ch.bufferedAmount > HIGH || sent - j.acked > WINDOW)) await pause(1000);
+              if (j.stop) return;
+              if (ch.readyState !== 'open') throw new Error('closed');
+              var piece = buf.slice(o, Math.min(buf.byteLength, o + PIECE));
+              ch.send(piece);
+              sent += piece.byteLength;
+            }
+          }
+          while (!j.stop && j.acked < size) { if (ch.readyState !== 'open') throw new Error('closed'); await pause(1000); }
+          if (!j.stop && send[c.xid] === j) { delete send[c.xid]; tell({ ev: 'sent', xid: c.xid }); }
+        } catch (_) {
+          if (send[c.xid] === j) { delete send[c.xid]; tell({ ev: 'error', xid: c.xid }); }
+        }
+      })();
+    }
+    window.addEventListener('message', function (e) {
+      if (e.source !== window.parent) return;
+      var c = e.data && e.data.dischordFastCmd;
+      if (!c || typeof c.xid !== 'string') return;
+      if (c.op === 'recv') {
+        var ch = channel(session.rpcs && session.rpcs[c.uuid]);
+        if (!ch) return tell({ ev: 'error', xid: c.xid });
+        recv[c.xid] = { ch: ch, size: c.size, got: 0, held: 0, parts: [], on: ch.__file === c.xid };
+      } else if (c.op === 'credit') {
+        var r = recv[c.xid];
+        if (r && r.ch.readyState === 'open') try { r.ch.send('A' + c.xid + ':' + c.bytes); } catch (_) { }
+      } else if (c.op === 'send') start(c);
+      else if (c.op === 'stop') [recv, send].forEach(function (map) { var j = map[c.xid]; if (j) { delete map[c.xid]; j.stop = true; if (j.wake) j.wake(); } });
+    });
+    tell({ ev: 'hello' });
+  }
+  const fastJobs = new Map(); // transfer id -> { mesh, handlers }
+  const fastMesh = (sid, uuid) => { const m = meshes[sid === DM ? connServer(uuid) : sid]; return m && m.fast && m.iframe.contentWindow ? m : null; };
+  const fastPost = (m, cmd) => { try { m.iframe.contentWindow.postMessage({ dischordFastCmd: cmd }, new URL(VDO, location.href).origin); return true; } catch { return false; } };
+  function fastJob(sid, uuid, xid, cmd, handlers) {
+    const m = fastMesh(sid, uuid);
+    if (!m || !fastPost(m, { ...cmd, uuid, xid })) return null;
+    fastJobs.set(xid, { m, handlers });
+    return { credit: (bytes) => fastPost(m, { op: 'credit', xid, bytes }), stop: () => { fastJobs.delete(xid); fastPost(m, { op: 'stop', xid }); } };
+  }
+  const fastFiles = {
+    ready: (sid, uuid) => !!fastMesh(sid, uuid),
+    receive: (sid, uuid, xid, size, handlers) => fastJob(sid, uuid, xid, { op: 'recv', size }, handlers),
+    send: (sid, uuid, xid, file, handlers) => fastJob(sid, uuid, xid, { op: 'send', file }, handlers),
+  };
+  function onFastEvent(m, d) {
+    if (d.ev === 'hello') { m.fast = true; return; }
+    const job = fastJobs.get(d.xid);
+    if (!job || job.m !== m) return;
+    if (d.ev === 'data') { if (d.buf instanceof ArrayBuffer) job.handlers.data(new Uint8Array(d.buf)); }
+    else if (d.ev === 'progress') { if (job.handlers.progress) job.handlers.progress(); }
+    else if (d.ev === 'sent') { fastJobs.delete(d.xid); if (job.handlers.done) job.handlers.done(); }
+    else if (d.ev === 'error') { fastJobs.delete(d.xid); job.handlers.error(); }
+  }
+  // Install the channel code in a server's connection frame once that frame is talking to us.
+  function armFast(m) {
+    if (m.fast || now() - (m.fastAsked || 0) < 3000) return;
+    m.fastAsked = now();
+    try { m.iframe.contentWindow.postMessage({ function: 'eval', value: '(' + vdoFastFiles.toString() + ')();' }, '*'); } catch { }
+  }
+
   const fileTransfers = window.DischordFiles.create({
     send,
+    fast: fastFiles,
     getMessage: (sid, cid, mid) => channel(server(sid), cid)?.type === 'text' ? (getMsgs(sid)[cid] || []).find((m) => m.id === mid) : undefined,
     isPeer: (sid, uid, uuid) => { const via = sid === DM ? connServer(uuid) : sid; return !!(peers[via] && peers[via].get(uuid)?.uid === uid); },
     resolvePeer: (sid, uid, cid, mid) => {
@@ -1871,6 +1996,8 @@
     let sid = null;
     for (const id in meshes) if (meshes[id].iframe.contentWindow === e.source) { sid = id; break; }
     if (!sid) return;
+    if (d.dischordFast) return onFastEvent(meshes[sid], d.dischordFast);
+    armFast(meshes[sid]);
 
     if (d.dataReceived && d.dataReceived.dischord) {
       onPeerData(sid, d.dataReceived.dischord, d.UUID);
