@@ -946,3 +946,8 @@ body.dm-view #inviteTop, body.dm-view #membersToggle { display: none; }
 .mem-cat .icon-btn .ico-svg { width: 15px; height: 15px; }
 #members:hover .mem-cat .icon-btn, .mem-cat .icon-btn:focus-visible { opacity: 1; }
 @media (hover: none) { .mem-cat .icon-btn { opacity: 1; } }
+
+/* a tile shrinking back out of fill-window / fullscreen may pass over the rest of the app */
+body.tile-out #main { overflow: visible; z-index: 41; }
+body.tile-out #voiceStage { overflow: visible; }
+body.tile-out #tiles .tile { z-index: 1; }

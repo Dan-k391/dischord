@@ -2422,7 +2422,66 @@
     paintSpeaking();
     applyVolumes();
     if (animating) glideTiles(before);
+    if (animating && winFs !== shownWinFs) { if (winFs) liftStage(before.get(winFs)); else unclipTiles(); }
+    shownWinFs = winFs;
     updateMini();
+  }
+
+  // Filling the window or the screen grows the picture out of the tile it was in, and shrinks it back
+  // there, with the rest of the app staying visible around it instead of cutting to black.
+  const POP = { duration: 340, easing: 'cubic-bezier(.2, .85, .25, 1.04)' };
+  let shownWinFs = null, unclipTimer = null;
+  let fsFrom = null, fsKey = null; // where a tile was before it went fullscreen; which tile is fullscreen
+  // entering fill-window: the stage (now covering the app) is revealed from the tile's old box outwards
+  function liftStage(was) {
+    const stage = $('voiceStage');
+    if (!was || !was.width || typeof stage.animate !== 'function') return;
+    const r = stage.getBoundingClientRect();
+    stage.animate([
+      { clipPath: `inset(${was.top - r.top}px ${r.right - was.right}px ${r.bottom - was.bottom}px ${was.left - r.left}px round 10px)` },
+      { clipPath: 'inset(0px 0px 0px 0px round 0px)' },
+    ], POP);
+  }
+  // leaving: the tile shrinks back from beyond the call area, so it must not be cut off at its edges meanwhile
+  function unclipTiles() {
+    document.body.classList.add('tile-out');
+    clearTimeout(unclipTimer);
+    unclipTimer = setTimeout(() => document.body.classList.remove('tile-out'), POP.duration + 40);
+  }
+  function popTile(el, from) {
+    if (typeof el.animate !== 'function' || typeof el.getBoundingClientRect !== 'function') return;
+    const to = el.getBoundingClientRect();
+    if (!to.width || !to.height || !from.width || !from.height) return;
+    el.animate([{ transformOrigin: '0 0', transform: `translate(${from.left - to.left}px, ${from.top - to.top}px) scale(${from.width / to.width}, ${from.height / to.height})` },
+      { transformOrigin: '0 0', transform: 'none' }], POP);
+  }
+  function tileFullscreen(key) {
+    const el = tileEls.get(key);
+    if (!el || !el.requestFullscreen) return;
+    const edge = (window.outerWidth - window.innerWidth) / 2; // window border; the rest of the difference is the title / tab bar
+    fsFrom = { key, rect: el.getBoundingClientRect(), x: window.screenX + edge, y: window.screenY + (window.outerHeight - window.innerHeight) - edge };
+    el.requestFullscreen();
+  }
+  function onFullscreenChange() {
+    const el = document.fullscreenElement, key = el && el.dataset ? el.dataset.key : null;
+    const from = fsFrom, left = fsKey;
+    fsFrom = null; fsKey = key && tileEls.get(key) === el ? key : null;
+    if (voice) renderStage(); // swaps the button between expand / exit
+    if (!voice || document.hidden) return;
+    if (fsKey && from && from.key === fsKey) {
+      // The tile's old place on the monitor, seen from the fullscreen picture. Browsers forbid transforming
+      // the fullscreen element itself, so its picture is scaled and the tile is revealed along with it.
+      const was = { left: from.x + from.rect.left - window.screenX, top: from.y + from.rect.top - window.screenY, width: from.rect.width, height: from.rect.height };
+      const full = el.getBoundingClientRect(), media = el.querySelector('.tile-media');
+      if (media) popTile(media, was);
+      if (typeof el.animate === 'function') el.animate([
+        { clipPath: `inset(${was.top - full.top}px ${full.right - was.left - was.width}px ${full.bottom - was.top - was.height}px ${was.left - full.left}px round 10px)` },
+        { clipPath: 'inset(0px 0px 0px 0px round 0px)' },
+      ], POP);
+    } else if (!el && left && tileEls.get(left)) {
+      unclipTiles();
+      popTile(tileEls.get(left), { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight });
+    }
   }
 
   // Tiles move between layouts (grid, focused, strip, fill-window) by gliding from where they were to
@@ -2968,7 +3027,7 @@
           case 'hidevid': hiddenVid[uid] = !hiddenVid[uid]; if (!hiddenVid[uid]) delete hiddenVid[uid]; store.set('hidevid', hiddenVid); renderStage(); return reopen();
           case 'watching': { const o = voice && voiceOccupants(voice.sid, voice.cid).find((x) => x.user.id === uid); if (o && o.vss) setWatching(o.vss, unwatched.has(o.vss)); return reopen(); }
           case 'watch': closeCtx(); showVoice(); focusUid = uid + ':s'; return renderStage();
-          case 'fs': { closeCtx(); showVoice(); const el = tileEls.get(uid + ':s'); if (el && el.requestFullscreen) el.requestFullscreen(); return; }
+          case 'fs': closeCtx(); showVoice(); return tileFullscreen(uid + ':s');
           case 'dm': closeCtx(); return openDm(user);
           case 'mention': {
             closeCtx();
@@ -4011,7 +4070,7 @@
     const wf = e.target.closest('[data-wfs]');
     if (wf) { winFs = winFs === wf.dataset.wfs ? null : wf.dataset.wfs; if (document.fullscreenElement) document.exitFullscreen(); return renderStage(); }
     const fs = e.target.closest('[data-fs]');
-    if (fs) { const el = tileEls.get(fs.dataset.fs); if (document.fullscreenElement) document.exitFullscreen(); else if (el && el.requestFullscreen) el.requestFullscreen(); return; }
+    if (fs) { if (document.fullscreenElement) document.exitFullscreen(); else tileFullscreen(fs.dataset.fs); return; }
     const un = e.target.closest('[data-unwatch]');
     if (un) { if (winFs) winFs = null; return setWatching(un.dataset.unwatch, false); }
     const wa = e.target.closest('[data-watch]');
@@ -4057,9 +4116,7 @@
     if (t) { e.preventDefault(); setZoom(t.dataset.key, 1, 0, 0); }
   });
   document.addEventListener('click', (e) => { if (!e.target.closest('#qMenu')) $('qMenu').classList.add('hidden'); });
-  document.addEventListener('fullscreenchange', () => {
-    if (voice) renderStage(); // swaps the button between expand / exit
-  });
+  document.addEventListener('fullscreenchange', onFullscreenChange);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && focusUid && $('modalBack').classList.contains('hidden')) { focusUid = null; renderStage(); } });
   $('devDone').onclick = () => { if (!voice) return; voice.devices = false; voicePost({ toggleSettings: false }); renderStage(); };
   for (const [id, kind] of [['micCaret', 'audioinput'], ['cbMicCaret', 'audioinput'], ['deafCaret', 'audiooutput'], ['cbDeafCaret', 'audiooutput'], ['cbCamCaret', 'videoinput']]) {
