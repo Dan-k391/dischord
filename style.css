@@ -925,3 +925,16 @@ body.resizing iframe { pointer-events: none !important; }
 @media (min-width: 620px) and (max-width: 760px), (min-width: 620px) and (max-width: 1024px) and (pointer: coarse) {
   #voiceStage { --mobile-call-height: calc(64px + var(--safe-area-inset-bottom)); }
 }
+
+/* ---------- direct messages ---------- */
+.rail-btn.home[data-badge]:not([data-badge=""])::after {
+  content: attr(data-badge); position: absolute; right: -4px; bottom: -4px; min-width: 10px; height: 16px; line-height: 16px;
+  padding: 0 4px; border-radius: 10px; background: var(--red); color: #fff; font-size: 11px; font-weight: 700; border: 3px solid var(--bg-rail);
+}
+.chan.dm { gap: 10px; padding: 5px 8px; }
+.chan.dm .avatar { width: 30px; height: 30px; font-size: 13px; }
+.chan.dm .avatar .dot { border-color: var(--bg-side); }
+.chan.dm.offline .avatar .dot { background: #80848e; }
+.chan.dm.offline:not(.active):not(.unread) { opacity: .6; }
+.dm-empty { padding: 8px; font-size: 13px; line-height: 1.45; color: var(--text-muted); }
+body.dm-view #inviteTop, body.dm-view #membersToggle { display: none; }

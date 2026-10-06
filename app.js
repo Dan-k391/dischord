@@ -196,7 +196,13 @@
   const composerDrafts = new Map(); // channel drafts, including local file references; never persisted
   const fileProviders = new Map(); // offer -> originating connection, never saved in chat history
 
-  const server = (sid) => servers.find((s) => s.id === sid);
+  // Direct messages: a private conversation with one person. It is kept as a pretend server ('dm') whose
+  // text channels are the people, so chat, replies, reactions, images and files all work the same way.
+  // Its packets go only to that person's connections, through any server we both have open (sendDm, dmPacket).
+  const DM = 'dm';
+  let dms = [];          // people I have a conversation with: { id, name, color, hid?: closed at }
+  const dmServer = { id: DM, name: 'Direct Messages', dm: true, v: 0, get channels() { return dms.filter((u) => !u.hid).map((u) => ({ id: u.id, name: u.name, type: 'text' })); } };
+  const server = (sid) => (sid === DM ? dmServer : servers.find((s) => s.id === sid));
   const channel = (s, cid) => s && s.channels.find((c) => c.id === cid);
   const saveServers = () => store.set('servers', servers);
 
@@ -215,6 +221,7 @@
     saveTimers[sid] = setTimeout(() => store.set('msgs.' + sid, msgs[sid] || {}), 400);
   }
   function getKnown(sid) {
+    if (sid === DM) return Object.fromEntries(dms.map((u) => [u.id, u]));
     if (!known[sid]) known[sid] = store.get('known.' + sid, {});
     return known[sid];
   }
@@ -278,6 +285,8 @@
     return { m: !!st.m, d: !!st.d, c: !!st.c, s: !!st.s, cb: br(st.cb), sb: br(st.sb) };
   }
 
+  dms = (store.get('dms', []) || []).map((u) => { const c = cleanUser(u); return c && (u.hid > 0 ? { ...c, hid: +u.hid } : c); }).filter(Boolean);
+
   // ---------------------------------------------------------------- mesh (hidden VDO.Ninja rooms)
   const roomFor = (s, suffix = '') => 'dischord' + s.id + suffix;
 
@@ -320,6 +329,7 @@
 
   // Every payload carries who I am and my voice state, so presence is never stale.
   function send(sid, payload, uuid) {
+    if (sid === DM) return sendDm(payload, uuid);
     const m = meshes[sid];
     if (!m || !m.iframe.contentWindow) return false;
     const inV = myVoiceIn(sid);
@@ -399,6 +409,73 @@
     return now() - m.seen < (m.uuids && m.uuids.size ? STALE_CONNECTED : m.vc ? STALE_VOICE : STALE_LOOSE);
   }
 
+  // ---- direct messages: find the person in whichever shared server they are connected through
+  function anyMember(uid) {
+    let hit = null;
+    for (const sid in members) { const m = members[sid][uid]; if (m && isOnline(m)) return m; if (m) hit = m; }
+    return hit;
+  }
+  const dmOnline = (uid) => isOnline(anyMember(uid));
+  const dmTopic = (uid) => (dmOnline(uid) ? 'Online' : 'Offline') + ' · only the two of you can see this';
+  const connServer = (uuid) => Object.keys(meshes).find((sid) => peers[sid] && peers[sid].has(uuid)) || null;
+  function sendDm(payload, uuid) {
+    if (uuid) { const sid = connServer(uuid); return sid ? send(sid, { ...payload, dm: 1 }, uuid) : false; }
+    const to = (payload.m && payload.m.cid) || payload.cid; // the conversation is named after the other person
+    for (const sid in meshes) {
+      const m = members[sid] && members[sid][to];
+      if (!m || !isOnline(m) || !m.uuids.size) continue;
+      for (const id of m.uuids) send(sid, { ...payload, dm: 1 }, id); // every tab they have open
+      return true;
+    }
+    return false; // offline: it stays in my history and is handed over when we next connect (sendDmHistory)
+  }
+  function sendDmHistory(sid, uuid, uid) {
+    const list = (getMsgs(DM)[uid] || []).slice(-HIST_SEND);
+    for (let i = 0; i < list.length; i += 15) send(sid, { t: 'hist', dm: 1, ms: list.slice(i, i + 15) }, uuid);
+  }
+  // Put someone in the conversation list. A conversation I closed comes back only for something newer.
+  function noteDm(user, ts, open) {
+    let d = dms.find((x) => x.id === user.id);
+    if (!d) { d = { id: user.id, name: user.name, color: user.color }; dms.unshift(d); }
+    else if (d.hid && (open || ts > d.hid)) delete d.hid;
+    else return;
+    store.set('dms', dms);
+    renderRail();
+    if (cur.sid === DM) renderChannels();
+  }
+  function openDm(user) {
+    if (!user || user.id === me.id) return;
+    noteDm(user, now(), true);
+    if (cur.sid !== DM) selectServer(DM);
+    selectChannel(user.id);
+  }
+  function closeDm(uid) {
+    const d = dms.find((x) => x.id === uid);
+    if (!d) return;
+    d.hid = now();
+    store.set('dms', dms);
+    markRead(DM, uid);
+    if (cur.sid === DM && cur.cid === uid) selectServer(DM); else render();
+  }
+  // An incoming direct packet names the conversation after its receiver (me); here it is filed under its sender.
+  const DM_TYPES = new Set(['msg', 'hist', 'del', 'edit', 'react', 'typing', 'imgc', 'imgreq', 'f-request', 'f-chunk', 'f-ack', 'f-error', 'f-cancel']);
+  function dmPacket(p, from) {
+    if (!DM_TYPES.has(p.t)) return null;
+    const mine = (m) => (m && typeof m === 'object' && m.cid === me.id ? { ...m, cid: from.id } : null);
+    const q = { ...p };
+    if (p.t === 'hist') {
+      q.ms = (Array.isArray(p.ms) ? p.ms.slice(0, 50) : []).map(mine).filter((m) => m && m.a && (m.a.id === from.id || m.a.id === me.id));
+      if (!q.ms.length) return null;
+      noteDm(from, Math.max(...q.ms.map((m) => +m.ts || 0)));
+    } else if (p.m !== undefined) {
+      q.m = mine(p.m);
+      if (!q.m) return null;
+      if (p.t === 'msg') noteDm(from, +q.m.ts || 0);
+    } else if (p.cid === me.id) q.cid = from.id;
+    else return null;
+    return q;
+  }
+
   // The same person open twice in one call (two tabs, or the app plus a tab) would hear their own
   // microphone come back from the other copy. Remember those streams so they are played at zero volume.
   const ownStreams = new Map(); // connection -> { sid, vc, ids: [stream ids], seen }
@@ -444,6 +521,8 @@
       store.set('known.' + sid, k);
       if (sid === cur.sid) renderMessages(); // their old messages pick up the new name / colour
     }
+    const d = dms.find((x) => x.id === user.id);
+    if (d && (d.name !== user.name || d.color !== user.color)) { d.name = user.name; d.color = user.color; store.set('dms', dms); if (cur.sid === DM) render(); }
     return { user, wasOnline };
   }
 
@@ -463,11 +542,15 @@
       map.set(uuid, pr);
       if (first) {
         sendHistory(sid, uuid);
+        sendDmHistory(sid, uuid, t.user.id);
         if (p.t !== 'hello' || p.want) { hello(sid, uuid, false); pr.helloAt = now(); }
       } else if (p.t === 'hello' && p.want && now() - pr.helloAt > 1500) {
         hello(sid, uuid, false); pr.helloAt = now();
       }
     }
+
+    const via = sid;
+    if (p.dm) { p = dmPacket(p, t.user); if (!p) return; sid = DM; } // handled below as the 'dm' pretend server
 
     switch (p.t) {
       case 'hello':
@@ -557,7 +640,7 @@
         break;
       }
     }
-    if (sid === cur.sid && p.t !== 'imgc' && !p.t?.startsWith('f-')) renderPresence();
+    if ((via === cur.sid || cur.sid === DM) && p.t !== 'imgc' && !p.t?.startsWith('f-')) renderPresence();
   }
 
   function mergeServer(sid, def) {
@@ -671,7 +754,7 @@
         pending.shift();
       }
       addMsg(s.id, m);
-      send(s.id, { t: 'msg', m });
+      if (!send(s.id, { t: 'msg', m }) && s.dm) toast(`${c.name} is offline. They will get this when you are both online.`, 5000);
       if (part.att && window.DischordImages.isImage(m.file)) prepareImagePreview(s.id, m.cid, m.id, part.att);
       sent++;
     }
@@ -787,7 +870,7 @@
     const s = server(sid), c = channel(s, m.cid);
     if (!s || !c) return;
     try {
-      const n = new Notification(`${m.a.name} (#${c.name}, ${s.name})`, { body: (m.text || (m.file ? '📎 ' + m.file.name : m.img ? '📷 Image' : '')).slice(0, 200), tag: sid + m.cid });
+      const n = new Notification(s.dm ? `${m.a.name} (direct message)` : `${m.a.name} (#${c.name}, ${s.name})`, { body: (m.text || (m.file ? '📎 ' + m.file.name : m.img ? '📷 Image' : '')).slice(0, 200), tag: sid + m.cid });
       n.onclick = () => { window.focus(); selectServer(sid); selectChannel(m.cid); };
     } catch { }
   }
@@ -835,12 +918,13 @@
   const fileTransfers = window.DischordFiles.create({
     send,
     getMessage: (sid, cid, mid) => channel(server(sid), cid)?.type === 'text' ? (getMsgs(sid)[cid] || []).find((m) => m.id === mid) : undefined,
-    isPeer: (sid, uid, uuid) => peers[sid] && peers[sid].get(uuid)?.uid === uid,
+    isPeer: (sid, uid, uuid) => { const via = sid === DM ? connServer(uuid) : sid; return !!(peers[via] && peers[via].get(uuid)?.uid === uid); },
     resolvePeer: (sid, uid, cid, mid) => {
       const origin = fileProviders.get(sid + '/' + cid + '/' + mid);
-      if (origin && peers[sid]?.get(origin)?.uid === uid) return origin;
-      const matches = [...(peers[sid] || new Map())].filter(([, p]) => p.uid === uid);
-      return matches.length ? matches[0][0] : null;
+      const pools = sid === DM ? Object.keys(meshes) : [sid]; // a direct message travels through any shared server
+      if (origin && pools.some((via) => peers[via]?.get(origin)?.uid === uid)) return origin;
+      for (const via of pools) for (const [id, p] of peers[via] || []) if (p.uid === uid) return id;
+      return null;
     },
     userId: () => me && me.id,
     randomId: () => rid(20),
@@ -1997,8 +2081,9 @@
     if (!me) return;
     $('serverList').innerHTML = servers.map((s) =>
       `<button class="rail-btn ${s.id === cur.sid ? 'active' : ''} ${serverUnread(s) && s.id !== cur.sid ? 'unread' : ''} ${voice && voice.sid === s.id ? 'in-voice' : ''}" data-sid="${esc(s.id)}" title="${esc(s.name)}">${esc(initials(s.name))}</button>`).join('');
-    $('homeBtn').classList.toggle('active', !cur.sid);
-    let total = 0;
+    let total = dmServer.channels.reduce((n, c) => n + unreadCount(DM, c.id), 0);
+    $('homeBtn').classList.toggle('active', !cur.sid || cur.sid === DM);
+    $('homeBtn').dataset.badge = total ? (total > 99 ? '99+' : total) : '';
     for (const s of servers) for (const c of s.channels) if (c.type === 'text') total += unreadCount(s.id, c.id);
     document.title = (total ? `(${total}) ` : '') + 'Dischord';
   }
@@ -2006,7 +2091,8 @@
   function renderHeader() {
     const s = server(cur.sid);
     $('serverName').textContent = s ? s.name : 'Dischord';
-    $('serverMenuBtn').classList.toggle('hidden', !s);
+    $('serverMenuBtn').classList.toggle('hidden', !s || !!s.dm);
+    document.body.classList.toggle('dm-view', !!(s && s.dm));
   }
 
   function voiceOccupants(sid, cid) {
@@ -2032,6 +2118,16 @@
       el.innerHTML = `<div class="cat"><span>Your servers</span></div>` + (servers.length
         ? servers.map((x) => `<div class="chan" data-sid="${esc(x.id)}"><span class="ico">${icon('hash')}</span><span class="name">${esc(x.name)}</span></div>`).join('')
         : `<div class="chan" style="cursor:default">No servers yet</div>`);
+      return;
+    }
+    if (s.dm) {
+      const last = (u) => { const l = getMsgs(DM)[u.id] || []; return l.length ? l[l.length - 1].ts : 0; };
+      const list = dms.filter((u) => !u.hid).sort((a, b) => last(b) - last(a));
+      el.innerHTML = `<div class="cat"><span>Direct messages</span></div>` + (list.length ? list.map((u) => {
+        const n = u.id === cur.cid ? 0 : unreadCount(DM, u.id);
+        return `<div class="chan dm ${u.id === cur.cid ? 'active' : ''} ${n ? 'unread' : ''} ${dmOnline(u.id) ? '' : 'offline'}" data-cid="${esc(u.id)}" data-type="text">${avatar(u, true)}<span class="name">${esc(u.name)}</span>${n ? `<span class="badge">${n > 99 ? '99+' : n}</span>` : ''}</div>`;
+      }).join('') : `<div class="dm-empty">No conversations yet. Right-click someone in a server and choose <b>Message</b>.</div>`);
+      if (channel(s, cur.cid)) $('chanTopic').textContent = dmTopic(cur.cid); // presence changes repaint this list
       return;
     }
     const text = s.channels.filter((c) => c.type === 'text');
@@ -2079,11 +2175,11 @@
     renderMobileNavigation();
 
     if (!c) return;
-    $('chanIcon').innerHTML = icon(c.type === 'text' ? 'hash' : 'speaker');
+    $('chanIcon').innerHTML = icon(s.dm ? 'at' : c.type === 'text' ? 'hash' : 'speaker');
     $('chanName').textContent = c.name;
-    $('chanTopic').textContent = c.type === 'voice' ? 'Voice & video, peer-to-peer' : '';
+    $('chanTopic').textContent = s.dm ? dmTopic(c.id) : c.type === 'voice' ? 'Voice & video, peer-to-peer' : '';
     if (c.type === 'text') {
-      $('msgInput').placeholder = `Message #${c.name}`;
+      $('msgInput').placeholder = s.dm ? `Message @${c.name}` : `Message #${c.name}`;
       renderMessages();
       renderTyping();
     } else renderVoiceIdle();
@@ -2688,6 +2784,17 @@
   function channelMenu(cid, x, y) {
     const s = server(cur.sid), c = channel(s, cid);
     if (!c) return;
+    if (s.dm) {
+      return openCtx(x, y, `<div class="ctx-head"><span>@ ${esc(c.name)}</span></div>` + ctxItem('read', 'check', 'Mark as read') + ctxItem('close', 'x', 'Close conversation'), (menu) => {
+        menu.onclick = (e) => {
+          const b = e.target.closest('[data-act]');
+          if (!b) return;
+          closeCtx();
+          if (b.dataset.act === 'close') return closeDm(c.id);
+          markRead(DM, c.id); renderRail(); renderChannels();
+        };
+      });
+    }
     const inIt = !!(voice && voice.sid === s.id && voice.cid === c.id);
     let h = `<div class="ctx-head"><span>${c.type === 'text' ? '# ' : ''}${esc(c.name)}</span></div>`;
     const started = c.type === 'voice' && voiceOccupants(s.id, c.id).length ? callStart(s.id, c.id) : null;
@@ -2716,7 +2823,7 @@
   // empty space in the channel list, a category header, or the server header
   function serverAreaMenu(x, y) {
     const s = server(cur.sid);
-    if (!s) return;
+    if (!s || s.dm) return;
     const h = `<div class="ctx-head"><span>${esc(s.name)}</span></div>` +
       ctxItem('addText', 'hash', 'Create text channel') + ctxItem('addVoice', 'speaker', 'Create voice channel') +
       ctxItem('invite', 'userPlus', 'Invite people') + ctxItem('read', 'check', 'Mark server as read') + '<div class="ctx-sep"></div>' +
@@ -2776,7 +2883,7 @@
   function userMenu(uid, x, y) {
     const self = uid === me.id;
     const sid = cur.sid;
-    const ms = (members[sid] || {})[uid];
+    const ms = sid === DM ? anyMember(uid) : (members[sid] || {})[uid];
     const user = self ? me : (ms && ms.user) || getKnown(sid)[uid];
     if (!user) return;
     const occ = voice ? voiceOccupants(voice.sid, voice.cid).find((o) => o.user.id === uid) : null;
@@ -2806,8 +2913,8 @@
       } else if (c.m || (c.v ?? 100) !== 100) {
         h += ctxSlider('vol', 'User volume', c.v ?? 100) + ctxCheck('mute', 'Mute', !!c.m) + '<div class="ctx-sep"></div>';
       }
-      h += ctxItem('mention', 'at', 'Mention') + ctxItem('copyname', 'copy', 'Copy username');
-      if (ms && isOnline(ms) && ms.vc) h += '<div class="ctx-sep"></div>' + ctxItem('kick', 'hangup', 'Kick from voice', 'danger');
+      h += ctxItem('dm', 'at', 'Message') + ctxItem('mention', 'at', 'Mention') + ctxItem('copyname', 'copy', 'Copy username');
+      if (sid !== DM && ms && isOnline(ms) && ms.vc) h += '<div class="ctx-sep"></div>' + ctxItem('kick', 'hangup', 'Kick from voice', 'danger');
     }
     openCtx(x, y, h, (m) => {
       m.querySelectorAll('[data-slide]').forEach((r) => {
@@ -2844,6 +2951,7 @@
           case 'watching': { const o = voice && voiceOccupants(voice.sid, voice.cid).find((x) => x.user.id === uid); if (o && o.vss) setWatching(o.vss, unwatched.has(o.vss)); return reopen(); }
           case 'watch': closeCtx(); showVoice(); focusUid = uid + ':s'; return renderStage();
           case 'fs': { closeCtx(); showVoice(); const el = tileEls.get(uid + ':s'); if (el && el.requestFullscreen) el.requestFullscreen(); return; }
+          case 'dm': closeCtx(); return openDm(user);
           case 'mention': {
             closeCtx();
             const inp = $('msgInput');
@@ -2942,6 +3050,7 @@
   // a mention is "@" + the name without spaces or punctuation; resolve it back to a person in this server
   const mentionTag = (name) => String(name || '').replace(/[^\p{L}\p{N}_.-]+/gu, '').slice(0, 32);
   function serverPeople(sid) {
+    if (sid === DM) return dms.filter((u) => u.id === cur.cid).map((user) => ({ user, on: dmOnline(user.id) }));
     const k = getKnown(sid), ms = members[sid] || {};
     const out = [];
     for (const id of new Set([...Object.keys(k), ...Object.keys(ms)])) {
@@ -3008,7 +3117,9 @@
     if (!c || c.type !== 'text') return;
     const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
     const list = (getMsgs(s.id)[c.id] || []).filter((m) => !m.del);
-    let h = `<div class="chan-intro"><div class="big">${icon('hash')}</div><h2>Welcome to #${esc(c.name)}!</h2><p>This is the start of the #${esc(c.name)} channel. Messages travel peer-to-peer; people who join later get recent history from whoever is online.</p></div>`;
+    let h = s.dm
+      ? `<div class="chan-intro"><div class="big">${icon('at')}</div><h2>${esc(c.name)}</h2><p>This is the start of your direct messages with ${esc(c.name)}. They go straight from your device to theirs; messages sent while one of you is offline arrive the next time you are both online.</p></div>`
+      : `<div class="chan-intro"><div class="big">${icon('hash')}</div><h2>Welcome to #${esc(c.name)}!</h2><p>This is the start of the #${esc(c.name)} channel. Messages travel peer-to-peer; people who join later get recent history from whoever is online.</p></div>`;
     let prev = null;
     for (const m of list) {
       const newDay = !prev || new Date(prev.ts).toDateString() !== new Date(m.ts).toDateString();
@@ -3148,8 +3259,8 @@
     if (!me) return;
     const el = $('members');
     const s = server(cur.sid);
-    el.classList.toggle('collapsed', !s || !membersOpen);
-    if (!s) return;
+    el.classList.toggle('collapsed', !s || !!s.dm || !membersOpen);
+    if (!s || s.dm) return;
     const ms = members[s.id] || {};
     const k = getKnown(s.id);
     const ids = new Set([...Object.keys(k), ...Object.keys(ms)]);
@@ -3535,7 +3646,7 @@
   // ---------------------------------------------------------------- events
   paintIcons();
   $('serverList').onclick = (e) => { const b = e.target.closest('[data-sid]'); if (b) selectServer(b.dataset.sid); };
-  $('homeBtn').onclick = () => selectServer(null);
+  $('homeBtn').onclick = () => selectServer(DM);
   $('addServerBtn').onclick = createServerModal;
   $('wCreate').onclick = createServerModal;
   $('wJoin').onclick = joinModal;
@@ -3569,7 +3680,7 @@
     };
     list.addEventListener('dragstart', (e) => {
       const person = e.target.closest('.voice-user[data-uid]'), row = !person && e.target.closest('.chan[data-cid]');
-      if (!person && !row) return;
+      if ((!person && !row) || cur.sid === DM) return;
       listDrag = person ? { kind: 'user', id: person.dataset.uid } : { kind: 'chan', id: row.dataset.cid, type: row.dataset.type };
       (person || row).classList.add('dragging');
       e.dataTransfer.effectAllowed = 'move';
