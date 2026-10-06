@@ -4345,6 +4345,29 @@
   };
   $('mobileChannels').onclick = () => setMobilePane(mobilePane ? null : 'channels');
   $('mobileBackdrop').onclick = () => setMobilePane(null);
+  // Phones: swipe sideways to slide the side bars in and out. Right brings in the servers and channels,
+  // left the member list; the opposite swipe (or a tap outside) puts an open one away again.
+  (() => {
+    let from = null;
+    const busy = 'input[type="range"], .tile.zoomed, #voiceStage.mini, .ctx, #qMenu, #emojiMenu, #mentionMenu, #modalBack:not(.hidden), .image-viewer';
+    document.addEventListener('touchstart', (e) => {
+      from = mobileLayout() && e.touches.length === 1 && !(e.target.closest && e.target.closest(busy))
+        ? { x: e.touches[0].clientX, y: e.touches[0].clientY, at: now() } : null;
+    }, { passive: true });
+    document.addEventListener('touchmove', (e) => { if (e.touches.length !== 1) from = null; }, { passive: true }); // pinch, not swipe
+    document.addEventListener('touchend', (e) => {
+      const start = from, t = e.changedTouches[0];
+      from = null;
+      if (!start || !t || now() - start.at > 700 || !mobileLayout()) return;
+      const dx = t.clientX - start.x, dy = t.clientY - start.y;
+      if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 2) return;
+      if (String(window.getSelection && window.getSelection()) !== '') return; // selecting text, not swiping
+      const right = dx > 0, s = server(cur.sid);
+      if (mobilePane) { if ((mobilePane === 'channels') !== right) setMobilePane(null); }
+      else if (right) setMobilePane('channels');
+      else if (s && !s.dm) { membersOpen = true; renderMembers(); setMobilePane('members'); }
+    }, { passive: true });
+  })();
   $('mobileSettings').onclick = () => { if (me) settingsModal('profile'); };
   $('mobileCall').onclick = () => { setMobilePane(null); showVoice(); };
   window.addEventListener('resize', updateMobileViewport);

@@ -826,9 +826,10 @@ body.resizing iframe { pointer-events: none !important; }
   .msg .meta { flex-wrap: wrap; column-gap: 6px; }
   .msg .time { font-size: 11px; }
   .msg .actions { display: none; }
-  .message-more { display: inline-grid; float: right; width: 44px; height: 44px; margin: -3px -4px 0 4px; font-size: 24px; }
+  .msg { padding-top: 1px; padding-bottom: 1px; padding-right: max(40px, calc(var(--safe-area-inset-right) + 34px)); }
+  .message-more { display: inline-grid; position: absolute; top: 0; right: max(2px, var(--safe-area-inset-right)); width: 40px; height: 24px; min-width: 0; min-height: 0; margin: 0; padding: 0; font-size: 20px; opacity: .55; } /* out of the text flow, so it no longer stretches every line */
   .msg .time-side { font-size: 9px; }
-  .re-pill { min-width: 44px; min-height: 44px; }
+  .re-pill { min-width: 40px; min-height: 30px; }
   .re-pill.add { opacity: 1; }
   .msg-img .img-save { opacity: 1; width: 44px; height: 44px; }
   .image-download { flex-wrap: wrap; }
