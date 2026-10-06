@@ -43,7 +43,7 @@
   const IMG_CHUNK = 14000;        // chars per image chunk over the data channel
   const IMG_MAX = 4500000;        // max data-URL length (~3.3 MB image)
 
-  const AV_DEFAULTS = { camQ: '720', camFps: 30, camBr: 2500, ssQ: '1080', ssFps: 60, ssBr: 12000, ssHint: 'motion', recvCap: 0, codec: 'h264', selfPreview: 'low', showStats: false, micGain: 100, ssAudio: true };
+  const AV_DEFAULTS = { camQ: '720', camFps: 30, camBr: 2500, ssQ: '1080', ssFps: 60, ssBr: 12000, ssHint: 'motion', recvCap: 0, codec: 'h264', selfPreview: 'low', showStats: false, micGain: 100, outVol: 100, ssAudio: true };
   function audioPercent(value) {
     const n = typeof value === 'number' || (typeof value === 'string' && value.trim()) ? Number(value) : NaN;
     return Number.isFinite(n) ? Math.max(0, Math.min(200, Math.round(n))) : 100;
@@ -1445,6 +1445,11 @@
     store.set('av', av);
     applyVolumes(true);
   }
+  function setOutVol(value) {
+    av.outVol = audioPercent(value);
+    store.set('av', av);
+    applyVolumes();
+  }
 
   function toggleMic() {
     if (deaf) { deaf = false; micOn = true; }
@@ -2308,7 +2313,7 @@
   const volOf = (uid, stream) => {
     const c = userVol[uid] || {};
     if (deaf || c.m) return 0;
-    return audioPercent(stream ? c.sv : c.v) / 100;
+    return audioPercent(stream ? c.sv : c.v) / 100 * audioPercent(av.outVol) / 100; // outVol: master volume
   };
   const sentVol = {};
   function applyVolumes(force) {
@@ -2506,7 +2511,7 @@
       if (!devicesOnly) {
         h += '<div class="ctx-sep"></div>';
         if (kind === 'audioinput') h += ctxSlider('micgain', 'Input volume', av.micGain) + ctxCheck('mic', 'Mute', !micOn || deaf);
-        else if (kind === 'audiooutput') h += ctxCheck('deaf', 'Deafen', deaf);
+        else if (kind === 'audiooutput') h += ctxSlider('outvol', 'Output volume', av.outVol) + ctxCheck('deaf', 'Deafen', deaf);
         else {
           h += ctxSelect('camQ', 'Resolution', av.camQ, CAM_RES) + ctxSelect('camFps', 'Frame rate', av.camFps, fpsOpts([15, 30, 60]));
           if (voice) h += ctxCheck('cam', 'Camera on', !!voice.cam);
@@ -2517,7 +2522,7 @@
         menu.querySelectorAll('[data-slide]').forEach((r) => {
           r.oninput = () => {
             menu.querySelector(`[data-out="${r.dataset.slide}"]`).textContent = audioPercent(r.value) + '%';
-            setMicGain(r.value);
+            if (r.dataset.slide === 'outvol') setOutVol(r.value); else setMicGain(r.value);
           };
         });
         menu.querySelectorAll('[data-sel]').forEach((sel) => {
@@ -3375,6 +3380,7 @@
         store.set('me', me);
         const next = {
           ssAudio: !!av.ssAudio, // set from the screen share menu, not this form
+          outVol: audioPercent(av.outVol), // set from the headphone menu
           micGain: audioPercent($('aMicGain').value),
           camQ: $('aCamQ').value, camFps: +$('aCamFps').value, camBr: +$('aCamBr').value,
           ssQ: $('aSsQ').value, ssFps: +$('aSsFps').value, ssBr: +$('aSsBr').value, ssHint: $('aSsHint').value, recvCap: +$('aRecv').value, codec: $('aCodec').value, selfPreview: $('aSelf').value, showStats: $('aStats').checked, v8: 1, v9: 1, v48: 1,
