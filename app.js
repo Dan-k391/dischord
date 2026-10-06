@@ -476,6 +476,20 @@
     return q;
   }
 
+  // Take offline people out of a server's member list. Nobody owns the list, so everyone online is asked
+  // to drop them too; whoever is offline right now keeps their own copy, and the person shows up again
+  // if they come back (they still hold the invite).
+  function forgetUsers(sid, ids, tell) {
+    const k = getKnown(sid), ms = members[sid] || {};
+    const gone = ids.filter((id) => id !== me.id && (k[id] || ms[id]) && !isOnline(ms[id]));
+    if (!gone.length) return 0;
+    for (const id of gone) { delete k[id]; delete ms[id]; }
+    store.set('known.' + sid, k);
+    if (tell) send(sid, { t: 'forget', ids: gone.slice(0, 200) });
+    if (sid === cur.sid) renderMembers();
+    return gone.length;
+  }
+
   // The same person open twice in one call (two tabs, or the app plus a tab) would hear their own
   // microphone come back from the other copy. Remember those streams so they are played at zero volume.
   const ownStreams = new Map(); // connection -> { sid, vc, ids: [stream ids], seen }
@@ -625,6 +639,9 @@
         }
         break;
       }
+      case 'forget':
+        if (Array.isArray(p.ids)) forgetUsers(sid, p.ids.slice(0, 200).filter(isId), false);
+        break;
       case 'bye': {
         const m = members[sid][t.user.id];
         // only this connection is leaving; the same person may still be here in another tab
@@ -2914,6 +2931,7 @@
         h += ctxSlider('vol', 'User volume', c.v ?? 100) + ctxCheck('mute', 'Mute', !!c.m) + '<div class="ctx-sep"></div>';
       }
       h += ctxItem('dm', 'at', 'Message') + ctxItem('mention', 'at', 'Mention') + ctxItem('copyname', 'copy', 'Copy username');
+      if (sid !== DM && !isOnline(ms)) h += '<div class="ctx-sep"></div>' + ctxItem('forget', 'trash', 'Remove from server', 'danger');
       if (sid !== DM && ms && isOnline(ms) && ms.vc) h += '<div class="ctx-sep"></div>' + ctxItem('kick', 'hangup', 'Kick from voice', 'danger');
     }
     openCtx(x, y, h, (m) => {
@@ -2959,6 +2977,7 @@
             else toast('Open a text channel to mention someone.');
             return;
           }
+          case 'forget': closeCtx(); if (forgetUsers(sid, [uid], true)) toast(`Removed ${user.name}`); return;
           case 'kick': closeCtx(); return askPeer(sid, uid, { t: 'kick', to: uid }, KICK_VER, `Removing ${user.name} from the call`, (m) => !m.vc, 'be kicked');
           case 'copyname': closeCtx(); navigator.clipboard && navigator.clipboard.writeText(user.name); return toast('Copied');
         }
@@ -3276,7 +3295,7 @@
     const vname = (cid) => { const c = channel(s, cid); return c ? c.name : ''; };
     const row = (m, on) => `<div class="mem ${on ? '' : 'offline'}" data-uid="${esc(m.user.id)}">${avatar(m.user, true)}<div class="mem-text"><div class="nm" style="color:${on ? esc(m.user.color) : 'inherit'}">${esc(m.user.name)}${m.self ? ' <span class="sub">(you)</span>' : ''}</div>${on && m.vc ? `<div class="sub">${icon('speaker', 'mini')} ${esc(vname(m.vc))}</div>` : ''}</div><span class="vu-icons">${on && m.vc ? stateIcons(m.st) : ''}</span></div>`;
     el.innerHTML = `<div class="mem-cat">Online — ${online.length}</div>${online.map((m) => row(m, true)).join('')}` +
-      (offline.length ? `<div class="mem-cat" style="margin-top:20px">Offline — ${offline.length}</div>${offline.map((m) => row(m, false)).join('')}` : '');
+      (offline.length ? `<div class="mem-cat" style="margin-top:20px"><span>Offline — ${offline.length}</span><button class="icon-btn" data-forget-all title="Remove all offline people">${icon('trash')}</button></div>${offline.map((m) => row(m, false)).join('')}` : '');
     paintSpeaking();
   }
 
@@ -3647,6 +3666,12 @@
   paintIcons();
   $('serverList').onclick = (e) => { const b = e.target.closest('[data-sid]'); if (b) selectServer(b.dataset.sid); };
   $('homeBtn').onclick = () => selectServer(DM);
+  $('members').addEventListener('click', (e) => {
+    if (!e.target.closest('[data-forget-all]')) return;
+    const sid = cur.sid, ms = members[sid] || {};
+    const ids = [...new Set([...Object.keys(getKnown(sid)), ...Object.keys(ms)])].filter((id) => id !== me.id && !isOnline(ms[id]));
+    if (ids.length) confirmModal('Remove offline people', `Remove ${ids.length} offline ${ids.length === 1 ? 'person' : 'people'} from the member list? Their messages stay, and anyone who comes back online is listed again.`, 'Remove', () => { const n = forgetUsers(sid, ids, true); toast(`Removed ${n} ${n === 1 ? 'person' : 'people'}`); });
+  });
   $('addServerBtn').onclick = createServerModal;
   $('wCreate').onclick = createServerModal;
   $('wJoin').onclick = joinModal;

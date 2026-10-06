@@ -938,3 +938,11 @@ body.resizing iframe { pointer-events: none !important; }
 .chan.dm.offline:not(.active):not(.unread) { opacity: .6; }
 .dm-empty { padding: 8px; font-size: 13px; line-height: 1.45; color: var(--text-muted); }
 body.dm-view #inviteTop, body.dm-view #membersToggle { display: none; }
+
+/* remove offline people */
+.mem-cat { display: flex; align-items: center; }
+.mem-cat span { flex: 1; }
+.mem-cat .icon-btn { padding: 2px; opacity: 0; }
+.mem-cat .icon-btn .ico-svg { width: 15px; height: 15px; }
+#members:hover .mem-cat .icon-btn, .mem-cat .icon-btn:focus-visible { opacity: 1; }
+@media (hover: none) { .mem-cat .icon-btn { opacity: 1; } }
