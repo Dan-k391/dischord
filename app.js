@@ -1262,8 +1262,7 @@
     return VDO + '?' + p.toString() + `&screenshare&autostart&noaudio&novideo&nopreview&nocontrolbar&hideheader&chatbutton=false&nohangupbutton` +
       `&quality=${q}&screensharequality=${q}&maxframerate=${av.ssFps}&screensharefps=${av.ssFps}` +
       `&outboundvideobitrate=${av.ssBr}&maxvideobitrate=${av.ssBr}&screensharecontenthint=${hint}&contenthint=${hint}` +
-      // Whole-computer sound includes the voices of this call. It is only sent when the browser filters
-      // the call out of it (see checkShareAudio); with the switch off the browser does not offer it at all.
+      // With the switch off the browser does not offer computer sound at all.
       (av.ssAudio ? '' : '&systemaudio=exclude');
   }
 
@@ -1468,7 +1467,8 @@
   }
   // Sharing a screen with system audio captures everything the computer plays, including the voices of
   // this call, and sends them back to the people speaking: that is the echo. Ask the browser to leave
-  // this page's own audio out of the capture (restrictOwnAudio); game and video sound is still shared.
+  // this page's own audio out of the capture; game and video sound is still shared. Measured in Edge:
+  // the filter only works when restrictOwnAudio and echoCancellation are both on (VDO turns the latter off).
   // The publisher frame is another origin, so the request is added through VDO's eval API, repeated
   // until the frame confirms it, which happens before it asks for the screen.
   function shareOwnAudioPatch() {
@@ -1480,7 +1480,7 @@
       try {
         if (constraints && constraints.audio) {
           var audio = constraints.audio === true ? {} : Object.assign({}, constraints.audio);
-          audio.restrictOwnAudio = true;
+          audio.restrictOwnAudio = true; audio.echoCancellation = true;
           constraints = Object.assign({}, constraints, { audio: audio });
         }
       } catch (_) { }
@@ -1488,31 +1488,6 @@
     };
     window.__dischordOwnAudio = true;
     try { window.parent.postMessage({ dischordOwnAudio: 'ready' }, '*'); } catch (_) { }
-  }
-  // Runs inside the share frame once sharing has started. Whole-screen sound is kept only if the browser
-  // confirms it is filtering this page's audio out of it; otherwise it is silenced, because it would carry
-  // everyone's voice straight back to them. A shared tab or window has no call audio in it and is left alone.
-  function shareAudioCheck() {
-    var report = { audio: false, filtered: false, silenced: false, surface: '' };
-    try {
-      var stream = typeof session !== 'undefined' && session ? session.streamSrc : null;
-      var video = stream && stream.getVideoTracks()[0];
-      report.surface = (video && video.getSettings && video.getSettings().displaySurface) || '';
-      var tracks = stream ? stream.getAudioTracks() : [];
-      report.audio = tracks.length > 0;
-      for (var i = 0; i < tracks.length; i++) {
-        var settings = tracks[i].getSettings ? tracks[i].getSettings() : {};
-        if (settings.restrictOwnAudio === true) report.filtered = true;
-        else if (report.surface === 'monitor' || report.surface === '') { tracks[i].enabled = false; report.silenced = true; }
-      }
-    } catch (error) { report.error = String(error && error.message || error); }
-    try { window.parent.postMessage({ dischordShareAudio: report }, '*'); } catch (_) { }
-  }
-  function checkShareAudio(frame, origin) {
-    try { frame.contentWindow.postMessage({ function: 'eval', value: '(' + shareAudioCheck.toString() + ')();' }, origin); } catch { }
-  }
-  function onShareAudioReport(r) {
-    if (r && r.silenced) toast("Computer sound was left out of this share: this browser can't filter the call's voices out of it, so everyone would hear themselves. A recent Chrome or Edge can.", 12000);
   }
   function protectShareAudio(frame, origin) {
     const code = '(' + shareOwnAudioPatch.toString() + ')();';
@@ -1726,7 +1701,6 @@
     }
     if (voice && voice.ssFrame && e.source === voice.ssFrame.contentWindow) {
       if (d.dischordOwnAudio === 'ready') { voice.ssFrame.dataset.ownAudio = 'ready'; return; }
-      if (d.dischordShareAudio) { onShareAudioReport(d.dischordShareAudio); return; }
       const state = voice.ssQuality;
       if (d.dischordScreenQuality && state && state.pending && d.dischordScreenQuality.requestId === state.pending.requestId && e.origin === state.origin) {
         finishShareQuality(state, d.dischordScreenQuality);
@@ -1739,7 +1713,6 @@
           if (state && state.pending) state.pending.stoppedDuringRestart = false;
           voice.ss = true; broadcastState(); renderControls(); renderPresence();
           updateScreenShareQuality();
-          { const frame = voice.ssFrame, origin = (state && state.origin) || e.origin; setTimeout(() => { if (voice && voice.ssFrame === frame) checkShareAudio(frame, origin); }, 600); }
         }
         else if (state && state.pending && state.pending.operation === 'restart') state.pending.stoppedDuringRestart = true;
         else stopShare(); // cancelled the picker, or hit Chrome's "Stop sharing"
@@ -2604,7 +2577,7 @@
     h += '<div class="ctx-sep"></div>' + ctxSelect('ssQ', 'Resolution', av.ssQ, SS_RES) + ctxSelect('ssFps', 'Frame rate', av.ssFps, fpsOpts([5, 15, 30, 60])) +
       ctxSelect('ssBr', 'Bitrate', av.ssBr, SS_BRS.map((k) => [k, mbps(k)])) + ctxSelect('ssHint', 'Optimize for', av.ssHint, [['motion', 'Smoothness'], ['detail', 'Clarity']]);
     h += ctxCheck('ssAudio', 'Share computer sound', !!av.ssAudio);
-    h += `<div class="ctx-note">${av.ssAudio ? 'The voices of this call are filtered out of the shared sound. If your browser cannot do that, the sound is left out and you are told.' : 'Off: only a shared browser tab keeps its own sound.'}</div>`;
+    h += `<div class="ctx-note">${av.ssAudio ? 'The voices of this call are filtered out of the shared sound (needs a recent Chrome or Edge).' : 'Off: only a shared browser tab keeps its own sound.'}</div>`;
     if (sharing) h += '<div class="ctx-note">Picture settings apply to your current share. Sound applies the next time you share.</div>';
     h += ctxItem('avset', 'gear', 'Voice & video settings');
     openAnchored(anchor, h, (menu) => {
