@@ -43,7 +43,7 @@
   const IMG_CHUNK = 14000;        // chars per image chunk over the data channel
   const IMG_MAX = 4500000;        // max data-URL length (~3.3 MB image)
 
-  const AV_DEFAULTS = { camQ: '720', camFps: 30, camBr: 2500, ssQ: '1080', ssFps: 60, ssBr: 12000, ssHint: 'motion', recvCap: 0, codec: 'h264', selfPreview: 'low', showStats: false, micGain: 100, outVol: 100, ssAudio: true };
+  const AV_DEFAULTS = { camQ: '720', camFps: 30, camBr: 2500, ssQ: '1080', ssFps: 60, ssBr: 12000, ssHint: 'motion', recvCap: 0, codec: 'h264', selfPreview: 'low', showStats: false, micGain: 100, outVol: 100, ssAudio: true, denoise: true };
   function audioPercent(value) {
     const n = typeof value === 'number' || (typeof value === 'string' && value.trim()) ? Number(value) : NaN;
     return Number.isFinite(n) ? Math.max(0, Math.min(200, Math.round(n))) : 100;
@@ -1333,6 +1333,40 @@
 
   // Executed through VDO.Ninja's documented iframe eval API. Only this fixed function
   // and a JSON object of clamped numeric preferences cross the iframe boundary.
+  // Noise suppression: RNNoise (rnnoise/, a small neural network) runs as an audio worklet on my microphone
+  // inside the call frame, between VDO's microphone source and its gain node. Called again every few
+  // seconds with the volumes, so a rebuilt microphone pipeline (device change) gets the filter back.
+  function vdoDenoiseBridge(config) {
+    if (typeof session === 'undefined' || !session || !session.webAudios) return;
+    var NAME = '@sapphi-red/web-noise-suppressor/rnnoise';
+    var b = window.__dischordDenoise || (window.__dischordDenoise = { wasm: null, loading: false, failed: false });
+    if (config.on && !b.wasm && !b.loading && !b.failed) {
+      b.loading = true;
+      var simd = WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]));
+      fetch(config.base + (simd ? 'rnnoise_simd.wasm' : 'rnnoise.wasm')).then(function (r) { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); })
+        .then(function (buffer) { b.wasm = buffer; }).catch(function () { b.failed = true; }).then(function () { b.loading = false; });
+    }
+    Object.keys(session.webAudios).forEach(function (id) {
+      var wa = session.webAudios[id];
+      if (!wa || !wa.mediaStreamSource || !wa.gainNode || !wa.audioContext) return;
+      var ctx = wa.audioContext;
+      if (!config.on) {
+        if (!wa.__denoise) return;
+        try { wa.mediaStreamSource.disconnect(wa.__denoise); wa.__denoise.disconnect(); wa.mediaStreamSource.connect(wa.gainNode); wa.__denoise.port.postMessage('destroy'); } catch (_) { }
+        wa.__denoise = null;
+        return;
+      }
+      if (wa.__denoise || !b.wasm || ctx.sampleRate !== 48000 || !ctx.audioWorklet) return; // RNNoise is a 48 kHz model
+      if (!ctx.__denoiseModule) ctx.__denoiseModule = ctx.audioWorklet.addModule(config.base + 'worklet.js').then(function () { ctx.__denoiseReady = true; }, function () { b.failed = true; });
+      if (!ctx.__denoiseReady) return;
+      try {
+        var node = new AudioWorkletNode(ctx, NAME, { processorOptions: { wasmBinary: b.wasm, maxChannels: 2 } });
+        wa.mediaStreamSource.disconnect(wa.gainNode);
+        wa.mediaStreamSource.connect(node); node.connect(wa.gainNode);
+        wa.__denoise = node;
+      } catch (_) { try { wa.mediaStreamSource.connect(wa.gainNode); } catch (__) { } b.failed = true; }
+    });
+  }
   function vdoAudioGainBridge(config) {
     if (typeof session === 'undefined' || !session) return;
     const s = session;
@@ -2339,6 +2373,7 @@
       voicePost({ target: vs, settings: { volume: 0 } });
     }
     voicePost({ function: 'eval', value: '(' + vdoAudioGainBridge.toString() + ')(' + JSON.stringify({ micGain: audioPercent(av.micGain), deaf, streams }) + ');' });
+    voicePost({ function: 'eval', value: '(' + vdoDenoiseBridge.toString() + ')(' + JSON.stringify({ on: av.denoise !== false, base: new URL('rnnoise/', location.href).href }) + ');' });
   }
   function setVol(uid, patch) {
     const clean = {};
@@ -2510,7 +2545,7 @@
       }).join('');
       if (!devicesOnly) {
         h += '<div class="ctx-sep"></div>';
-        if (kind === 'audioinput') h += ctxSlider('micgain', 'Input volume', av.micGain) + ctxCheck('mic', 'Mute', !micOn || deaf);
+        if (kind === 'audioinput') h += ctxSlider('micgain', 'Input volume', av.micGain) + ctxCheck('denoise', 'Noise suppression', av.denoise !== false) + ctxCheck('mic', 'Mute', !micOn || deaf);
         else if (kind === 'audiooutput') h += ctxSlider('outvol', 'Output volume', av.outVol) + ctxCheck('deaf', 'Deafen', deaf);
         else {
           h += ctxSelect('camQ', 'Resolution', av.camQ, CAM_RES) + ctxSelect('camFps', 'Frame rate', av.camFps, fpsOpts([15, 30, 60]));
@@ -2538,6 +2573,7 @@
           switch (b.dataset.act) {
             case 'dev': return pickDevice(kind, devs[+b.dataset.i], fromCallFrame);
             case 'mic': return toggleMic();
+            case 'denoise': saveAv({ denoise: av.denoise === false }); return applyVolumes(true);
             case 'deaf': return toggleDeaf();
             case 'cam': return toggleCam();
             case 'avset': return settingsModal('av');
@@ -3381,6 +3417,7 @@
         const next = {
           ssAudio: !!av.ssAudio, // set from the screen share menu, not this form
           outVol: audioPercent(av.outVol), // set from the headphone menu
+          denoise: av.denoise !== false, // set from the microphone menu
           micGain: audioPercent($('aMicGain').value),
           camQ: $('aCamQ').value, camFps: +$('aCamFps').value, camBr: +$('aCamBr').value,
           ssQ: $('aSsQ').value, ssFps: +$('aSsFps').value, ssBr: +$('aSsBr').value, ssHint: $('aSsHint').value, recvCap: +$('aRecv').value, codec: $('aCodec').value, selfPreview: $('aSelf').value, showStats: $('aStats').checked, v8: 1, v9: 1, v48: 1,
