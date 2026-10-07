@@ -1117,3 +1117,6 @@ body.search-open #searchTop { color: var(--text-strong); background: var(--bg-ac
   .dg-cards { grid-template-columns: 1fr; }
   .dg-bar { display: none; }
 }
+
+.dg-person.self { opacity: .75; }
+.dg-person.self .dg-who span { white-space: normal; }

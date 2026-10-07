@@ -2224,6 +2224,11 @@
     const d = e.data;
     if (!d || typeof d !== 'object') return;
     if (d.dischordRoutes) return onRoutes(e.source, d.dischordRoutes);
+    if (d.dataReceived && d.UUID && isId(d.dataReceived.dischordWho)) {
+      const frame = diagFrame(e.source);
+      if (frame && frame.kind !== 'chat') { if (diag.who.size > 500) diag.who.clear(); diag.who.set(frame.id + '/' + d.UUID, d.dataReceived.dischordWho); }
+      return;
+    }
 
     if (voice && e.source === voice.iframe.contentWindow) {
       if (['joined-room-complete', 'local-microphone-event', 'local-camera-event', 'video-element-created',
@@ -3867,6 +3872,7 @@
     on: !!store.get('diagOn', false), // keep recording when the panel is closed
     open: false,
     conns: new Map(),                 // one entry per live connection, this session
+    who: new Map(),                   // frame + connection -> the person who said they are watching through it
     total: { time: zeroRoutes(), bytes: zeroRoutes(), since: now(), ...store.get('diagTotal', {}) }, // kept across sessions
     savedAt: 0,
   };
@@ -3886,26 +3892,41 @@
     const seen = now();
     for (const r of list.slice(0, 200)) {
       if (!r || typeof r.uuid !== 'string') continue;
-      let uid = frame.uid || null;
+      let uid = frame.uid || null, kind = frame.kind;
       if (frame.kind === 'chat') uid = (peers[frame.sid] && peers[frame.sid].get(r.uuid) || {}).uid || null;
-      else if (frame.kind === 'voice' && voice) {
+      else if (!uid && voice) {
+        // by the stream it carries (mine, or a member's), else by who the viewer said they are (announceViewers),
+        // else by the other direction of the same link, which shares its id
+        const tag = diag.who.get(frame.id + '/' + r.uuid);
         const hit = r.stream && Object.entries(members[voice.sid] || {}).find(([, m]) => m.vs === r.stream || m.vss === r.stream);
-        uid = hit ? hit[0] : (diag.conns.get(frame.id + '/' + r.uuid + '/in') || {}).uid || null; // my sending side shares the id of their receiving side
+        if (r.stream && (r.stream === voice.vs || r.stream === voice.ssVs)) uid = me.id;
+        else if (hit) uid = hit[0];
+        else if (tag) { uid = tag; if (kind === 'voice') kind = 'camera'; } // someone watching my camera, which the call frame also sends
+        else uid = (diag.conns.get(frame.id + '/' + r.uuid + '/' + (r.dir === 'in' ? 'out' : 'in')) || {}).uid || null;
       }
       const route = r.local === 'relay' || r.remote === 'relay' ? 'relay'
         : r.local === 'srflx' || r.remote === 'srflx' || r.wide ? 'stun' : 'lan'; // found through STUN or reaching a public address: across the internet
       const key = frame.id + '/' + r.uuid + '/' + r.dir;
       let c = diag.conns.get(key);
-      if (!c) { c = { key, kind: frame.kind, dir: r.dir, sid: frame.sid || (voice && voice.sid) || null, since: seen, sent: +r.sent || 0, recv: +r.recv || 0, time: zeroRoutes(), bytes: zeroRoutes(), changes: [] }; diag.conns.set(key, c); }
+      if (!c) { c = { key, kind, dir: r.dir, sid: frame.sid || (voice && voice.sid) || null, since: seen, sent: +r.sent || 0, recv: +r.recv || 0, time: zeroRoutes(), bytes: zeroRoutes(), changes: [] }; diag.conns.set(key, c); }
       const moved = Math.max(0, (+r.sent || 0) - c.sent) + Math.max(0, (+r.recv || 0) - c.recv);
       if (c.route && c.route !== route) c.changes.push({ at: seen, from: c.route, to: route });
       if (c.changes.length > 20) c.changes.shift();
-      Object.assign(c, { uid: uid || c.uid || null, route, local: r.local, remote: r.remote, proto: r.proto, relayProto: r.relayProto, rtt: r.rtt, sent: +r.sent || 0, recv: +r.recv || 0, seen });
+      Object.assign(c, { kind: kind !== frame.kind ? kind : c.kind, uid: uid || c.uid || null, self: (uid || c.uid) === me.id, route, local: r.local, remote: r.remote, proto: r.proto, relayProto: r.relayProto, rtt: r.rtt, sent: +r.sent || 0, recv: +r.recv || 0, seen });
       c.time[route] += DIAG_STEP; c.bytes[route] += moved;
-      diag.total.time[route] += DIAG_STEP; diag.total.bytes[route] += moved;
+      if (!c.self) { diag.total.time[route] += DIAG_STEP; diag.total.bytes[route] += moved; } // this PC talking to itself is not traffic
     }
     if (seen - diag.savedAt > 30000) { diag.savedAt = seen; store.set('diagTotal', diag.total); }
     if (diag.open) paintDiag();
+  }
+  // A connection that only watches a camera or screen carries no identity, so each of my viewers says who
+  // it is over that connection; the sender's diagnostics can then file it under my name.
+  function announceViewers() {
+    if (!me) return;
+    for (const el of tileEls.values()) {
+      const f = el.querySelector('.tile-media iframe');
+      if (f && f.contentWindow) try { f.contentWindow.postMessage({ sendData: { dischordWho: me.id } }, '*'); } catch { }
+    }
   }
   function pollRoutes() {
     if (!(diag.on || diag.open) || !me) return;
@@ -3924,7 +3945,7 @@
     return {
       app: APP_VER, at: new Date().toISOString(), recordingSince: new Date(diag.total.since).toISOString(),
       totals: { timeMs: diag.total.time, bytes: diag.total.bytes },
-      connections: [...diag.conns.values()].map((c) => ({ person: (diagUser(c.uid) || {}).name || 'unknown', use: DIAG_KINDS[c.kind], direction: c.dir === 'in' ? 'receiving' : 'sending', live: live.includes(c),
+      connections: [...diag.conns.values()].map((c) => ({ person: c.self ? 'this device' : (diagUser(c.uid) || {}).name || 'unknown', use: DIAG_KINDS[c.kind], direction: c.dir === 'in' ? 'receiving' : 'sending', live: live.includes(c),
         route: c.route, localCandidate: c.local, remoteCandidate: c.remote, protocol: c.proto, relayProtocol: c.relayProto || undefined, rttMs: c.rtt, bytesSent: c.sent, bytesReceived: c.recv, timeMs: c.time, bytesByRoute: c.bytes,
         routeChanges: c.changes.map((x) => ({ at: new Date(x.at).toISOString(), from: x.from, to: x.to })) })),
     };
@@ -3932,7 +3953,8 @@
   function paintDiag() {
     const box = $('dgBody');
     if (!box) return;
-    const live = [...diag.conns.values()].filter((c) => now() - c.seen < 15000);
+    const mine = [...diag.conns.values()].filter((c) => now() - c.seen < 15000 && c.self);
+    const live = [...diag.conns.values()].filter((c) => now() - c.seen < 15000 && !c.self);
     const t = share(diag.total.time), b = share(diag.total.bytes);
     const card = (id) => `<div class="dg-card ${id}"><b>${t ? pct(t[id]) : '–'}</b><span>${ROUTES[id]}</span><em>${b ? pct(b[id]) + ' of data · ' + fmtBytes(diag.total.bytes[id]) : 'no data yet'}</em></div>`;
     let h = `<div class="dg-cards">${card('lan')}${card('stun')}${card('relay')}</div>
@@ -3944,7 +3966,7 @@
       const u = diagUser(uid), time = zeroRoutes(), bytes = zeroRoutes();
       list.forEach((c) => { for (const r in time) { time[r] += c.time[r]; bytes[r] += c.bytes[r]; } });
       const sh = share(time), relayed = list.some((c) => c.route === 'relay');
-      h += `<div class="dg-person"><div class="dg-who">${u ? avatar(u) : '<div class="avatar" style="background:#4e5058">?</div>'}<div><b>${esc(u ? u.name : 'Viewer (not identified)')}</b><span>${sh ? `direct ${pct(sh.lan + sh.stun)} of the time · relayed ${pct(sh.relay)}` : ''} · ${fmtBytes(bytes.lan + bytes.stun + bytes.relay)} this session</span></div>${routeBar(sh)}<span class="dg-tag ${relayed ? 'relay' : 'ok'}">${relayed ? 'Relayed' : 'Direct'}</span></div>`;
+      h += `<div class="dg-person"><div class="dg-who">${u ? avatar(u) : '<div class="avatar" style="background:#4e5058">?</div>'}<div><b>${esc(u ? u.name : 'Not identified (someone on an older version)')}</b><span>${sh ? `direct ${pct(sh.lan + sh.stun)} of the time · relayed ${pct(sh.relay)}` : ''} · ${fmtBytes(bytes.lan + bytes.stun + bytes.relay)} this session</span></div>${routeBar(sh)}<span class="dg-tag ${relayed ? 'relay' : 'ok'}">${relayed ? 'Relayed' : 'Direct'}</span></div>`;
       for (const c of list.sort((x, y) => x.kind.localeCompare(y.kind) || x.dir.localeCompare(y.dir))) {
         const sv = c.kind === 'chat' ? server(c.sid) : null;
         h += `<div class="dg-conn"><span class="dg-use">${DIAG_KINDS[c.kind]}${sv ? ' · ' + esc(sv.name) : ''} <em>${c.dir === 'in' ? '↓ from them' : '↑ to them'}</em></span>
@@ -3956,6 +3978,7 @@
       }
       h += '</div>';
     }
+    if (mine.length) h += `<div class="dg-person self"><div class="dg-who">${avatar(me)}<div><b>This device</b><span>Your own previews, and the link between your call and your screen share. It never leaves this device, so it is left out of the totals.</span></div><span class="dg-tag">${mine.length} local</span></div></div>`;
     box.innerHTML = h;
   }
   function diagModal() {
@@ -5061,6 +5084,7 @@
   setInterval(pollStats, 2000);
   setInterval(() => applyVolumes(true), 4000);
   setInterval(pollRoutes, DIAG_STEP);
+  setInterval(announceViewers, 8000);
   document.addEventListener('keydown', (e) => { if (e.ctrlKey && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'd' && me) { e.preventDefault(); diagModal(); } });
   setInterval(paintImages, 15000); // retry visible uncached previews when a provider returns
 
