@@ -127,6 +127,7 @@
     volumeOff: '<path d="M11 5L6 9H3v6h3l5 4zM16 9.5l5 5M21 9.5l-5 5"/>',
     music: '<path d="M9 18V5l11-2v13"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/>',
     film: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 4v16M17 4v16M3 9h4M3 15h4M17 9h4M17 15h4"/>',
+    search: '<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/>',
     chevUp: '<path d="M6 15l6-6 6 6"/>',
     chevDown: '<path d="M6 9l6 6 6-6"/>',
     people: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.5 3-5.5 6.5-5.5s6.5 2 6.5 5.5"/><circle cx="17" cy="9" r="2.5"/><path d="M17.5 14.5c2.5.2 4 1.8 4 4.5"/>',
@@ -3591,10 +3592,10 @@
     const a = liveUser(original ? original.a : r.a);
     return `<button type="button" class="msg-reply" data-reply-jump="${esc(r.id)}" title="Jump to original message">${icon('reply')}<b>${esc(a.name)}</b><span>${esc(excerpt.replace(/\s+/g, ' ').slice(0, 240))}</span></button>`;
   }
-  function jumpToMessage(mid) {
+  function jumpToMessage(mid, instant) {
     const el = [...$('messages').querySelectorAll('[data-mid]')].find((x) => x.dataset.mid === mid);
     if (!el) return toast('Original message is no longer in local history.');
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.scrollIntoView({ behavior: instant ? 'auto' : 'smooth', block: 'center' });
     el.classList.add('reply-highlight');
     setTimeout(() => el.classList.remove('reply-highlight'), 2000);
   }
@@ -3731,6 +3732,86 @@
     closeMention();
     inp.focus();
     inp.dispatchEvent(new Event('input'));
+  }
+
+  // ---- search. It only looks through the message history saved on this device; nothing is asked of
+  // anyone else. Every word must appear in the message or its file name; from:name narrows by sender.
+  let searchScope = 'server';
+  function searchMessages(query, scope) {
+    const words = [], from = [];
+    for (const w of query.toLowerCase().split(/\s+/).filter(Boolean)) (w.startsWith('from:') && w.length > 5 ? from : words).push(w.startsWith('from:') && w.length > 5 ? w.slice(5).replace(/^@/, '') : w);
+    if (!words.length && !from.length) return { hits: [], words };
+    const places = [];
+    const add = (sv) => sv.channels.filter((c) => c.type === 'text').forEach((c) => places.push({ s: sv, c }));
+    if (scope === 'channel') { const sv = server(cur.sid), c = channel(sv, cur.cid); if (c && c.type === 'text') places.push({ s: sv, c }); }
+    else if (scope === 'server' && server(cur.sid)) add(server(cur.sid));
+    else { servers.forEach(add); add(dmServer); }
+    const hits = [];
+    for (const { s: sv, c } of places) {
+      const known = getKnown(sv.id);
+      for (const m of getMsgs(sv.id)[c.id] || []) {
+        if (m.del) continue;
+        const name = m.a.id === me.id ? me.name : (known[m.a.id] || m.a).name;
+        if (from.length && !from.every((f) => name.toLowerCase().replace(/\s+/g, '').includes(f))) continue;
+        const text = (m.text || '') + (m.file ? ' ' + m.file.name : '');
+        const low = text.toLowerCase();
+        if (!words.every((w) => low.includes(w))) continue;
+        hits.push({ sid: sv.id, cid: c.id, m, name, where: sv.dm ? '@' + c.name : '#' + c.name + (scope === 'all' ? ' · ' + sv.name : '') });
+      }
+    }
+    hits.sort((a, b) => b.m.ts - a.m.ts);
+    return { hits, words };
+  }
+  // the part of a message around the first match, with the matched words marked
+  function searchSnippet(m, words) {
+    const text = (m.text || (m.file ? m.file.name : m.img ? 'Image' : '')).replace(/\s+/g, ' ');
+    const low = text.toLowerCase();
+    const first = words.length ? Math.max(0, Math.min(...words.map((w) => low.indexOf(w)).filter((i) => i >= 0), text.length)) : 0;
+    const start = Math.max(0, first - 40), cut = text.slice(start, start + 220);
+    const marks = words.length ? new RegExp('(' + words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')', 'gi') : null;
+    const body = marks ? cut.split(marks).map((part, i) => (i % 2 ? '<mark>' + esc(part) + '</mark>' : esc(part))).join('') : esc(cut);
+    return (start ? '…' : '') + body + (start + 220 < text.length ? '…' : '') + (m.file && m.text ? ` <span class="sr-file">${icon('file', 'mini')}${esc(m.file.name)}</span>` : '');
+  }
+  function searchModal() {
+    if (!me) return;
+    const sv = server(cur.sid), c = channel(sv, cur.cid), inText = !!(c && c.type === 'text');
+    if (!sv) searchScope = 'all'; else if (searchScope === 'channel' && !inText) searchScope = 'server';
+    const scopes = [['channel', inText ? (sv.dm ? '@' : '#') + c.name : '', inText], ['server', sv ? (sv.dm ? 'All direct messages' : sv.name) : '', !!sv], ['all', 'Everywhere', true]];
+    modal(`<div class="search-top">${icon('search')}<input type="text" id="sQ" placeholder="Search messages" autocomplete="off" spellcheck="false"></div>
+      <div class="search-scope" id="sScope">${scopes.filter((x) => x[2]).map(([id, label]) => `<button type="button" data-scope="${id}" class="${id === searchScope ? 'on' : ''}">${esc(label)}</button>`).join('')}</div>
+      <div class="search-out" id="sOut"></div>`, () => {
+      const input = $('sQ'), out = $('sOut');
+      let timer = null, last = [];
+      const run = () => {
+        const q = input.value.trim();
+        if (!q) { last = []; out.innerHTML = '<div class="search-note">Searches the message history saved on this device. Type <b>from:name</b> to see one person\'s messages.</div>'; return; }
+        const { hits, words } = searchMessages(q, searchScope);
+        last = hits.slice(0, 100);
+        out.innerHTML = hits.length ? `<div class="search-count">${hits.length} ${hits.length === 1 ? 'result' : 'results'}${hits.length > 100 ? ' · showing the newest 100' : ''}</div>` +
+          last.map((h, i) => `<button type="button" class="sr" data-hit="${i}">${avatar(liveUser(h.m.a))}<div class="sr-main"><div class="sr-meta"><b style="color:${esc(liveUser(h.m.a).color)}">${esc(h.name)}</b><span>${esc(fmtStamp(h.m.ts))}</span><span class="sr-where">${esc(h.where)}</span></div><div class="sr-text">${searchSnippet(h.m, words)}</div></div></button>`).join('')
+          : '<div class="search-note">No messages match.</div>';
+      };
+      input.oninput = () => { clearTimeout(timer); timer = setTimeout(run, 120); };
+      input.onkeydown = (e) => { if (e.key === 'Enter') { clearTimeout(timer); run(); const first = out.querySelector('.sr'); if (first) first.focus(); } };
+      $('sScope').onclick = (e) => {
+        const b = e.target.closest('[data-scope]');
+        if (!b) return;
+        searchScope = b.dataset.scope;
+        $('sScope').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
+        run(); input.focus();
+      };
+      out.onclick = (e) => {
+        const b = e.target.closest('[data-hit]'), h = b && last[+b.dataset.hit];
+        if (!h) return;
+        closeModal();
+        if (cur.sid !== h.sid) selectServer(h.sid);
+        if (cur.cid !== h.cid) selectChannel(h.cid);
+        setTimeout(() => jumpToMessage(h.m.id, true), 80); // straight there: the channel has only just been drawn
+      };
+      run();
+      input.focus();
+    }, true, true);
+    $('modal').classList.add('search');
   }
 
   function renderIfCurrent(sid, cid) { if (sid === cur.sid && cid === cur.cid) renderMessages(); }
@@ -4154,6 +4235,8 @@
     if (ids.length) confirmModal('Remove offline people', `Remove ${ids.length} offline ${ids.length === 1 ? 'person' : 'people'} from the member list? Their messages stay, and anyone who comes back online is listed again.`, 'Remove', () => { const n = forgetUsers(sid, ids, true); toast(`Removed ${n} ${n === 1 ? 'person' : 'people'}`); });
   });
   $('addServerBtn').onclick = createServerModal;
+  $('searchTop').onclick = searchModal;
+  document.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f' && me) { e.preventDefault(); searchModal(); } });
   $('wCreate').onclick = createServerModal;
   $('wJoin').onclick = joinModal;
   $('inviteTop').onclick = inviteModal;
