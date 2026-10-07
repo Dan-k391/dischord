@@ -928,7 +928,7 @@ body.resizing iframe { pointer-events: none !important; }
 }
 
 /* ---------- direct messages ---------- */
-.rail-btn.home[data-badge]:not([data-badge=""])::after {
+.rail-btn[data-badge]:not([data-badge=""])::after {
   content: attr(data-badge); position: absolute; right: -4px; bottom: -4px; min-width: 10px; height: 16px; line-height: 16px;
   padding: 0 4px; border-radius: 10px; background: var(--red); color: #fff; font-size: 11px; font-weight: 700; border: 3px solid var(--bg-rail);
 }
@@ -957,3 +957,67 @@ body.tile-out #tiles .tile { z-index: 1; }
 .join-code { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin-top: 4px; }
 .join-code b { font-size: 22px; letter-spacing: 2px; font-family: ui-monospace, Consolas, monospace; color: var(--text-strong); user-select: all; }
 .join-code span { flex: 1 1 220px; font-size: 13px; line-height: 1.4; color: var(--text-muted); }
+
+/* ---------- downloads ---------- */
+#rail > .spacer { flex: 1; min-height: 8px; }
+.rail-btn.dl { color: var(--text-muted); flex: none; }
+.dl-list { display: flex; flex-direction: column; gap: 4px; max-height: min(56vh, 520px); overflow-y: auto; margin-top: 12px; }
+.dl-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; background: var(--bg-side); }
+.dl-row[data-dl-open] { cursor: pointer; }
+.dl-row[data-dl-open]:hover { background: var(--bg-hover); }
+.dl-row > .ico-svg { width: 26px; height: 26px; flex: none; color: var(--text-muted); }
+.dl-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.dl-text b { color: var(--text-strong); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dl-text span { font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dl-bar { display: block; height: 4px; border-radius: 2px; background: var(--bg-active); overflow: hidden; margin-top: 3px; }
+.dl-bar i { display: block; height: 100%; background: var(--accent); transition: width .2s; }
+.dl-empty { padding: 28px 12px; text-align: center; color: var(--text-muted); font-size: 14px; line-height: 1.5; }
+.dl-total { flex: 1; align-self: center; font-size: 12px; color: var(--text-muted); }
+
+/* ---------- viewer and player ---------- */
+#modal.viewer { padding: 16px; width: min(920px, 96vw); }
+.viewer-head { display: flex; align-items: baseline; gap: 10px; margin: 0 4px 12px; }
+.viewer-head b { color: var(--text-strong); font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.viewer-head span { font-size: 12px; color: var(--text-muted); flex: none; }
+#modal.viewer .actions { margin-top: 14px; }
+.doc-frame { width: 100%; height: 74vh; border: 0; border-radius: 6px; background: #fff; }
+.doc-text { max-height: 74vh; overflow: auto; margin: 0; padding: 14px; border-radius: 6px; background: #1e1f22; color: var(--text); font: 13px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.doc-none { display: grid; justify-items: center; gap: 8px; padding: 48px 16px; text-align: center; color: var(--text-muted); }
+.doc-none .ico-svg { width: 56px; height: 56px; }
+.doc-none b { color: var(--text-strong); overflow-wrap: anywhere; }
+.player { position: relative; background: #000; border-radius: 8px; overflow: hidden; outline: none; display: flex; flex-direction: column; }
+.pl-stage { position: relative; display: grid; place-items: center; min-height: 120px; cursor: pointer; }
+.player video { display: block; width: 100%; max-height: 70vh; background: #000; }
+.player.audio .pl-stage { padding: 36px 16px; background: linear-gradient(135deg, #2b2d5c, #1e1f22); }
+.pl-art { display: grid; justify-items: center; gap: 14px; color: #c9cdfb; text-align: center; }
+.pl-art .ico-svg { width: 72px; height: 72px; }
+.pl-art b { color: #fff; font-size: 16px; overflow-wrap: anywhere; }
+.pl-note { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); max-width: 90%; padding: 6px 12px; border-radius: 16px; background: rgba(0,0,0,.72); color: #fff; font-size: 13px; font-weight: 600; pointer-events: none; text-align: center; }
+.pl-note.error { top: 50%; transform: translate(-50%, -50%); border-radius: 8px; font-weight: 500; line-height: 1.4; }
+.pl-bar { background: #111214; padding: 6px 10px 8px; }
+.pl-row { display: flex; align-items: center; gap: 4px; }
+.pl-row .icon-btn { color: #dbdee1; padding: 6px; }
+.pl-row .icon-btn:disabled { opacity: .3; }
+.pl-row .icon-btn.on { color: var(--accent); }
+.pl-play .ico-svg { width: 24px; height: 24px; }
+.pl-time { font-size: 12px; color: #b5bac1; font-variant-numeric: tabular-nums; margin-left: 6px; white-space: nowrap; }
+.pl-seek, .pl-vol { -webkit-appearance: none; appearance: none; height: 16px; background: transparent; cursor: pointer; margin: 0; }
+.pl-seek { width: 100%; display: block; }
+.pl-vol { width: 84px; }
+.pl-seek::-webkit-slider-runnable-track, .pl-vol::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: linear-gradient(to right, var(--accent) var(--at, 0%), #4e5058 var(--at, 0%)); }
+.pl-seek::-moz-range-track, .pl-vol::-moz-range-track { height: 4px; border-radius: 2px; background: linear-gradient(to right, var(--accent) var(--at, 0%), #4e5058 var(--at, 0%)); }
+.pl-seek::-webkit-slider-thumb, .pl-vol::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; margin-top: -4px; border-radius: 50%; background: #fff; }
+.pl-seek::-moz-range-thumb, .pl-vol::-moz-range-thumb { width: 12px; height: 12px; border: 0; border-radius: 50%; background: #fff; }
+#modal .pl-rate { width: auto; min-height: 0; padding: 3px 6px; margin: 0 2px; font-size: 12px; background: #2b2d31; color: #dbdee1; border: 0; border-radius: 4px; }
+.player:fullscreen { border-radius: 0; justify-content: center; }
+.player:fullscreen .pl-stage { flex: 1; min-height: 0; }
+.player:fullscreen video { max-height: none; height: 100%; object-fit: contain; }
+.player:fullscreen .pl-bar { position: absolute; left: 0; right: 0; bottom: 0; background: linear-gradient(transparent, rgba(0,0,0,.85)); padding-top: 24px; transition: opacity .25s; }
+.player:fullscreen.idle .pl-bar { opacity: 0; }
+.player:fullscreen.idle { cursor: none; }
+@media (max-width: 760px), (max-width: 1024px) and (pointer: coarse) {
+  .pl-vol { display: none; }
+  .pl-row .icon-btn { padding: 8px; }
+  .doc-frame, .doc-text { height: auto; max-height: 62vh; }
+  .doc-frame { height: 62vh; }
+}

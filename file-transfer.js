@@ -343,7 +343,7 @@
           const blob = new Blob(t.parts, { type: t.meta.type || 'application/octet-stream' });
           if (blob.size !== t.meta.size) throw new Error('Incomplete file.');
           stopReceiver(t, 'complete', '', false);
-          context.saveDownload(blob, t.meta.name);
+          context.saveDownload(blob, t.meta.name, { sid: t.sid, cid: t.cid, mid: t.mid });
         }
       } catch {
         stopReceiver(t, 'error', 'The browser could not save this file.', true);
@@ -357,7 +357,7 @@
       let opening;
       try {
         // Invoke the picker before yielding so the browser retains the Download click gesture.
-        opening = context.openDownload({ ...t.meta }, { ...t.strategy });
+        opening = context.openDownload({ ...t.meta }, { ...t.strategy }, { sid: t.sid, cid: t.cid, mid: t.mid });
       } catch (error) {
         stopReceiver(t, 'error', error && error.name === 'AbortError' ? 'Download cancelled.' : 'The browser could not open this destination.', false);
         return false;
@@ -390,7 +390,7 @@
         }
         try {
           // The owner also explicitly chooses Download; no file read is needed.
-          context.saveDownload(offer.file, offer.meta.name);
+          context.saveDownload(offer.file, offer.meta.name, { sid, cid, mid });
           change(sid, cid, mid, 'complete', 100);
           return true;
         } catch {
@@ -568,7 +568,7 @@
           if (blob.size !== t.meta.size) throw new Error('Incomplete file.');
           // Only this explicit, authenticated download reaches the browser saver.
           stopReceiver(t, 'complete', '', false);
-          context.saveDownload(blob, t.meta.name);
+          context.saveDownload(blob, t.meta.name, { sid: t.sid, cid: t.cid, mid: t.mid });
         } catch {
           // stopReceiver may already have released the transfer before the saver throws.
           stopReceiver(t, 'error', 'The browser could not save this file.', true);

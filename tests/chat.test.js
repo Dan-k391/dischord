@@ -812,7 +812,7 @@ test('cancelling a pending destination picker aborts its late writer and never c
   assert.strictEqual(app.idbOpens, 0);
 });
 
-test('small-file Download retains the browser download flow without opening a destination picker', () => {
+test('a small-file Download lands in Downloads inside the app, not on the device, and then offers Open', () => {
   let pickerCalls = 0;
   const app = createApp({ showSaveFilePicker() { pickerCalls++; return new Promise(() => {}); } });
   const message = receivedFile(app, 17);
@@ -823,10 +823,12 @@ test('small-file Download retains the browser download flow without opening a de
   const request = app.sent[0].packet;
   app.api.fileTransfers.onPacket('testserver', { ...request, t: 'f-chunk', index: 0,
     data: Buffer.alloc(17).toString('base64') }, 'bobuuid', 'bob');
-  assert.strictEqual(app.downloads.length, 1);
-  assert.strictEqual(app.downloads[0].download, message.file.name);
-  assert.strictEqual(app.objectUrls.length, 1);
+  assert.strictEqual(app.downloads.length, 0, 'Nothing is handed to the device until Save to device is pressed');
+  assert.strictEqual(app.objectUrls.length, 0);
   assert.strictEqual(app.idbOpens, 0);
+  const card = app.api.fileCardContent('testserver', message);
+  assert(card.includes('downloaded'), 'The card shows the file is now in Downloads');
+  assert(card.includes('aria-label="Open '), 'The card now opens the file instead of downloading it again');
 });
 
 test('the Download button requests a file only from its sender after a click', () => {
@@ -862,7 +864,7 @@ test('download progress displays the actual percentage reported by the transfer'
   assert.strictEqual(app.idbOpens, 0);
 });
 
-test('an owner can download their selected file only after pressing Download', async () => {
+test('an owner opens their own selected file in the viewer without it leaving the app', async () => {
   const app = createApp();
   const { file, state } = fakeFile();
   await app.api.addAttachments([file]);
@@ -870,9 +872,9 @@ test('an owner can download their selected file only after pressing Download', a
   assert.strictEqual(app.downloads.length, 0);
   const message = app.sent[0].packet.m;
   clickFile(app, message, 'download');
-  assert.strictEqual(app.downloads.length, 1);
-  assert.strictEqual(app.downloads[0].download, 'notes.txt');
-  assert.strictEqual(app.objectUrls.length, 1);
+  assert.strictEqual(app.downloads.length, 0);
+  assert(app.node('modal').innerHTML.includes('notes.txt'), 'The viewer opens on the file');
+  assert(app.node('modal').innerHTML.includes('Save to device'));
   assert.strictEqual(state.reads, 0);
 });
 

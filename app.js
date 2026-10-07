@@ -118,6 +118,15 @@
     expand: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
     collapse: '<path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/>',
     winfs: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7.5 12V9h3M16.5 12v3h-3"/>',
+    play: '<path fill="currentColor" stroke="none" d="M7 4.5v15a1 1 0 0 0 1.5.86l12.5-7.5a1 1 0 0 0 0-1.72L8.5 3.64A1 1 0 0 0 7 4.5z"/>',
+    pause: '<path fill="currentColor" stroke="none" d="M6 4h4v16H6zM14 4h4v16h-4z"/>',
+    prev: '<path fill="currentColor" stroke="none" d="M6 5h2v14H6zM20 5.5v13a.8.8 0 0 1-1.25.66L9.5 12.66a.8.8 0 0 1 0-1.32l9.25-6.5A.8.8 0 0 1 20 5.5z"/>',
+    next: '<path fill="currentColor" stroke="none" d="M16 5h2v14h-2zM4 5.5v13a.8.8 0 0 0 1.25.66l9.25-6.5a.8.8 0 0 0 0-1.32L5.25 4.84A.8.8 0 0 0 4 5.5z"/>',
+    loop: '<path d="M17 3l3 3-3 3M20 6H8a4 4 0 0 0-4 4v1M7 21l-3-3 3-3M4 18h12a4 4 0 0 0 4-4v-1"/>',
+    pip: '<rect x="2.5" y="4.5" width="19" height="15" rx="2"/><rect x="12" y="11" width="7" height="6" rx="1" fill="currentColor" stroke="none"/>',
+    volumeOff: '<path d="M11 5L6 9H3v6h3l5 4zM16 9.5l5 5M21 9.5l-5 5"/>',
+    music: '<path d="M9 18V5l11-2v13"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/>',
+    film: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 4v16M17 4v16M3 9h4M3 15h4M17 9h4M17 15h4"/>',
     chevUp: '<path d="M6 15l6-6 6 6"/>',
     chevDown: '<path d="M6 9l6 6 6-6"/>',
     people: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.5 3-5.5 6.5-5.5s6.5 2 6.5 5.5"/><circle cx="17" cy="9" r="2.5"/><path d="M17.5 14.5c2.5.2 4 1.8 4 4.5"/>',
@@ -946,25 +955,320 @@
   }
 
   // ---------------------------------------------------------------- files (metadata offers; bytes move only on Download)
-  function saveFileDownload(blob, name) {
+  // Hand a file to the device (the browser's own download, or the phone's save dialog in the Android app).
+  function exportFile(blob, name) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = name; a.hidden = true;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
-  function openFileDownload(meta, strategy) {
-    if (!strategy.stream || typeof window.showSaveFilePicker !== 'function') return null;
-    // Open within the Download click, before awaiting anything, to retain user activation.
-    const selection = window.showSaveFilePicker({ suggestedName: meta.name, id: 'dischord-download' });
-    return selection.then(async (handle) => {
-      const writer = await handle.createWritable({ keepExistingData: false });
+
+  // ---- downloads. Files people send are downloaded into the app itself (the browser's private storage
+  // for this site), not out to the device: they are listed in Downloads, open in the built-in viewer and
+  // player, and can be saved to the device or removed from there. Without that storage they are kept in
+  // memory for the session instead.
+  const dl = {
+    list: (store.get('downloads', []) || []).filter((d) => d && isStr(d.id, 40) && isStr(d.name, 255) && Number.isFinite(d.size)), // newest first
+    mem: new Map(),    // id -> Blob held in memory (not stored yet, or storage unavailable)
+    active: new Map(), // 'sid/cid/mid' -> a download in progress
+    // the storage folder: undefined until first opened, false when this browser has none
+    dir: typeof FileSystemFileHandle !== 'undefined' && typeof FileSystemFileHandle.prototype.createWritable === 'function' && navigator.storage && typeof navigator.storage.getDirectory === 'function' ? undefined : false,
+  };
+  const dlKey = (sid, cid, mid) => sid + '/' + cid + '/' + mid;
+  const dlFor = (sid, cid, mid) => dl.list.find((d) => d.key === dlKey(sid, cid, mid));
+  const saveDlList = () => store.set('downloads', dl.list.slice(0, 500));
+  async function dlDir() {
+    if (dl.dir !== undefined) return dl.dir;
+    try {
+      dl.dir = await (await navigator.storage.getDirectory()).getDirectoryHandle('downloads', { create: true });
+      // files left behind by a download that never finished
+      for await (const name of dl.dir.keys()) if (!dl.list.some((d) => d.id === name)) dl.dir.removeEntry(name).catch(() => { });
+    } catch { dl.dir = false; }
+    return dl.dir;
+  }
+  const FILE_KINDS = {
+    video: { mp4: 'video/mp4', m4v: 'video/mp4', webm: 'video/webm', ogv: 'video/ogg', mov: 'video/quicktime', mkv: '' },
+    audio: { mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg', flac: 'audio/flac', m4a: 'audio/mp4', aac: 'audio/aac', weba: 'audio/webm' },
+    image: { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', bmp: 'image/bmp', svg: 'image/svg+xml' },
+    pdf: { pdf: 'application/pdf' },
+    text: Object.fromEntries('txt md json js ts css html htm xml csv log ini yml yaml py java c cpp h cs go rs sh bat toml sql srt vtt'.split(' ').map((e) => [e, 'text/plain'])),
+  };
+  const fileExt = (name) => (String(name).match(/\.([a-z0-9]{1,8})$/i) || ['', ''])[1].toLowerCase();
+  function fileKind(name, type) {
+    const ext = fileExt(name);
+    for (const kind in FILE_KINDS) if (ext in FILE_KINDS[kind]) return kind;
+    const t = String(type || '');
+    return /^(video|audio|image|text)\//.test(t) ? t.split('/')[0] : t === 'application/pdf' ? 'pdf' : 'other';
+  }
+  const kindIcon = (kind) => ({ video: 'film', audio: 'music', image: 'image' })[kind] || 'file';
+  // a stored file as a blob with a type the viewer can rely on
+  async function dlBlob(d) {
+    let blob = dl.mem.get(d.id);
+    if (!blob) {
+      const dir = await dlDir();
+      if (!dir) return null;
+      try { blob = await (await dir.getFileHandle(d.id)).getFile(); } catch { return null; }
+    }
+    const kind = fileKind(d.name, d.type), known = (FILE_KINDS[kind] || {})[fileExt(d.name)];
+    const type = known !== undefined ? known : (d.type || blob.type || '');
+    return kind === 'text' ? blob : blob.slice(0, blob.size, type);
+  }
+  function noteDownload(id, meta, where) {
+    const m = where && (getMsgs(where.sid)[where.cid] || []).find((x) => x.id === where.mid);
+    const key = where ? dlKey(where.sid, where.cid, where.mid) : '';
+    if (key) dl.list.filter((d) => d.key === key).forEach((d) => removeDownload(d.id, true)); // downloaded again: keep one copy
+    dl.list.unshift({ id, name: meta.name, type: meta.type || '', size: meta.size, at: now(), key, from: m ? m.a.name : '' });
+    saveDlList();
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => { });
+    if (where) queueFileCardPaint(where.sid, where.cid, where.mid);
+    paintDownloads();
+    toast(`${meta.name} is in Downloads`, 4000);
+  }
+  function removeDownload(id, quiet) {
+    const d = dl.list.find((x) => x.id === id);
+    dl.list = dl.list.filter((x) => x.id !== id);
+    dl.mem.delete(id);
+    saveDlList();
+    dlDir().then((dir) => { if (dir) dir.removeEntry(id).catch(() => { }); });
+    if (quiet || !d) return;
+    const [sid, cid, mid] = (d.key || '').split('/');
+    if (mid) queueFileCardPaint(sid, cid, mid);
+    paintDownloads();
+  }
+  // A finished download that arrived in memory (anything under 100 MB): keep it, and move it into storage.
+  function storeDownload(blob, name, where) {
+    const m = where && (getMsgs(where.sid)[where.cid] || []).find((x) => x.id === where.mid);
+    const type = (m && m.file && m.file.type) || blob.type || '';
+    if (m && m.a.id === me.id) return openViewer({ id: 'own-' + where.mid, name, type, size: blob.size }, blob); // my own file: just open it
+    const id = rid(16);
+    dl.mem.set(id, blob);
+    noteDownload(id, { name, type, size: blob.size }, where);
+    dlDir().then(async (dir) => {
+      if (!dir) return;
+      try {
+        const writer = await (await dir.getFileHandle(id, { create: true })).createWritable();
+        await writer.write(blob); await writer.close();
+        if (dl.list.some((d) => d.id === id)) dl.mem.delete(id); else dir.removeEntry(id).catch(() => { });
+      } catch { } // stays in memory for this session
+    });
+  }
+  // A large download is written to storage piece by piece as it arrives, never held in memory.
+  function openFileDownload(meta, strategy, where) {
+    if (!strategy.stream) return null;
+    if (dl.dir === false) { // no private storage here: fall back to a save dialog, as before
+      if (typeof window.showSaveFilePicker !== 'function') return null;
+      return window.showSaveFilePicker({ suggestedName: meta.name, id: 'dischord-download' }).then(async (handle) => {
+        const writer = await handle.createWritable({ keepExistingData: false });
+        return { write: (bytes) => writer.write(bytes), close: () => writer.close(), abort: () => writer.abort() };
+      });
+    }
+    const id = rid(16);
+    return dlDir().then(async (dir) => {
+      if (!dir) return null;
+      const writer = await (await dir.getFileHandle(id, { create: true })).createWritable();
       return {
         write: (bytes) => writer.write(bytes),
-        close: () => writer.close(),
-        abort: () => writer.abort(),
+        close: async () => { await writer.close(); noteDownload(id, meta, where); },
+        abort: async () => { try { await writer.abort(); } catch { } dir.removeEntry(id).catch(() => { }); },
       };
     });
+  }
+  // Clicking a file: open it if it is already here, otherwise fetch it.
+  function startDownload(sid, cid, mid) {
+    const have = dlFor(sid, cid, mid);
+    if (have) return openDownloadItem(have.id);
+    const m = (getMsgs(sid)[cid] || []).find((x) => x.id === mid);
+    if (m && m.file && m.a.id !== me.id) dl.active.set(dlKey(sid, cid, mid), { sid, cid, mid, name: m.file.name, size: m.file.size });
+    const ok = fileTransfers.download(sid, cid, mid);
+    paintDownloads();
+    return ok;
+  }
+  function onTransferChange(sid, cid, mid) {
+    if (!['receiving', 'preparing', 'saving'].includes(fileTransfers.status(sid, cid, mid).state)) dl.active.delete(dlKey(sid, cid, mid));
+    queueFileCardPaint(sid, cid, mid);
+    paintDownloads();
+  }
+  async function openDownloadItem(id) {
+    const d = dl.list.find((x) => x.id === id);
+    const blob = d && await dlBlob(d);
+    if (!blob) { if (d) removeDownload(id); return toast('That file is no longer stored here. Download it again.'); }
+    openViewer(d, blob);
+  }
+  async function saveDownloadItem(id) {
+    const d = dl.list.find((x) => x.id === id);
+    const blob = d && await dlBlob(d);
+    if (!blob) return toast('That file is no longer stored here.');
+    exportFile(blob, d.name);
+  }
+  function paintDownloads() {
+    const b = $('downloadsBtn');
+    if (b) b.dataset.badge = dl.active.size || '';
+    const box = $('dlList');
+    if (!box) return;
+    const size = window.DischordFiles.formatSize;
+    let h = '';
+    for (const a of dl.active.values()) {
+      const st = fileTransfers.status(a.sid, a.cid, a.mid);
+      const pct = st.state === 'saving' ? 100 : Math.round(st.progress || 0);
+      h += `<div class="dl-row active">${icon(kindIcon(fileKind(a.name)))}<div class="dl-text"><b>${esc(a.name)}</b><span>${size(a.size)} · ${st.state === 'saving' ? 'Saving…' : 'Downloading ' + pct + '%'}</span><i class="dl-bar"><i style="width:${pct}%"></i></i></div>
+        <button class="icon-btn" data-dl-cancel="${esc(dlKey(a.sid, a.cid, a.mid))}" title="Cancel">${icon('x')}</button></div>`;
+    }
+    for (const d of dl.list) {
+      const kind = fileKind(d.name, d.type), media = kind === 'video' || kind === 'audio';
+      h += `<div class="dl-row" data-dl-open="${esc(d.id)}">${icon(kindIcon(kind))}<div class="dl-text"><b>${esc(d.name)}</b><span>${size(d.size)}${d.from ? ' · from ' + esc(d.from) : ''} · ${esc(fmtStamp(d.at))}</span></div>
+        <button class="icon-btn" data-dl-open="${esc(d.id)}" title="${media ? 'Play' : 'Open'}">${icon(media ? 'play' : 'expand')}</button>
+        <button class="icon-btn" data-dl-save="${esc(d.id)}" title="Save to device">${icon('download')}</button>
+        <button class="icon-btn danger" data-dl-del="${esc(d.id)}" title="Remove">${icon('trash')}</button></div>`;
+    }
+    box.innerHTML = h || '<div class="dl-empty">Nothing here yet. Files you download from chats are kept here, where you can open, play or save them.</div>';
+    if ($('dlTotal')) $('dlTotal').textContent = dl.list.length ? `${dl.list.length} ${dl.list.length === 1 ? 'file' : 'files'} · ${size(dl.list.reduce((n, d) => n + d.size, 0))}` : '';
+    if ($('dlClear')) $('dlClear').classList.toggle('hidden', !dl.list.length);
+  }
+  function downloadsModal() {
+    modal(`<h2>Downloads</h2><div id="dlList" class="dl-list"></div>
+      <div class="actions"><span class="dl-total" id="dlTotal"></span><button class="btn link" id="dlClear">Remove all</button><button class="btn primary" data-close>Close</button></div>`, () => {
+      paintDownloads();
+      $('dlList').onclick = (e) => {
+        const cancel = e.target.closest('[data-dl-cancel]'), save = e.target.closest('[data-dl-save]'), del = e.target.closest('[data-dl-del]'), open = e.target.closest('[data-dl-open]');
+        if (cancel) { const a = dl.active.get(cancel.dataset.dlCancel); if (a) fileTransfers.cancel(a.sid, a.cid, a.mid); }
+        else if (save) saveDownloadItem(save.dataset.dlSave);
+        else if (del) removeDownload(del.dataset.dlDel);
+        else if (open) openDownloadItem(open.dataset.dlOpen);
+      };
+      $('dlClear').onclick = () => confirmModal('Remove all downloads', 'Remove every downloaded file from Dischord? Files you already saved to your device are not affected.', 'Remove all', () => { dl.list.slice().forEach((d) => removeDownload(d.id)); downloadsModal(); });
+    }, true, true);
+  }
+
+  // ---- built-in viewer and player
+  const playerPrefs = { vol: 1, rate: 1, ...store.get('player', {}) };
+  const playerPos = store.get('playerPos', {}); // download id -> where playback stopped (seconds)
+  const fmtClock = (sec) => {
+    sec = Math.max(0, Math.floor(sec || 0));
+    const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), ss = String(sec % 60).padStart(2, '0');
+    return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
+  };
+  function openViewer(d, blob) {
+    const kind = fileKind(d.name, d.type || blob.type);
+    const media = kind === 'video' || kind === 'audio';
+    const url = kind === 'text' || kind === 'other' ? null : URL.createObjectURL(blob);
+    const queue = media ? dl.list.filter((x) => ['video', 'audio'].includes(fileKind(x.name, x.type))) : [];
+    const at = queue.findIndex((x) => x.id === d.id);
+    const body = kind === 'video' || kind === 'audio' ? `<div class="player ${kind}" id="player" tabindex="0">
+        <div class="pl-stage">${kind === 'video' ? '<video playsinline></video>' : `<audio></audio><div class="pl-art">${icon('music')}<b>${esc(d.name)}</b></div>`}<div class="pl-note hidden"></div></div>
+        <div class="pl-bar">
+          <input type="range" class="pl-seek" min="0" max="1000" step="1" value="0" aria-label="Seek">
+          <div class="pl-row">
+            ${queue.length > 1 ? `<button class="icon-btn" data-pl="prev" title="Previous" ${at > 0 ? '' : 'disabled'}>${icon('prev')}</button>` : ''}
+            <button class="icon-btn pl-play" data-pl="play" title="Play / pause (Space)">${icon('play')}</button>
+            ${queue.length > 1 ? `<button class="icon-btn" data-pl="next" title="Next" ${at >= 0 && at < queue.length - 1 ? '' : 'disabled'}>${icon('next')}</button>` : ''}
+            <span class="pl-time">0:00 / 0:00</span><span class="spacer"></span>
+            <button class="icon-btn" data-pl="mute" title="Mute (M)">${icon('volume')}</button>
+            <input type="range" class="pl-vol" min="0" max="100" step="1" aria-label="Volume">
+            <select class="pl-rate" title="Speed" aria-label="Playback speed">${[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map((r) => `<option value="${r}">${r}×</option>`).join('')}</select>
+            <button class="icon-btn" data-pl="loop" title="Repeat">${icon('loop')}</button>
+            ${kind === 'video' ? `<button class="icon-btn" data-pl="pip" title="Picture in picture">${icon('pip')}</button><button class="icon-btn" data-pl="fs" title="Fullscreen (F)">${icon('expand')}</button>` : ''}
+          </div>
+        </div></div>`
+      : kind === 'image' ? `<div class="lightbox"><img src="${url}" alt="${esc(d.name)}" draggable="false"></div>`
+      : kind === 'pdf' ? `<iframe class="doc-frame" src="${url}" title="${esc(d.name)}"></iframe>`
+      : kind === 'text' ? '<pre class="doc-text" id="docText">Loading…</pre>'
+      : `<div class="doc-none">${icon('file')}<b>${esc(d.name)}</b><span>${window.DischordFiles.formatSize(d.size)} · this kind of file can't be shown here. Save it to your device to open it.</span></div>`;
+    modal(`<div class="viewer-head"><b title="${esc(d.name)}">${esc(d.name)}</b><span>${window.DischordFiles.formatSize(d.size)}</span></div>${body}
+      <div class="actions">${dl.list.some((x) => x.id === d.id) ? '<button class="btn link" id="vwList">Downloads</button>' : ''}<button class="btn" id="vwSave">Save to device</button><button class="btn primary" data-close>Close</button></div>`, () => {
+      $('vwSave').onclick = () => exportFile(blob, d.name);
+      if ($('vwList')) $('vwList').onclick = downloadsModal;
+      if (kind === 'text') Promise.resolve().then(() => blob.slice(0, 2 * 1024 * 1024).text()).then(
+        (text) => { if ($('docText')) $('docText').textContent = text + (blob.size > 2 * 1024 * 1024 ? '\n\n… (only the first 2 MB is shown)' : ''); },
+        () => { if ($('docText')) $('docText').textContent = 'This file could not be read.'; });
+      const stop = media ? mountPlayer($('player'), d, url, (step) => { const next = queue[at + step]; if (next) openDownloadItem(next.id); }) : null;
+      modalCleanup = () => { if (stop) stop(); if (url) URL.revokeObjectURL(url); };
+    }, true, true);
+    $('modal').classList.add('lb', 'viewer');
+  }
+  // The player: seek bar, volume, speed, repeat, picture in picture, fullscreen, previous / next among the
+  // downloaded media, keyboard shortcuts, and it remembers volume, speed and where each file was stopped.
+  function mountPlayer(root, d, url, go) {
+    const el = root.querySelector('video, audio'), q = (sel) => root.querySelector(sel);
+    const seek = q('.pl-seek'), vol = q('.pl-vol'), rate = q('.pl-rate'), time = q('.pl-time'), note = q('.pl-note');
+    let seeking = false, idle = null, savedAt = 0;
+    const savePrefs = () => store.set('player', playerPrefs);
+    const savePos = () => {
+      if (!Number.isFinite(el.duration) || el.duration < 30) return;
+      if (el.currentTime > 5 && el.currentTime < el.duration - 5) playerPos[d.id] = Math.floor(el.currentTime); else delete playerPos[d.id];
+      const keys = Object.keys(playerPos);
+      if (keys.length > 200) delete playerPos[keys[0]];
+      store.set('playerPos', playerPos);
+    };
+    const flash = (text) => { note.textContent = text; note.classList.remove('hidden'); clearTimeout(flash.timer); flash.timer = setTimeout(() => note.classList.add('hidden'), 900); };
+    const paint = () => {
+      const dur = Number.isFinite(el.duration) ? el.duration : 0;
+      if (!seeking) seek.value = dur ? Math.round(el.currentTime / dur * 1000) : 0;
+      seek.style.setProperty('--at', (dur ? (seeking ? seek.value / 10 : el.currentTime / dur * 100) : 0) + '%');
+      time.textContent = fmtClock(seeking ? seek.value / 1000 * dur : el.currentTime) + ' / ' + fmtClock(dur);
+      setIcon(q('[data-pl="play"]'), el.paused ? 'play' : 'pause');
+      setIcon(q('[data-pl="mute"]'), el.muted || !el.volume ? 'volumeOff' : 'volume');
+      vol.value = el.muted ? 0 : Math.round(el.volume * 100);
+      vol.style.setProperty('--at', vol.value + '%');
+      q('[data-pl="loop"]').classList.toggle('on', el.loop);
+      root.classList.toggle('playing', !el.paused);
+    };
+    const toggle = () => { if (el.paused) el.play().catch(() => { }); else el.pause(); };
+    const jump = (by) => { el.currentTime = Math.max(0, Math.min(el.duration || 0, el.currentTime + by)); flash((by > 0 ? '+' : '−') + Math.abs(by) + 's'); };
+    const setVol = (v) => { el.muted = false; el.volume = Math.max(0, Math.min(1, v)); playerPrefs.vol = el.volume; savePrefs(); flash(Math.round(el.volume * 100) + '%'); };
+    const setRate = (r) => { el.playbackRate = r; rate.value = String(r); playerPrefs.rate = r; savePrefs(); flash(r + '×'); };
+    const fullscreen = () => { if (document.fullscreenElement === root) document.exitFullscreen(); else if (root.requestFullscreen) root.requestFullscreen().catch(() => { }); };
+    const wake = () => { root.classList.remove('idle'); clearTimeout(idle); idle = setTimeout(() => { if (!el.paused) root.classList.add('idle'); }, 2500); };
+
+    el.volume = Math.max(0, Math.min(1, +playerPrefs.vol || 1));
+    rate.value = String([0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].includes(+playerPrefs.rate) ? +playerPrefs.rate : 1);
+    el.src = url;
+    el.onloadedmetadata = () => {
+      el.playbackRate = +rate.value; // set after loading: a new source resets it
+      if (playerPos[d.id] && playerPos[d.id] < el.duration - 5) { el.currentTime = playerPos[d.id]; flash('Resumed at ' + fmtClock(playerPos[d.id])); }
+      paint();
+    };
+    el.ontimeupdate = () => { paint(); if (now() - savedAt > 5000) { savedAt = now(); savePos(); } };
+    el.onplay = el.onpause = el.onvolumechange = el.ondurationchange = paint;
+    el.onended = () => { delete playerPos[d.id]; store.set('playerPos', playerPos); paint(); if (root.classList.contains('audio') && !el.loop) go(1); };
+    el.onerror = () => { note.textContent = "This file's format can't be played here. Save it to your device to open it in another player."; note.classList.remove('hidden'); note.classList.add('error'); };
+    seek.oninput = () => { seeking = true; paint(); };
+    seek.onchange = () => { if (Number.isFinite(el.duration)) el.currentTime = seek.value / 1000 * el.duration; seeking = false; paint(); };
+    vol.oninput = () => { el.muted = false; el.volume = vol.value / 100; playerPrefs.vol = el.volume; savePrefs(); };
+    rate.onchange = () => setRate(+rate.value);
+    root.onclick = (e) => {
+      const b = e.target.closest('[data-pl]');
+      if (!b) { if (e.target.closest('.pl-stage')) toggle(); return; }
+      switch (b.dataset.pl) {
+        case 'play': return toggle();
+        case 'prev': return go(-1);
+        case 'next': return go(1);
+        case 'mute': el.muted = !el.muted; return;
+        case 'loop': el.loop = !el.loop; return paint();
+        case 'fs': return fullscreen();
+        case 'pip': if (document.pictureInPictureElement) document.exitPictureInPicture(); else if (el.requestPictureInPicture) el.requestPictureInPicture().catch(() => toast('Picture in picture is not available here.')); return;
+      }
+    };
+    root.ondblclick = (e) => { if (e.target.closest('.pl-stage') && el.tagName === 'VIDEO') fullscreen(); };
+    root.onmousemove = root.ontouchstart = wake;
+    root.onkeydown = (e) => {
+      if (e.target.tagName === 'SELECT' || e.ctrlKey || e.metaKey || e.altKey) return;
+      const k = e.key;
+      if (k === ' ' || k === 'k') toggle();
+      else if (k === 'ArrowLeft') jump(-5); else if (k === 'ArrowRight') jump(5);
+      else if (k === 'j') jump(-10); else if (k === 'l') jump(10);
+      else if (k === 'ArrowUp') setVol(el.volume + 0.05); else if (k === 'ArrowDown') setVol(el.volume - 0.05);
+      else if (k === 'm') el.muted = !el.muted;
+      else if (k === 'f' && el.tagName === 'VIDEO') fullscreen();
+      else if (k === '>' || k === '.') setRate(Math.min(2, +rate.value + 0.25)); else if (k === '<' || k === ',') setRate(Math.max(0.5, +rate.value - 0.25));
+      else if (k >= '0' && k <= '9' && Number.isFinite(el.duration)) el.currentTime = el.duration * (+k / 10);
+      else return;
+      e.preventDefault(); e.stopPropagation(); wake();
+    };
+    paint();
+    root.focus({ preventScroll: true });
+    el.play().catch(() => { }); // allowed here because opening the file was a click
+    return () => { clearTimeout(idle); clearTimeout(flash.timer); savePos(); try { el.pause(); el.removeAttribute('src'); el.load(); } catch { } if (document.pictureInPictureElement === el) document.exitPictureInPicture().catch(() => { }); };
   }
   const filePaints = new Map();
   let filePaintTimer = null;
@@ -1123,8 +1427,8 @@
     },
     userId: () => me && me.id,
     randomId: () => rid(20),
-    onChange: queueFileCardPaint,
-    saveDownload: saveFileDownload,
+    onChange: onTransferChange,
+    saveDownload: storeDownload,
     openDownload: openFileDownload,
     maxWindow: () => voice ? 32 : window.DischordFiles.MAX_WINDOW,
   });
@@ -1405,7 +1709,7 @@
     const m = (getMsgs(sid)[cid] || []).find((x) => x.id === mid && !x.del && (x.img || x.file && window.DischordImages.isImage(x.file)));
     if (!m) return;
     // Start within the click so large originals can open the native save picker.
-    if (m.file) return fileTransfers.download(sid, cid, mid);
+    if (m.file) return startDownload(sid, cid, mid);
     return saveImagePreview(sid, cid, mid);
   }
   async function saveImagePreview(sid, cid, mid) {
@@ -1420,7 +1724,7 @@
     try {
       const bin = atob(url.slice(url.indexOf(',') + 1)), bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      saveFileDownload(new Blob([bytes], { type: 'image/' + type }), (base || 'image') + '.' + ext);
+      exportFile(new Blob([bytes], { type: 'image/' + type }), (base || 'image') + '.' + ext);
     } catch { toast('Could not save that image.'); }
   }
   async function copyImage(sid, cid, mid) {
@@ -1484,16 +1788,19 @@
     const active = status.state === 'receiving' || status.state === 'preparing';
     const saving = status.state === 'saving';
     const unavailable = m.a.id === me.id && !fileTransfers.hasLocal(sid, m.cid, m.id);
-    const large = window.DischordFiles.strategyFor(m.file.size).stream && m.a.id !== me.id;
-    const size = window.DischordFiles.formatSize(m.file.size) + (large ? (typeof window.showSaveFilePicker === 'function'
+    const mine = m.a.id === me.id, got = !mine && !!dlFor(sid, m.cid, m.id);
+    const kind = fileKind(m.file.name, m.file.type), media = kind === 'video' || kind === 'audio';
+    // without in-app storage a large file still goes straight to a place the person picks (or into memory)
+    const legacy = dl.dir === false && !mine && window.DischordFiles.strategyFor(m.file.size).stream;
+    const size = window.DischordFiles.formatSize(m.file.size) + (legacy ? (typeof window.showSaveFilePicker === 'function'
       ? ' · you choose a save location when downloading' : ' · large file: uses browser memory here') : '');
     const sub = status.state === 'preparing' ? 'Choose where to save this file…' : saving ? 'Saving file…'
       : active ? `Downloading ${Math.round(status.progress)}%` : status.state === 'error' ? status.message
-      : status.state === 'complete' ? status.message || 'Saved'
-      : unavailable ? 'Unavailable after reload. Attach it again.' : size;
+      : unavailable ? 'Unavailable after reload. Attach it again.'
+      : got ? size + ' · downloaded' : size;
     const btn = active ? `<button type="button" class="icon-btn" data-file-cancel="${esc(m.id)}" title="Cancel">${icon('x')}</button>`
-      : `<button type="button" class="icon-btn" data-file-download="${esc(m.id)}" title="${status.state === 'error' ? 'Retry download' : 'Download'}" ${unavailable || saving ? 'disabled' : ''}>${icon('download')}</button>`;
-    return `${icon('file')}<div class="mf-text"><button type="button" class="mf-name" data-file-download="${esc(m.id)}" title="${esc(m.file.name)}" aria-label="${esc('Download ' + m.file.name)}" ${active || unavailable || saving ? 'disabled' : ''}>${esc(m.file.name)}</button><div class="mf-sub" role="status">${esc(sub)}</div></div>${btn}`;
+      : `<button type="button" class="icon-btn" data-file-download="${esc(m.id)}" title="${got || mine ? (media ? 'Play' : 'Open') : status.state === 'error' ? 'Retry download' : 'Download'}" ${unavailable || saving ? 'disabled' : ''}>${icon(got || mine ? (media ? 'play' : 'expand') : 'download')}</button>`;
+    return `${icon(kindIcon(kind))}<div class="mf-text"><button type="button" class="mf-name" data-file-download="${esc(m.id)}" title="${esc(m.file.name)}" aria-label="${esc((got || mine ? 'Open ' : 'Download ') + m.file.name)}" ${active || unavailable || saving ? 'disabled' : ''}>${esc(m.file.name)}</button><div class="mf-sub" role="status">${esc(sub)}</div></div>${btn}`;
   }
   function paintFileCards(mid, sid = cur.sid, cid = cur.cid) {
     document.querySelectorAll('[data-file-card]').forEach((el) => {
@@ -3599,10 +3906,13 @@
 
   // ---------------------------------------------------------------- modals
   let modalGeneration = 0;
+  let modalCleanup = null; // set by a dialog that holds something to release (the player, object URLs)
+  const runModalCleanup = () => { const fn = modalCleanup; modalCleanup = null; if (fn) try { fn(); } catch { } };
   let modalClosing = false;
   function modal(html, mount, dismissable = true, wide = false) {
     modalGeneration++;
     modalClosing = false;
+    runModalCleanup();
     cancelMobileAnimation($('modal'));
     cancelMobileAnimation($('modalBack'));
     $('modal').inert = false;
@@ -3626,6 +3936,7 @@
   function closeModal() {
     if (modalClosing || $('modalBack').classList.contains('hidden')) return;
     modalClosing = true;
+    runModalCleanup();
     const generation = ++modalGeneration;
     if (mobileLayout() && $('modal').contains(document.activeElement) && typeof document.activeElement.blur === 'function') document.activeElement.blur();
     closeCtx();
@@ -3933,6 +4244,7 @@
     if (ids.length) confirmModal('Remove offline people', `Remove ${ids.length} offline ${ids.length === 1 ? 'person' : 'people'} from the member list? Their messages stay, and anyone who comes back online is listed again.`, 'Remove', () => { const n = forgetUsers(sid, ids, true); toast(`Removed ${n} ${n === 1 ? 'person' : 'people'}`); });
   });
   $('addServerBtn').onclick = createServerModal;
+  $('downloadsBtn').onclick = downloadsModal;
   $('wCreate').onclick = createServerModal;
   $('wJoin').onclick = joinModal;
   $('inviteTop').onclick = inviteModal;
@@ -4038,7 +4350,7 @@
       e.stopPropagation();
       if (action.disabled || action.getAttribute('aria-disabled') === 'true') return;
       if (action.dataset.fileCancel) return fileTransfers.cancel(cur.sid, cur.cid, action.dataset.fileCancel);
-      return fileTransfers.download(cur.sid, cur.cid, action.dataset.fileDownload);
+      return startDownload(cur.sid, cur.cid, action.dataset.fileDownload);
     }
     const save = e.target.closest('[data-image-save]');
     if (save) { e.stopPropagation(); return downloadImage(cur.sid, cur.cid, save.dataset.imageSave); }
@@ -4563,6 +4875,7 @@
   // ---------------------------------------------------------------- boot
   function start() {
     servers.forEach(connectMesh);
+    dlDir(); paintDownloads();
     syncLobbies();
     setInterval(syncLobbies, 60000); // drops the lobby of a code that has expired
     if (pendingInvite) { const p = pendingInvite; pendingInvite = null; joinFromInvite(p); }
