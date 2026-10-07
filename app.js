@@ -1036,11 +1036,15 @@
     if (mid) queueFileCardPaint(sid, cid, mid);
     paintDownloads();
   }
+  // Only what the built-in viewer can show is kept in the app. Anything else (archives, installers,
+  // documents) goes to the device the usual way, since the only thing to do with it is open it elsewhere.
+  const keepInApp = (name, type) => fileKind(name, type) !== 'other';
   // A finished download that arrived in memory (anything under 100 MB): keep it, and move it into storage.
   function storeDownload(blob, name, where) {
     const m = where && (getMsgs(where.sid)[where.cid] || []).find((x) => x.id === where.mid);
     const type = (m && m.file && m.file.type) || blob.type || '';
     if (m && m.a.id === me.id) return openViewer({ id: 'own-' + where.mid, name, type, size: blob.size }, blob); // my own file: just open it
+    if (!keepInApp(name, type)) return exportFile(blob, name);
     const id = rid(16);
     dl.mem.set(id, blob);
     noteDownload(id, { name, type, size: blob.size }, where);
@@ -1056,7 +1060,7 @@
   // A large download is written to storage piece by piece as it arrives, never held in memory.
   function openFileDownload(meta, strategy, where) {
     if (!strategy.stream) return null;
-    if (dl.dir === false) { // no private storage here: fall back to a save dialog, as before
+    if (dl.dir === false || !keepInApp(meta.name, meta.type)) { // straight to a place the person picks, as before
       if (typeof window.showSaveFilePicker !== 'function') return null;
       return window.showSaveFilePicker({ suggestedName: meta.name, id: 'dischord-download' }).then(async (handle) => {
         const writer = await handle.createWritable({ keepExistingData: false });
@@ -1079,7 +1083,7 @@
     const have = dlFor(sid, cid, mid);
     if (have) return openDownloadItem(have.id);
     const m = (getMsgs(sid)[cid] || []).find((x) => x.id === mid);
-    if (m && m.file && m.a.id !== me.id) dl.active.set(dlKey(sid, cid, mid), { sid, cid, mid, name: m.file.name, size: m.file.size });
+    if (m && m.file && m.a.id !== me.id && keepInApp(m.file.name, m.file.type)) dl.active.set(dlKey(sid, cid, mid), { sid, cid, mid, name: m.file.name, size: m.file.size });
     const ok = fileTransfers.download(sid, cid, mid);
     paintDownloads();
     return ok;
@@ -1121,7 +1125,7 @@
         <button class="icon-btn" data-dl-save="${esc(d.id)}" title="Save to device">${icon('download')}</button>
         <button class="icon-btn danger" data-dl-del="${esc(d.id)}" title="Remove">${icon('trash')}</button></div>`;
     }
-    box.innerHTML = h || '<div class="dl-empty">Nothing here yet. Files you download from chats are kept here, where you can open, play or save them.</div>';
+    box.innerHTML = h || '<div class="dl-empty">Nothing here yet. Videos, music, pictures, PDFs and text files you download from chats are kept here to open or play. Other files go straight to your device.</div>';
     if ($('dlTotal')) $('dlTotal').textContent = dl.list.length ? `${dl.list.length} ${dl.list.length === 1 ? 'file' : 'files'} · ${size(dl.list.reduce((n, d) => n + d.size, 0))}` : '';
     if ($('dlClear')) $('dlClear').classList.toggle('hidden', !dl.list.length);
   }
@@ -1174,6 +1178,7 @@
       : kind === 'pdf' ? `<iframe class="doc-frame" src="${url}" title="${esc(d.name)}"></iframe>`
       : kind === 'text' ? '<pre class="doc-text" id="docText">Loading…</pre>'
       : `<div class="doc-none">${icon('file')}<b>${esc(d.name)}</b><span>${window.DischordFiles.formatSize(d.size)} · this kind of file can't be shown here. Save it to your device to open it.</span></div>`;
+    if (kind === 'other' && !dl.list.some((x) => x.id === d.id)) return exportFile(blob, d.name); // my own file of a kind there is nothing to show for
     modal(`<div class="viewer-head"><b title="${esc(d.name)}">${esc(d.name)}</b><span>${window.DischordFiles.formatSize(d.size)}</span></div>${body}
       <div class="actions">${dl.list.some((x) => x.id === d.id) ? '<button class="btn link" id="vwList">Downloads</button>' : ''}<button class="btn" id="vwSave">Save to device</button><button class="btn primary" data-close>Close</button></div>`, () => {
       $('vwSave').onclick = () => exportFile(blob, d.name);
@@ -1791,13 +1796,14 @@
     const mine = m.a.id === me.id, got = !mine && !!dlFor(sid, m.cid, m.id);
     const kind = fileKind(m.file.name, m.file.type), media = kind === 'video' || kind === 'audio';
     // without in-app storage a large file still goes straight to a place the person picks (or into memory)
-    const legacy = dl.dir === false && !mine && window.DischordFiles.strategyFor(m.file.size).stream;
+    const legacy = (dl.dir === false || !keepInApp(m.file.name, m.file.type)) && !mine && window.DischordFiles.strategyFor(m.file.size).stream;
     const size = window.DischordFiles.formatSize(m.file.size) + (legacy ? (typeof window.showSaveFilePicker === 'function'
       ? ' · you choose a save location when downloading' : ' · large file: uses browser memory here') : '');
     const sub = status.state === 'preparing' ? 'Choose where to save this file…' : saving ? 'Saving file…'
       : active ? `Downloading ${Math.round(status.progress)}%` : status.state === 'error' ? status.message
       : unavailable ? 'Unavailable after reload. Attach it again.'
-      : got ? size + ' · downloaded' : size;
+      : got ? size + ' · downloaded'
+      : status.state === 'complete' && !mine ? status.message || 'Saved to your device' : size;
     const btn = active ? `<button type="button" class="icon-btn" data-file-cancel="${esc(m.id)}" title="Cancel">${icon('x')}</button>`
       : `<button type="button" class="icon-btn" data-file-download="${esc(m.id)}" title="${got || mine ? (media ? 'Play' : 'Open') : status.state === 'error' ? 'Retry download' : 'Download'}" ${unavailable || saving ? 'disabled' : ''}>${icon(got || mine ? (media ? 'play' : 'expand') : 'download')}</button>`;
     return `${icon(kindIcon(kind))}<div class="mf-text"><button type="button" class="mf-name" data-file-download="${esc(m.id)}" title="${esc(m.file.name)}" aria-label="${esc((got || mine ? 'Open ' : 'Download ') + m.file.name)}" ${active || unavailable || saving ? 'disabled' : ''}>${esc(m.file.name)}</button><div class="mf-sub" role="status">${esc(sub)}</div></div>${btn}`;

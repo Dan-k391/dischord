@@ -831,6 +831,20 @@ test('a small-file Download lands in Downloads inside the app, not on the device
   assert(card.includes('aria-label="Open '), 'The card now opens the file instead of downloading it again');
 });
 
+test('a file the viewer cannot show still downloads straight to the device', () => {
+  const app = createApp();
+  const message = app.api.cleanMsg(app.message({ text: '', file: { id: 'file1', name: 'tools.zip', size: 17, type: 'application/zip' } }));
+  app.api.addMsg('testserver', message);
+  app.api.peers.testserver = new Map([['bobuuid', { uid: 'bob', rx: 1000 }]]);
+  clickFile(app, message);
+  app.api.fileTransfers.onPacket('testserver', { ...app.sent[0].packet, t: 'f-chunk', index: 0,
+    data: Buffer.alloc(17).toString('base64') }, 'bobuuid', 'bob');
+  assert.strictEqual(app.downloads.length, 1);
+  assert.strictEqual(app.downloads[0].download, 'tools.zip');
+  const card = app.api.fileCardContent('testserver', message);
+  assert(!card.includes('downloaded') && card.includes('aria-label="Download '), 'It is not kept in Downloads');
+});
+
 test('the Download button requests a file only from its sender after a click', () => {
   const app = createApp();
   const message = app.api.cleanMsg(app.message({ text: '', file: { id: 'file1', name: 'notes.txt', size: 17, type: 'text/plain' } }));
