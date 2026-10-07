@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#2b2d31">
   <title>Dischord</title>
   <link rel="icon" type="image/svg+xml" href="icon.svg?v=3">
-  <link rel="stylesheet" href="style.css?v=52">
+  <link rel="stylesheet" href="style.css?v=53">
 </head>
 <body>
   <div id="desktopTitlebar" aria-hidden="true"><img src="icon.svg?v=3" alt=""><span>Dischord</span></div>
@@ -151,6 +151,11 @@
     <!-- Members -->
     <div class="resizer" id="memResizer" title="Drag to resize"></div>
     <aside id="members"></aside>
+    <aside id="searchPanel" class="hidden" aria-label="Search messages">
+      <div class="search-top"><i data-icon="search"></i><input type="text" id="sQ" placeholder="Search messages" autocomplete="off" spellcheck="false"><button type="button" class="icon-btn" id="sClose" title="Close search (Esc)"><i data-icon="x"></i></button></div>
+      <div class="search-scope" id="sScope"></div>
+      <div class="search-out" id="sOut"></div>
+    </aside>
   </div>
 
   <!-- Hidden VDO.Ninja connections that carry chat + presence (one per server) -->
@@ -167,6 +172,6 @@
   <script src="file-transfer.js?v=18"></script>
   <script src="image-preview.js?v=2"></script>
   <script src="screen-quality.js?v=1"></script>
-  <script src="app.js?v=61"></script>
+  <script src="app.js?v=62"></script>
 </body>
 </html>

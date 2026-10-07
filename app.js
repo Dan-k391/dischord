@@ -808,6 +808,7 @@
     if (viewing && !document.hidden) markRead(sid, m.cid);
     if (!viewing || document.hidden) notify(sid, m);
     if (viewing) { renderMessages(); renderTyping(); }
+    refreshSearch();
     renderRail();
     if (sid === cur.sid) renderChannels();
   }
@@ -2600,6 +2601,7 @@
     morphStage(stageWas);
     $('mainHeader').classList.toggle('hidden', !c);
     $('voiceView').classList.toggle('behind', inThisVoice);
+    refreshSearch();
     renderMobileNavigation();
 
     if (!c) return;
@@ -3772,46 +3774,52 @@
     const body = marks ? cut.split(marks).map((part, i) => (i % 2 ? '<mark>' + esc(part) + '</mark>' : esc(part))).join('') : esc(cut);
     return (start ? '…' : '') + body + (start + 220 < text.length ? '…' : '') + (m.file && m.text ? ` <span class="sr-file">${icon('file', 'mini')}${esc(m.file.name)}</span>` : '');
   }
-  function searchModal() {
-    if (!me) return;
+  // The search lives in a panel that slides in from the right, in place of the member list. It is not a
+  // dialog: the chat stays usable (scroll, read, type) while it is open, and results stay put.
+  let searchHits = [], searchTimer = null;
+  const searchOpen = () => !$('searchPanel').classList.contains('hidden');
+  function paintSearchScopes() {
     const sv = server(cur.sid), c = channel(sv, cur.cid), inText = !!(c && c.type === 'text');
     if (!sv) searchScope = 'all'; else if (searchScope === 'channel' && !inText) searchScope = 'server';
     const scopes = [['channel', inText ? (sv.dm ? '@' : '#') + c.name : '', inText], ['server', sv ? (sv.dm ? 'All direct messages' : sv.name) : '', !!sv], ['all', 'Everywhere', true]];
-    modal(`<div class="search-top">${icon('search')}<input type="text" id="sQ" placeholder="Search messages" autocomplete="off" spellcheck="false"></div>
-      <div class="search-scope" id="sScope">${scopes.filter((x) => x[2]).map(([id, label]) => `<button type="button" data-scope="${id}" class="${id === searchScope ? 'on' : ''}">${esc(label)}</button>`).join('')}</div>
-      <div class="search-out" id="sOut"></div>`, () => {
-      const input = $('sQ'), out = $('sOut');
-      let timer = null, last = [];
-      const run = () => {
-        const q = input.value.trim();
-        if (!q) { last = []; out.innerHTML = '<div class="search-note">Searches the message history saved on this device. Type <b>from:name</b> to see one person\'s messages.</div>'; return; }
-        const { hits, words } = searchMessages(q, searchScope);
-        last = hits.slice(0, 100);
-        out.innerHTML = hits.length ? `<div class="search-count">${hits.length} ${hits.length === 1 ? 'result' : 'results'}${hits.length > 100 ? ' · showing the newest 100' : ''}</div>` +
-          last.map((h, i) => `<button type="button" class="sr" data-hit="${i}">${avatar(liveUser(h.m.a))}<div class="sr-main"><div class="sr-meta"><b style="color:${esc(liveUser(h.m.a).color)}">${esc(h.name)}</b><span>${esc(fmtStamp(h.m.ts))}</span><span class="sr-where">${esc(h.where)}</span></div><div class="sr-text">${searchSnippet(h.m, words)}</div></div></button>`).join('')
-          : '<div class="search-note">No messages match.</div>';
-      };
-      input.oninput = () => { clearTimeout(timer); timer = setTimeout(run, 120); };
-      input.onkeydown = (e) => { if (e.key === 'Enter') { clearTimeout(timer); run(); const first = out.querySelector('.sr'); if (first) first.focus(); } };
-      $('sScope').onclick = (e) => {
-        const b = e.target.closest('[data-scope]');
-        if (!b) return;
-        searchScope = b.dataset.scope;
-        $('sScope').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
-        run(); input.focus();
-      };
-      out.onclick = (e) => {
-        const b = e.target.closest('[data-hit]'), h = b && last[+b.dataset.hit];
-        if (!h) return;
-        closeModal();
-        if (cur.sid !== h.sid) selectServer(h.sid);
-        if (cur.cid !== h.cid) selectChannel(h.cid);
-        setTimeout(() => jumpToMessage(h.m.id, true), 80); // straight there: the channel has only just been drawn
-      };
-      run();
-      input.focus();
-    }, true, true);
-    $('modal').classList.add('search');
+    const h = scopes.filter((x) => x[2]).map(([id, label]) => `<button type="button" data-scope="${id}" class="${id === searchScope ? 'on' : ''}">${esc(label)}</button>`).join('');
+    if ($('sScope').innerHTML !== h) $('sScope').innerHTML = h;
+  }
+  function runSearch() {
+    const out = $('sOut'), q = $('sQ').value.trim();
+    if (!q) { searchHits = []; out.innerHTML = '<div class="search-note">Searches the message history saved on this device. Type <b>from:name</b> to see one person\'s messages.</div>'; return; }
+    const { hits, words } = searchMessages(q, searchScope);
+    searchHits = hits.slice(0, 100);
+    out.innerHTML = hits.length ? `<div class="search-count">${hits.length} ${hits.length === 1 ? 'result' : 'results'}${hits.length > 100 ? ' · showing the newest 100' : ''}</div>` +
+      searchHits.map((h, i) => `<button type="button" class="sr" data-hit="${i}">${avatar(liveUser(h.m.a))}<div class="sr-main"><div class="sr-meta"><b style="color:${esc(liveUser(h.m.a).color)}">${esc(h.name)}</b><span>${esc(fmtStamp(h.m.ts))}</span></div><div class="sr-where">${esc(h.where)}</div><div class="sr-text">${searchSnippet(h.m, words)}</div></div></button>`).join('')
+      : '<div class="search-note">No messages match.</div>';
+  }
+  // what is being viewed changed (another channel, a new message): keep the open panel in step
+  function refreshSearch() {
+    if (!searchOpen()) return;
+    paintSearchScopes();
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(runSearch, 150);
+  }
+  function openSearch() {
+    if (!me) return;
+    const panel = $('searchPanel');
+    if (!searchOpen()) {
+      clearTimeout(panel._closing);
+      panel.classList.remove('hidden', 'closing');
+      document.body.classList.add('search-open');
+      setMobilePane(null);
+      paintSearchScopes();
+      runSearch();
+    }
+    $('sQ').focus();
+    $('sQ').select();
+  }
+  function closeSearch() {
+    const panel = $('searchPanel');
+    if (!searchOpen() || panel.classList.contains('closing')) return;
+    panel.classList.add('closing'); // slides back out, then leaves the layout
+    panel._closing = setTimeout(() => { panel.classList.add('hidden'); panel.classList.remove('closing'); document.body.classList.remove('search-open'); }, 180);
   }
 
   function renderIfCurrent(sid, cid) { if (sid === cur.sid && cid === cur.cid) renderMessages(); }
@@ -4235,8 +4243,30 @@
     if (ids.length) confirmModal('Remove offline people', `Remove ${ids.length} offline ${ids.length === 1 ? 'person' : 'people'} from the member list? Their messages stay, and anyone who comes back online is listed again.`, 'Remove', () => { const n = forgetUsers(sid, ids, true); toast(`Removed ${n} ${n === 1 ? 'person' : 'people'}`); });
   });
   $('addServerBtn').onclick = createServerModal;
-  $('searchTop').onclick = searchModal;
-  document.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f' && me) { e.preventDefault(); searchModal(); } });
+  $('searchTop').onclick = () => (searchOpen() ? closeSearch() : openSearch());
+  $('sClose').onclick = closeSearch;
+  $('sQ').oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 120); };
+  $('sQ').onkeydown = (e) => {
+    if (e.key === 'Escape') { e.stopPropagation(); closeSearch(); }
+    else if (e.key === 'Enter') { clearTimeout(searchTimer); runSearch(); }
+  };
+  $('sScope').onclick = (e) => {
+    const b = e.target.closest('[data-scope]');
+    if (!b) return;
+    searchScope = b.dataset.scope;
+    paintSearchScopes(); runSearch();
+  };
+  $('sOut').onclick = (e) => {
+    const b = e.target.closest('[data-hit]'), h = b && searchHits[+b.dataset.hit];
+    if (!h) return;
+    $('sOut').querySelectorAll('.sr.on').forEach((x) => x.classList.remove('on'));
+    b.classList.add('on');
+    if (cur.sid !== h.sid) selectServer(h.sid);
+    if (cur.cid !== h.cid) selectChannel(h.cid);
+    if (mobileLayout()) closeSearch(); // a phone has no room for both
+    setTimeout(() => jumpToMessage(h.m.id, true), 80); // straight there: the channel may only just have been drawn
+  };
+  document.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f' && me && $('modalBack').classList.contains('hidden')) { e.preventDefault(); openSearch(); } });
   $('wCreate').onclick = createServerModal;
   $('wJoin').onclick = joinModal;
   $('inviteTop').onclick = inviteModal;
@@ -4667,6 +4697,7 @@
       if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 2) return;
       if (String(window.getSelection && window.getSelection()) !== '') return; // selecting text, not swiping
       const right = dx > 0, s = server(cur.sid);
+      if (searchOpen()) { if (right) closeSearch(); return; } // the search panel covers the chat on a phone: swipe it away
       if (mobilePane) { if ((mobilePane === 'channels') !== right) setMobilePane(null); }
       else if (right) setMobilePane('channels');
       else if (s && !s.dm) { membersOpen = true; renderMembers(); setMobilePane('members'); }
