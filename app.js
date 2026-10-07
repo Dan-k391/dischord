@@ -964,29 +964,13 @@
     setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
 
-  // ---- downloads. Files people send are downloaded into the app itself (the browser's private storage
-  // for this site), not out to the device: they are listed in Downloads, open in the built-in viewer and
-  // player, and can be saved to the device or removed from there. Without that storage they are kept in
-  // memory for the session instead.
-  const dl = {
-    list: (store.get('downloads', []) || []).filter((d) => d && isStr(d.id, 40) && isStr(d.name, 255) && Number.isFinite(d.size)), // newest first
-    mem: new Map(),    // id -> Blob held in memory (not stored yet, or storage unavailable)
-    active: new Map(), // 'sid/cid/mid' -> a download in progress
-    // the storage folder: undefined until first opened, false when this browser has none
-    dir: typeof FileSystemFileHandle !== 'undefined' && typeof FileSystemFileHandle.prototype.createWritable === 'function' && navigator.storage && typeof navigator.storage.getDirectory === 'function' ? undefined : false,
-  };
+  // ---- opening files inside the app. Downloads go to the device as they always have. On top of that, a
+  // file the built-in viewer can show (video, audio, image, PDF, text) stays reachable for the rest of
+  // the session, so its chat card opens it in the player instead of downloading it again. The app stores
+  // nothing itself: closing the tab forgets them.
+  const held = new Map(); // 'sid/cid/mid' -> { key, id, name, type, size, from, blob | handle }
+  const HELD_MAX = 24;
   const dlKey = (sid, cid, mid) => sid + '/' + cid + '/' + mid;
-  const dlFor = (sid, cid, mid) => dl.list.find((d) => d.key === dlKey(sid, cid, mid));
-  const saveDlList = () => store.set('downloads', dl.list.slice(0, 500));
-  async function dlDir() {
-    if (dl.dir !== undefined) return dl.dir;
-    try {
-      dl.dir = await (await navigator.storage.getDirectory()).getDirectoryHandle('downloads', { create: true });
-      // files left behind by a download that never finished
-      for await (const name of dl.dir.keys()) if (!dl.list.some((d) => d.id === name)) dl.dir.removeEntry(name).catch(() => { });
-    } catch { dl.dir = false; }
-    return dl.dir;
-  }
   const FILE_KINDS = {
     video: { mp4: 'video/mp4', m4v: 'video/mp4', webm: 'video/webm', ogv: 'video/ogg', mov: 'video/quicktime', mkv: '' },
     audio: { mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg', flac: 'audio/flac', m4a: 'audio/mp4', aac: 'audio/aac', weba: 'audio/webm' },
@@ -1002,201 +986,116 @@
     return /^(video|audio|image|text)\//.test(t) ? t.split('/')[0] : t === 'application/pdf' ? 'pdf' : 'other';
   }
   const kindIcon = (kind) => ({ video: 'film', audio: 'music', image: 'image' })[kind] || 'file';
-  // a stored file as a blob with a type the viewer can rely on
-  async function dlBlob(d) {
-    let blob = dl.mem.get(d.id);
-    if (!blob) {
-      const dir = await dlDir();
-      if (!dir) return null;
-      try { blob = await (await dir.getFileHandle(d.id)).getFile(); } catch { return null; }
-    }
-    const kind = fileKind(d.name, d.type), known = (FILE_KINDS[kind] || {})[fileExt(d.name)];
-    const type = known !== undefined ? known : (d.type || blob.type || '');
-    return kind === 'text' ? blob : blob.slice(0, blob.size, type);
+  const canView = (name, type) => fileKind(name, type) !== 'other';
+  // the storage an earlier version kept downloads in is no longer used: free it once
+  if (!store.get('dlPurged', 0)) {
+    store.set('dlPurged', 1); store.del('downloads');
+    try { navigator.storage.getDirectory().then((root) => root.removeEntry('downloads', { recursive: true })).catch(() => { }); } catch { }
   }
-  function noteDownload(id, meta, where) {
-    const m = where && (getMsgs(where.sid)[where.cid] || []).find((x) => x.id === where.mid);
-    const key = where ? dlKey(where.sid, where.cid, where.mid) : '';
-    if (key) dl.list.filter((d) => d.key === key).forEach((d) => removeDownload(d.id, true)); // downloaded again: keep one copy
-    dl.list.unshift({ id, name: meta.name, type: meta.type || '', size: meta.size, at: now(), key, from: m ? m.a.name : '' });
-    saveDlList();
-    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => { });
-    if (where) queueFileCardPaint(where.sid, where.cid, where.mid);
-    paintDownloads();
-    toast(`${meta.name} is in Downloads`, 4000);
+  function holdFile(where, meta, source) {
+    const m = (getMsgs(where.sid)[where.cid] || []).find((x) => x.id === where.mid);
+    const key = dlKey(where.sid, where.cid, where.mid);
+    held.delete(key);
+    held.set(key, { key, id: (m && m.file && m.file.id) || key, name: meta.name, type: meta.type || '', size: meta.size, from: m ? m.a.name : '', ...source });
+    while (held.size > HELD_MAX) held.delete(held.keys().next().value);
+    queueFileCardPaint(where.sid, where.cid, where.mid);
   }
-  function removeDownload(id, quiet) {
-    const d = dl.list.find((x) => x.id === id);
-    dl.list = dl.list.filter((x) => x.id !== id);
-    dl.mem.delete(id);
-    saveDlList();
-    dlDir().then((dir) => { if (dir) dir.removeEntry(id).catch(() => { }); });
-    if (quiet || !d) return;
-    const [sid, cid, mid] = (d.key || '').split('/');
-    if (mid) queueFileCardPaint(sid, cid, mid);
-    paintDownloads();
-  }
-  // Only what the built-in viewer can show is kept in the app. Anything else (archives, installers,
-  // documents) goes to the device the usual way, since the only thing to do with it is open it elsewhere.
-  const keepInApp = (name, type) => fileKind(name, type) !== 'other';
-  // A finished download that arrived in memory (anything under 100 MB): keep it, and move it into storage.
-  function storeDownload(blob, name, where) {
+  // A finished download that arrived in memory (anything under 100 MB).
+  function saveFileDownload(blob, name, where) {
     const m = where && (getMsgs(where.sid)[where.cid] || []).find((x) => x.id === where.mid);
     const type = (m && m.file && m.file.type) || blob.type || '';
-    if (m && m.a.id === me.id) return openViewer({ id: 'own-' + where.mid, name, type, size: blob.size }, blob); // my own file: just open it
-    if (!keepInApp(name, type)) return exportFile(blob, name);
-    const id = rid(16);
-    dl.mem.set(id, blob);
-    noteDownload(id, { name, type, size: blob.size }, where);
-    dlDir().then(async (dir) => {
-      if (!dir) return;
-      try {
-        const writer = await (await dir.getFileHandle(id, { create: true })).createWritable();
-        await writer.write(blob); await writer.close();
-        if (dl.list.some((d) => d.id === id)) dl.mem.delete(id); else dir.removeEntry(id).catch(() => { });
-      } catch { } // stays in memory for this session
-    });
+    if (m && m.a.id === me.id && canView(name, type)) return openViewer({ id: m.file.id, name, type, size: blob.size, from: '' }, blob); // my own file: just open it
+    exportFile(blob, name);
+    if (where && m && m.a.id !== me.id && canView(name, type)) holdFile(where, { name, type, size: blob.size }, { blob });
   }
-  // A large download is written to storage piece by piece as it arrives, never held in memory.
+  // A large download is written piece by piece to a place the person picks, never held in memory.
   function openFileDownload(meta, strategy, where) {
-    if (!strategy.stream) return null;
-    if (dl.dir === false || !keepInApp(meta.name, meta.type)) { // straight to a place the person picks, as before
-      if (typeof window.showSaveFilePicker !== 'function') return null;
-      return window.showSaveFilePicker({ suggestedName: meta.name, id: 'dischord-download' }).then(async (handle) => {
-        const writer = await handle.createWritable({ keepExistingData: false });
-        return { write: (bytes) => writer.write(bytes), close: () => writer.close(), abort: () => writer.abort() };
-      });
-    }
-    const id = rid(16);
-    return dlDir().then(async (dir) => {
-      if (!dir) return null;
-      const writer = await (await dir.getFileHandle(id, { create: true })).createWritable();
+    if (!strategy.stream || typeof window.showSaveFilePicker !== 'function') return null;
+    // Open within the Download click, before awaiting anything, to retain user activation.
+    const selection = window.showSaveFilePicker({ suggestedName: meta.name, id: 'dischord-download' });
+    return selection.then(async (handle) => {
+      const writer = await handle.createWritable({ keepExistingData: false });
       return {
         write: (bytes) => writer.write(bytes),
-        close: async () => { await writer.close(); noteDownload(id, meta, where); },
-        abort: async () => { try { await writer.abort(); } catch { } dir.removeEntry(id).catch(() => { }); },
+        close: async () => {
+          await writer.close();
+          // the saved file can be read back, so it can be played without loading it into memory
+          if (where && canView(meta.name, meta.type) && typeof handle.getFile === 'function') holdFile(where, meta, { handle });
+        },
+        abort: () => writer.abort(),
       };
     });
   }
-  // Clicking a file: open it if it is already here, otherwise fetch it.
+  // Clicking a file: open it if it is still here from this session, otherwise download it.
   function startDownload(sid, cid, mid) {
-    const have = dlFor(sid, cid, mid);
-    if (have) return openDownloadItem(have.id);
-    const m = (getMsgs(sid)[cid] || []).find((x) => x.id === mid);
-    if (m && m.file && m.a.id !== me.id && keepInApp(m.file.name, m.file.type)) dl.active.set(dlKey(sid, cid, mid), { sid, cid, mid, name: m.file.name, size: m.file.size });
-    const ok = fileTransfers.download(sid, cid, mid);
-    paintDownloads();
-    return ok;
+    const h = held.get(dlKey(sid, cid, mid));
+    return h ? openHeld(h) : fileTransfers.download(sid, cid, mid);
   }
-  function onTransferChange(sid, cid, mid) {
-    if (!['receiving', 'preparing', 'saving'].includes(fileTransfers.status(sid, cid, mid).state)) dl.active.delete(dlKey(sid, cid, mid));
+  async function openHeld(h) {
+    let blob = h.blob;
+    if (!blob) try { blob = await h.handle.getFile(); } catch { blob = null; }
+    if (blob) return openViewer(h, blob);
+    held.delete(h.key);
+    const [sid, cid, mid] = h.key.split('/');
     queueFileCardPaint(sid, cid, mid);
-    paintDownloads();
-  }
-  async function openDownloadItem(id) {
-    const d = dl.list.find((x) => x.id === id);
-    const blob = d && await dlBlob(d);
-    if (!blob) { if (d) removeDownload(id); return toast('That file is no longer stored here. Download it again.'); }
-    openViewer(d, blob);
-  }
-  async function saveDownloadItem(id) {
-    const d = dl.list.find((x) => x.id === id);
-    const blob = d && await dlBlob(d);
-    if (!blob) return toast('That file is no longer stored here.');
-    exportFile(blob, d.name);
-  }
-  function paintDownloads() {
-    const b = $('downloadsBtn');
-    if (b) b.dataset.badge = dl.active.size || '';
-    const box = $('dlList');
-    if (!box) return;
-    const size = window.DischordFiles.formatSize;
-    let h = '';
-    for (const a of dl.active.values()) {
-      const st = fileTransfers.status(a.sid, a.cid, a.mid);
-      const pct = st.state === 'saving' ? 100 : Math.round(st.progress || 0);
-      h += `<div class="dl-row active">${icon(kindIcon(fileKind(a.name)))}<div class="dl-text"><b>${esc(a.name)}</b><span>${size(a.size)} · ${st.state === 'saving' ? 'Saving…' : 'Downloading ' + pct + '%'}</span><i class="dl-bar"><i style="width:${pct}%"></i></i></div>
-        <button class="icon-btn" data-dl-cancel="${esc(dlKey(a.sid, a.cid, a.mid))}" title="Cancel">${icon('x')}</button></div>`;
-    }
-    for (const d of dl.list) {
-      const kind = fileKind(d.name, d.type), media = kind === 'video' || kind === 'audio';
-      h += `<div class="dl-row" data-dl-open="${esc(d.id)}">${icon(kindIcon(kind))}<div class="dl-text"><b>${esc(d.name)}</b><span>${size(d.size)}${d.from ? ' · from ' + esc(d.from) : ''} · ${esc(fmtStamp(d.at))}</span></div>
-        <button class="icon-btn" data-dl-open="${esc(d.id)}" title="${media ? 'Play' : 'Open'}">${icon(media ? 'play' : 'expand')}</button>
-        <button class="icon-btn" data-dl-save="${esc(d.id)}" title="Save to device">${icon('download')}</button>
-        <button class="icon-btn danger" data-dl-del="${esc(d.id)}" title="Remove">${icon('trash')}</button></div>`;
-    }
-    box.innerHTML = h || '<div class="dl-empty">Nothing here yet. Videos, music, pictures, PDFs and text files you download from chats are kept here to open or play. Other files go straight to your device.</div>';
-    if ($('dlTotal')) $('dlTotal').textContent = dl.list.length ? `${dl.list.length} ${dl.list.length === 1 ? 'file' : 'files'} · ${size(dl.list.reduce((n, d) => n + d.size, 0))}` : '';
-    if ($('dlClear')) $('dlClear').classList.toggle('hidden', !dl.list.length);
-  }
-  function downloadsModal() {
-    modal(`<h2>Downloads</h2><div id="dlList" class="dl-list"></div>
-      <div class="actions"><span class="dl-total" id="dlTotal"></span><button class="btn link" id="dlClear">Remove all</button><button class="btn primary" data-close>Close</button></div>`, () => {
-      paintDownloads();
-      $('dlList').onclick = (e) => {
-        const cancel = e.target.closest('[data-dl-cancel]'), save = e.target.closest('[data-dl-save]'), del = e.target.closest('[data-dl-del]'), open = e.target.closest('[data-dl-open]');
-        if (cancel) { const a = dl.active.get(cancel.dataset.dlCancel); if (a) fileTransfers.cancel(a.sid, a.cid, a.mid); }
-        else if (save) saveDownloadItem(save.dataset.dlSave);
-        else if (del) removeDownload(del.dataset.dlDel);
-        else if (open) openDownloadItem(open.dataset.dlOpen);
-      };
-      $('dlClear').onclick = () => confirmModal('Remove all downloads', 'Remove every downloaded file from Dischord? Files you already saved to your device are not affected.', 'Remove all', () => { dl.list.slice().forEach((d) => removeDownload(d.id)); downloadsModal(); });
-    }, true, true);
+    toast('That file can no longer be read. Download it again.');
   }
 
   // ---- built-in viewer and player
   const playerPrefs = { vol: 1, rate: 1, ...store.get('player', {}) };
-  const playerPos = store.get('playerPos', {}); // download id -> where playback stopped (seconds)
+  const playerPos = store.get('playerPos', {}); // file id -> where playback stopped (seconds)
+  const RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
   const fmtClock = (sec) => {
     sec = Math.max(0, Math.floor(sec || 0));
     const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), ss = String(sec % 60).padStart(2, '0');
     return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
   };
-  function openViewer(d, blob) {
-    const kind = fileKind(d.name, d.type || blob.type);
+  function openViewer(d, source) {
+    const kind = fileKind(d.name, d.type || source.type);
     const media = kind === 'video' || kind === 'audio';
-    const url = kind === 'text' || kind === 'other' ? null : URL.createObjectURL(blob);
-    const queue = media ? dl.list.filter((x) => ['video', 'audio'].includes(fileKind(x.name, x.type))) : [];
+    if (kind === 'other') return exportFile(source, d.name);
+    const known = (FILE_KINDS[kind] || {})[fileExt(d.name)];
+    // a type the browser can rely on, whatever the sender's computer called it
+    const blob = kind === 'text' ? source : source.slice(0, source.size, known !== undefined ? known : (d.type || source.type || ''));
+    const url = kind === 'text' ? null : URL.createObjectURL(blob);
+    const queue = media ? [...held.values()].filter((x) => ['video', 'audio'].includes(fileKind(x.name, x.type))) : [];
     const at = queue.findIndex((x) => x.id === d.id);
-    const body = kind === 'video' || kind === 'audio' ? `<div class="player ${kind}" id="player" tabindex="0">
-        <div class="pl-stage">${kind === 'video' ? '<video playsinline></video>' : `<audio></audio><div class="pl-art">${icon('music')}<b>${esc(d.name)}</b></div>`}<div class="pl-note hidden"></div></div>
-        <div class="pl-bar">
-          <input type="range" class="pl-seek" min="0" max="1000" step="1" value="0" aria-label="Seek">
+    const pb = (act, ico, title, extra = '') => `<button type="button" class="pl-btn ${extra}" data-pl="${act}" title="${title}" aria-label="${title}">${icon(ico)}</button>`;
+    const body = media ? `<div class="player ${kind}" id="player" tabindex="0">
+        <div class="pl-stage">${kind === 'video' ? '<video playsinline></video>' : `<audio></audio><div class="pl-art"><div class="pl-disc">${icon('music')}</div><b>${esc(d.name)}</b></div>`}
+          <button type="button" class="pl-big" data-pl="play" aria-label="Play">${icon('play')}</button><div class="pl-note hidden"></div></div>
+        <div class="pl-ctl">
+          <div class="pl-seekrow"><span class="pl-cur">0:00</span><input type="range" class="pl-seek" min="0" max="1000" step="1" value="0" aria-label="Seek"><span class="pl-dur">0:00</span></div>
           <div class="pl-row">
-            ${queue.length > 1 ? `<button class="icon-btn" data-pl="prev" title="Previous" ${at > 0 ? '' : 'disabled'}>${icon('prev')}</button>` : ''}
-            <button class="icon-btn pl-play" data-pl="play" title="Play / pause (Space)">${icon('play')}</button>
-            ${queue.length > 1 ? `<button class="icon-btn" data-pl="next" title="Next" ${at >= 0 && at < queue.length - 1 ? '' : 'disabled'}>${icon('next')}</button>` : ''}
-            <span class="pl-time">0:00 / 0:00</span><span class="spacer"></span>
-            <button class="icon-btn" data-pl="mute" title="Mute (M)">${icon('volume')}</button>
-            <input type="range" class="pl-vol" min="0" max="100" step="1" aria-label="Volume">
-            <select class="pl-rate" title="Speed" aria-label="Playback speed">${[0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].map((r) => `<option value="${r}">${r}×</option>`).join('')}</select>
-            <button class="icon-btn" data-pl="loop" title="Repeat">${icon('loop')}</button>
-            ${kind === 'video' ? `<button class="icon-btn" data-pl="pip" title="Picture in picture">${icon('pip')}</button><button class="icon-btn" data-pl="fs" title="Fullscreen (F)">${icon('expand')}</button>` : ''}
+            <div class="pl-group">${queue.length > 1 ? pb('prev', 'prev', 'Previous', at > 0 ? '' : 'off') : ''}${pb('play', 'play', 'Play / pause (Space)', 'main')}${queue.length > 1 ? pb('next', 'next', 'Next', at >= 0 && at < queue.length - 1 ? '' : 'off') : ''}</div>
+            <div class="pl-group pl-volume">${pb('mute', 'volume', 'Mute (M)')}<input type="range" class="pl-vol" min="0" max="100" step="1" aria-label="Volume"></div>
+            <span class="spacer"></span>
+            <div class="pl-group"><button type="button" class="pl-btn pl-rate" data-pl="rate" title="Speed (&lt; &gt;)" aria-label="Playback speed">1×</button>${pb('loop', 'loop', 'Repeat')}${kind === 'video' ? pb('pip', 'pip', 'Picture in picture') + pb('fs', 'expand', 'Fullscreen (F)') : ''}</div>
           </div>
         </div></div>`
-      : kind === 'image' ? `<div class="lightbox"><img src="${url}" alt="${esc(d.name)}" draggable="false"></div>`
-      : kind === 'pdf' ? `<iframe class="doc-frame" src="${url}" title="${esc(d.name)}"></iframe>`
-      : kind === 'text' ? '<pre class="doc-text" id="docText">Loading…</pre>'
-      : `<div class="doc-none">${icon('file')}<b>${esc(d.name)}</b><span>${window.DischordFiles.formatSize(d.size)} · this kind of file can't be shown here. Save it to your device to open it.</span></div>`;
-    if (kind === 'other' && !dl.list.some((x) => x.id === d.id)) return exportFile(blob, d.name); // my own file of a kind there is nothing to show for
-    modal(`<div class="viewer-head"><b title="${esc(d.name)}">${esc(d.name)}</b><span>${window.DischordFiles.formatSize(d.size)}</span></div>${body}
-      <div class="actions">${dl.list.some((x) => x.id === d.id) ? '<button class="btn link" id="vwList">Downloads</button>' : ''}<button class="btn" id="vwSave">Save to device</button><button class="btn primary" data-close>Close</button></div>`, () => {
-      $('vwSave').onclick = () => exportFile(blob, d.name);
-      if ($('vwList')) $('vwList').onclick = downloadsModal;
+      : kind === 'image' ? `<div class="vw-image"><img src="${url}" alt="${esc(d.name)}" draggable="false"></div>`
+      : kind === 'pdf' ? `<iframe class="vw-doc" src="${url}" title="${esc(d.name)}"></iframe>`
+      : '<pre class="vw-text" id="docText">Loading…</pre>';
+    modal(`<header class="vw-head"><span class="vw-kind">${icon(kindIcon(kind))}</span>
+        <div class="vw-title"><b title="${esc(d.name)}">${esc(d.name)}</b><span>${window.DischordFiles.formatSize(d.size)}${d.from ? ' · from ' + esc(d.from) : ''}</span></div>
+        <button type="button" class="icon-btn" id="vwSave" title="Save to device" aria-label="Save to device">${icon('download')}</button>
+        <button type="button" class="icon-btn" data-close title="Close" aria-label="Close">${icon('x')}</button></header>
+      <div class="vw-body ${kind}">${body}</div>`, () => {
+      $('vwSave').onclick = () => exportFile(source, d.name);
       if (kind === 'text') Promise.resolve().then(() => blob.slice(0, 2 * 1024 * 1024).text()).then(
         (text) => { if ($('docText')) $('docText').textContent = text + (blob.size > 2 * 1024 * 1024 ? '\n\n… (only the first 2 MB is shown)' : ''); },
         () => { if ($('docText')) $('docText').textContent = 'This file could not be read.'; });
-      const stop = media ? mountPlayer($('player'), d, url, (step) => { const next = queue[at + step]; if (next) openDownloadItem(next.id); }) : null;
+      const stop = media ? mountPlayer($('player'), d, url, (step) => { const next = queue[at + step]; if (next) openHeld(next); }) : null;
       modalCleanup = () => { if (stop) stop(); if (url) URL.revokeObjectURL(url); };
     }, true, true);
-    $('modal').classList.add('lb', 'viewer');
+    $('modal').classList.add('viewer');
   }
   // The player: seek bar, volume, speed, repeat, picture in picture, fullscreen, previous / next among the
-  // downloaded media, keyboard shortcuts, and it remembers volume, speed and where each file was stopped.
+  // media opened this session, keyboard shortcuts; it remembers volume, speed and where each file stopped.
   function mountPlayer(root, d, url, go) {
-    const el = root.querySelector('video, audio'), q = (sel) => root.querySelector(sel);
-    const seek = q('.pl-seek'), vol = q('.pl-vol'), rate = q('.pl-rate'), time = q('.pl-time'), note = q('.pl-note');
-    let seeking = false, idle = null, savedAt = 0;
+    const el = root.querySelector('video, audio'), q = (sel) => root.querySelector(sel), video = el.tagName === 'VIDEO';
+    const seek = q('.pl-seek'), vol = q('.pl-vol'), rate = q('.pl-rate'), note = q('.pl-note');
+    let seeking = false, idle = null, savedAt = 0, speed = RATES.includes(+playerPrefs.rate) ? +playerPrefs.rate : 1;
     const savePrefs = () => store.set('player', playerPrefs);
     const savePos = () => {
       if (!Number.isFinite(el.duration) || el.duration < 30) return;
@@ -1208,64 +1107,70 @@
     const flash = (text) => { note.textContent = text; note.classList.remove('hidden'); clearTimeout(flash.timer); flash.timer = setTimeout(() => note.classList.add('hidden'), 900); };
     const paint = () => {
       const dur = Number.isFinite(el.duration) ? el.duration : 0;
+      const shown = seeking ? seek.value / 1000 * dur : el.currentTime;
       if (!seeking) seek.value = dur ? Math.round(el.currentTime / dur * 1000) : 0;
-      seek.style.setProperty('--at', (dur ? (seeking ? seek.value / 10 : el.currentTime / dur * 100) : 0) + '%');
-      time.textContent = fmtClock(seeking ? seek.value / 1000 * dur : el.currentTime) + ' / ' + fmtClock(dur);
-      setIcon(q('[data-pl="play"]'), el.paused ? 'play' : 'pause');
+      seek.style.setProperty('--at', (dur ? shown / dur * 100 : 0) + '%');
+      q('.pl-cur').textContent = fmtClock(shown);
+      q('.pl-dur').textContent = fmtClock(dur);
+      root.querySelectorAll('[data-pl="play"]').forEach((b) => setIcon(b, el.paused ? 'play' : 'pause'));
       setIcon(q('[data-pl="mute"]'), el.muted || !el.volume ? 'volumeOff' : 'volume');
       vol.value = el.muted ? 0 : Math.round(el.volume * 100);
       vol.style.setProperty('--at', vol.value + '%');
+      rate.textContent = speed + '×';
+      rate.classList.toggle('on', speed !== 1);
       q('[data-pl="loop"]').classList.toggle('on', el.loop);
       root.classList.toggle('playing', !el.paused);
     };
     const toggle = () => { if (el.paused) el.play().catch(() => { }); else el.pause(); };
     const jump = (by) => { el.currentTime = Math.max(0, Math.min(el.duration || 0, el.currentTime + by)); flash((by > 0 ? '+' : '−') + Math.abs(by) + 's'); };
     const setVol = (v) => { el.muted = false; el.volume = Math.max(0, Math.min(1, v)); playerPrefs.vol = el.volume; savePrefs(); flash(Math.round(el.volume * 100) + '%'); };
-    const setRate = (r) => { el.playbackRate = r; rate.value = String(r); playerPrefs.rate = r; savePrefs(); flash(r + '×'); };
+    const setRate = (r) => { speed = r; el.playbackRate = r; playerPrefs.rate = r; savePrefs(); flash(r + '×'); paint(); };
     const fullscreen = () => { if (document.fullscreenElement === root) document.exitFullscreen(); else if (root.requestFullscreen) root.requestFullscreen().catch(() => { }); };
-    const wake = () => { root.classList.remove('idle'); clearTimeout(idle); idle = setTimeout(() => { if (!el.paused) root.classList.add('idle'); }, 2500); };
+    // the controls of a playing video step aside until the pointer moves again
+    const wake = () => { root.classList.remove('idle'); clearTimeout(idle); idle = setTimeout(() => { if (video && !el.paused && !seeking) root.classList.add('idle'); }, 2200); };
 
     el.volume = Math.max(0, Math.min(1, +playerPrefs.vol || 1));
-    rate.value = String([0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].includes(+playerPrefs.rate) ? +playerPrefs.rate : 1);
     el.src = url;
     el.onloadedmetadata = () => {
-      el.playbackRate = +rate.value; // set after loading: a new source resets it
+      el.playbackRate = speed; // set after loading: a new source resets it
       if (playerPos[d.id] && playerPos[d.id] < el.duration - 5) { el.currentTime = playerPos[d.id]; flash('Resumed at ' + fmtClock(playerPos[d.id])); }
       paint();
     };
     el.ontimeupdate = () => { paint(); if (now() - savedAt > 5000) { savedAt = now(); savePos(); } };
-    el.onplay = el.onpause = el.onvolumechange = el.ondurationchange = paint;
-    el.onended = () => { delete playerPos[d.id]; store.set('playerPos', playerPos); paint(); if (root.classList.contains('audio') && !el.loop) go(1); };
+    el.onplay = el.onpause = el.onvolumechange = el.ondurationchange = () => { paint(); wake(); };
+    el.onended = () => { delete playerPos[d.id]; store.set('playerPos', playerPos); paint(); if (!video && !el.loop) go(1); };
     el.onerror = () => { note.textContent = "This file's format can't be played here. Save it to your device to open it in another player."; note.classList.remove('hidden'); note.classList.add('error'); };
     seek.oninput = () => { seeking = true; paint(); };
     seek.onchange = () => { if (Number.isFinite(el.duration)) el.currentTime = seek.value / 1000 * el.duration; seeking = false; paint(); };
     vol.oninput = () => { el.muted = false; el.volume = vol.value / 100; playerPrefs.vol = el.volume; savePrefs(); };
-    rate.onchange = () => setRate(+rate.value);
     root.onclick = (e) => {
       const b = e.target.closest('[data-pl]');
       if (!b) { if (e.target.closest('.pl-stage')) toggle(); return; }
+      if (b.classList.contains('off')) return;
       switch (b.dataset.pl) {
         case 'play': return toggle();
         case 'prev': return go(-1);
         case 'next': return go(1);
         case 'mute': el.muted = !el.muted; return;
+        case 'rate': return setRate(RATES[(RATES.indexOf(speed) + 1) % RATES.length]);
         case 'loop': el.loop = !el.loop; return paint();
         case 'fs': return fullscreen();
         case 'pip': if (document.pictureInPictureElement) document.exitPictureInPicture(); else if (el.requestPictureInPicture) el.requestPictureInPicture().catch(() => toast('Picture in picture is not available here.')); return;
       }
     };
-    root.ondblclick = (e) => { if (e.target.closest('.pl-stage') && el.tagName === 'VIDEO') fullscreen(); };
+    root.ondblclick = (e) => { if (video && e.target.closest('.pl-stage') && !e.target.closest('[data-pl]')) fullscreen(); };
     root.onmousemove = root.ontouchstart = wake;
+    root.onmouseleave = () => { if (video && !el.paused && !seeking) root.classList.add('idle'); };
     root.onkeydown = (e) => {
-      if (e.target.tagName === 'SELECT' || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
       const k = e.key;
       if (k === ' ' || k === 'k') toggle();
       else if (k === 'ArrowLeft') jump(-5); else if (k === 'ArrowRight') jump(5);
       else if (k === 'j') jump(-10); else if (k === 'l') jump(10);
       else if (k === 'ArrowUp') setVol(el.volume + 0.05); else if (k === 'ArrowDown') setVol(el.volume - 0.05);
       else if (k === 'm') el.muted = !el.muted;
-      else if (k === 'f' && el.tagName === 'VIDEO') fullscreen();
-      else if (k === '>' || k === '.') setRate(Math.min(2, +rate.value + 0.25)); else if (k === '<' || k === ',') setRate(Math.max(0.5, +rate.value - 0.25));
+      else if (k === 'f' && video) fullscreen();
+      else if (k === '>' || k === '.') setRate(RATES[Math.min(RATES.length - 1, RATES.indexOf(speed) + 1)]); else if (k === '<' || k === ',') setRate(RATES[Math.max(0, RATES.indexOf(speed) - 1)]);
       else if (k >= '0' && k <= '9' && Number.isFinite(el.duration)) el.currentTime = el.duration * (+k / 10);
       else return;
       e.preventDefault(); e.stopPropagation(); wake();
@@ -1432,8 +1337,8 @@
     },
     userId: () => me && me.id,
     randomId: () => rid(20),
-    onChange: onTransferChange,
-    saveDownload: storeDownload,
+    onChange: queueFileCardPaint,
+    saveDownload: saveFileDownload,
     openDownload: openFileDownload,
     maxWindow: () => voice ? 32 : window.DischordFiles.MAX_WINDOW,
   });
@@ -1793,20 +1698,19 @@
     const active = status.state === 'receiving' || status.state === 'preparing';
     const saving = status.state === 'saving';
     const unavailable = m.a.id === me.id && !fileTransfers.hasLocal(sid, m.cid, m.id);
-    const mine = m.a.id === me.id, got = !mine && !!dlFor(sid, m.cid, m.id);
-    const kind = fileKind(m.file.name, m.file.type), media = kind === 'video' || kind === 'audio';
-    // without in-app storage a large file still goes straight to a place the person picks (or into memory)
-    const legacy = (dl.dir === false || !keepInApp(m.file.name, m.file.type)) && !mine && window.DischordFiles.strategyFor(m.file.size).stream;
-    const size = window.DischordFiles.formatSize(m.file.size) + (legacy ? (typeof window.showSaveFilePicker === 'function'
+    const mine = m.a.id === me.id, kind = fileKind(m.file.name, m.file.type), media = kind === 'video' || kind === 'audio';
+    const opens = mine ? kind !== 'other' : held.has(dlKey(sid, m.cid, m.id)); // a click opens it in the viewer
+    const large = window.DischordFiles.strategyFor(m.file.size).stream && !mine;
+    const size = window.DischordFiles.formatSize(m.file.size) + (large ? (typeof window.showSaveFilePicker === 'function'
       ? ' · you choose a save location when downloading' : ' · large file: uses browser memory here') : '');
     const sub = status.state === 'preparing' ? 'Choose where to save this file…' : saving ? 'Saving file…'
       : active ? `Downloading ${Math.round(status.progress)}%` : status.state === 'error' ? status.message
       : unavailable ? 'Unavailable after reload. Attach it again.'
-      : got ? size + ' · downloaded'
-      : status.state === 'complete' && !mine ? status.message || 'Saved to your device' : size;
+      : opens && !mine ? window.DischordFiles.formatSize(m.file.size) + ' · saved · click to ' + (media ? 'play' : 'open')
+      : status.state === 'complete' ? status.message || 'Saved' : size;
     const btn = active ? `<button type="button" class="icon-btn" data-file-cancel="${esc(m.id)}" title="Cancel">${icon('x')}</button>`
-      : `<button type="button" class="icon-btn" data-file-download="${esc(m.id)}" title="${got || mine ? (media ? 'Play' : 'Open') : status.state === 'error' ? 'Retry download' : 'Download'}" ${unavailable || saving ? 'disabled' : ''}>${icon(got || mine ? (media ? 'play' : 'expand') : 'download')}</button>`;
-    return `${icon(kindIcon(kind))}<div class="mf-text"><button type="button" class="mf-name" data-file-download="${esc(m.id)}" title="${esc(m.file.name)}" aria-label="${esc((got || mine ? 'Open ' : 'Download ') + m.file.name)}" ${active || unavailable || saving ? 'disabled' : ''}>${esc(m.file.name)}</button><div class="mf-sub" role="status">${esc(sub)}</div></div>${btn}`;
+      : `<button type="button" class="icon-btn" data-file-download="${esc(m.id)}" title="${opens ? (media ? 'Play' : 'Open') : status.state === 'error' ? 'Retry download' : 'Download'}" ${unavailable || saving ? 'disabled' : ''}>${icon(opens ? (media ? 'play' : 'expand') : 'download')}</button>`;
+    return `${icon(kindIcon(kind))}<div class="mf-text"><button type="button" class="mf-name" data-file-download="${esc(m.id)}" title="${esc(m.file.name)}" aria-label="${esc((opens ? 'Open ' : 'Download ') + m.file.name)}" ${active || unavailable || saving ? 'disabled' : ''}>${esc(m.file.name)}</button><div class="mf-sub" role="status">${esc(sub)}</div></div>${btn}`;
   }
   function paintFileCards(mid, sid = cur.sid, cid = cur.cid) {
     document.querySelectorAll('[data-file-card]').forEach((el) => {
@@ -4250,7 +4154,6 @@
     if (ids.length) confirmModal('Remove offline people', `Remove ${ids.length} offline ${ids.length === 1 ? 'person' : 'people'} from the member list? Their messages stay, and anyone who comes back online is listed again.`, 'Remove', () => { const n = forgetUsers(sid, ids, true); toast(`Removed ${n} ${n === 1 ? 'person' : 'people'}`); });
   });
   $('addServerBtn').onclick = createServerModal;
-  $('downloadsBtn').onclick = downloadsModal;
   $('wCreate').onclick = createServerModal;
   $('wJoin').onclick = joinModal;
   $('inviteTop').onclick = inviteModal;
@@ -4881,7 +4784,6 @@
   // ---------------------------------------------------------------- boot
   function start() {
     servers.forEach(connectMesh);
-    dlDir(); paintDownloads();
     syncLobbies();
     setInterval(syncLobbies, 60000); // drops the lobby of a code that has expired
     if (pendingInvite) { const p = pendingInvite; pendingInvite = null; joinFromInvite(p); }

@@ -812,10 +812,12 @@ test('cancelling a pending destination picker aborts its late writer and never c
   assert.strictEqual(app.idbOpens, 0);
 });
 
-test('a small-file Download lands in Downloads inside the app, not on the device, and then offers Open', () => {
+test('a small-file Download saves to the device and, being viewable, then opens in the built-in viewer', () => {
   let pickerCalls = 0;
   const app = createApp({ showSaveFilePicker() { pickerCalls++; return new Promise(() => {}); } });
-  const message = receivedFile(app, 17);
+  const message = app.api.cleanMsg(app.message({ text: '', file: { id: 'file1', name: 'notes.txt', size: 17, type: 'text/plain' } }));
+  app.api.addMsg('testserver', message);
+  app.api.peers.testserver = new Map([['bobuuid', { uid: 'bob', rx: 1000 }]]);
   clickFile(app, message);
   assert.strictEqual(pickerCalls, 0);
   assert.strictEqual(app.sent.length, 1);
@@ -823,12 +825,17 @@ test('a small-file Download lands in Downloads inside the app, not on the device
   const request = app.sent[0].packet;
   app.api.fileTransfers.onPacket('testserver', { ...request, t: 'f-chunk', index: 0,
     data: Buffer.alloc(17).toString('base64') }, 'bobuuid', 'bob');
-  assert.strictEqual(app.downloads.length, 0, 'Nothing is handed to the device until Save to device is pressed');
-  assert.strictEqual(app.objectUrls.length, 0);
+  assert.strictEqual(app.downloads.length, 1);
+  assert.strictEqual(app.downloads[0].download, message.file.name);
+  assert.strictEqual(app.objectUrls.length, 1);
   assert.strictEqual(app.idbOpens, 0);
   const card = app.api.fileCardContent('testserver', message);
-  assert(card.includes('downloaded'), 'The card shows the file is now in Downloads');
   assert(card.includes('aria-label="Open '), 'The card now opens the file instead of downloading it again');
+  const requests = app.sent.filter((entry) => entry.packet.t === 'f-request').length;
+  clickFile(app, message);
+  assert.strictEqual(app.sent.filter((entry) => entry.packet.t === 'f-request').length, requests, 'Opening it does not ask the sender again');
+  assert.strictEqual(app.downloads.length, 1, 'Opening it does not save it a second time');
+  assert(app.node('modal').innerHTML.includes('notes.txt'), 'The viewer opens on the file');
 });
 
 test('a file the viewer cannot show still downloads straight to the device', () => {
@@ -842,7 +849,7 @@ test('a file the viewer cannot show still downloads straight to the device', () 
   assert.strictEqual(app.downloads.length, 1);
   assert.strictEqual(app.downloads[0].download, 'tools.zip');
   const card = app.api.fileCardContent('testserver', message);
-  assert(!card.includes('downloaded') && card.includes('aria-label="Download '), 'It is not kept in Downloads');
+  assert(card.includes('aria-label="Download '), 'There is nothing to open in the viewer');
 });
 
 test('the Download button requests a file only from its sender after a click', () => {
