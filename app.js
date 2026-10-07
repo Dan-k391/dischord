@@ -2223,6 +2223,7 @@
   window.addEventListener('message', (e) => {
     const d = e.data;
     if (!d || typeof d !== 'object') return;
+    if (d.dischordRoutes) return onRoutes(e.source, d.dischordRoutes);
 
     if (voice && e.source === voice.iframe.contentWindow) {
       if (['joined-room-complete', 'local-microphone-event', 'local-camera-event', 'video-element-created',
@@ -3385,7 +3386,7 @@
         h += '<div class="ctx-sep"></div>' + ctxCheck('cam', 'Camera', !!voice.cam) + ctxCheck('share', 'Share screen', !!voice.ssFrame);
         h += ctxSelect('selfprev', 'My preview', av.selfPreview, [['full', 'Full quality'], ['low', 'Low'], ['off', 'Hidden']]);
       }
-      h += '<div class="ctx-sep"></div>' + ctxCheck('stats', 'Show stream stats', !!av.showStats) + ctxItem('avset', 'gear', 'Voice & video settings') + ctxItem('profile', 'edit', 'Edit profile');
+      h += '<div class="ctx-sep"></div>' + ctxCheck('stats', 'Show stream stats', !!av.showStats) + ctxItem('diag', 'chart', 'Connection diagnostics') + ctxItem('avset', 'gear', 'Voice & video settings') + ctxItem('profile', 'edit', 'Edit profile');
     } else {
       const c = userVol[uid] || {};
       if (occ) {
@@ -3435,6 +3436,7 @@
           case 'share': closeCtx(); return toggleShare();
           case 'stats': av.showStats = !av.showStats; store.set('av', av); renderStage(); return reopen();
           case 'avset': closeCtx(); return settingsModal('av');
+          case 'diag': closeCtx(); return diagModal();
           case 'profile': closeCtx(); return settingsModal('profile');
           case 'mute': setVol(uid, { m: !(userVol[uid] || {}).m }); return reopen();
           case 'hidevid': hiddenVid[uid] = !hiddenVid[uid]; if (!hiddenVid[uid]) delete hiddenVid[uid]; store.set('hidevid', hiddenVid); renderStage(); return reopen();
@@ -3823,6 +3825,153 @@
     if (!searchOpen() || panel.classList.contains('closing')) return;
     panel.classList.add('closing'); // slides back out, then leaves the layout
     panel._closing = setTimeout(() => { panel.classList.add('hidden'); panel.classList.remove('closing'); document.body.classList.remove('search-open'); }, 180);
+  }
+
+  // ---- connection diagnostics. Every peer connection takes one of three routes: straight across the
+  // local network, straight across the internet after STUN found a way through the routers, or relayed
+  // through a TURN server when no direct path exists. While recording, each connection frame is asked
+  // every few seconds which route its connections are on and how much they have carried; that is kept
+  // per person and totalled, so it shows how often traffic is direct and how often it is relayed.
+  function vdoRouteProbe() {
+    if (typeof session === 'undefined' || !session) return;
+    if (!window.__dischordRouteScan) window.__dischordRouteScan = async function () {
+      var out = [];
+      var scan = async function (map, dir) {
+        for (var uuid in (map || {})) {
+          var pc = map[uuid];
+          if (!pc || typeof pc.getStats !== 'function' || pc.connectionState === 'closed') continue;
+          try {
+            var stats = await pc.getStats(), byId = {}, pair = null;
+            stats.forEach(function (r) { byId[r.id] = r; });
+            stats.forEach(function (r) { if (r.type === 'transport' && r.selectedCandidatePairId && byId[r.selectedCandidatePairId]) pair = byId[r.selectedCandidatePairId]; });
+            if (!pair) stats.forEach(function (r) { if (!pair && r.type === 'candidate-pair' && (r.selected || (r.nominated && r.state === 'succeeded'))) pair = r; });
+            if (!pair) continue;
+            var mine = byId[pair.localCandidateId] || {}, theirs = byId[pair.remoteCandidateId] || {};
+            // "Peer reflexive" candidates turn up both on a home network (where browsers hide local addresses)
+            // and across the internet, so say whether any address on the path is a public one.
+            var open = function (a) { return typeof a === 'string' && a !== '' && !/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|127\.|f[cd]|fe80|::1)/i.test(a) && !/\.local$/i.test(a); };
+            out.push({ uuid: uuid, dir: dir, stream: typeof pc.streamID === 'string' ? pc.streamID : null, local: mine.candidateType || '', remote: theirs.candidateType || '', wide: open(mine.address) || open(theirs.address),
+              proto: mine.protocol || '', relayProto: mine.relayProtocol || '', sent: pair.bytesSent || 0, recv: pair.bytesReceived || 0,
+              rtt: typeof pair.currentRoundTripTime === 'number' ? Math.round(pair.currentRoundTripTime * 1000) : null });
+          } catch (_) { }
+        }
+      };
+      await scan(session.pcs, 'out'); await scan(session.rpcs, 'in');
+      try { window.parent.postMessage({ dischordRoutes: out }, '*'); } catch (_) { }
+    };
+    window.__dischordRouteScan();
+  }
+  const ROUTES = { lan: 'Direct · local network', stun: 'Direct · internet (STUN)', relay: 'Relayed · via TURN' };
+  const zeroRoutes = () => ({ lan: 0, stun: 0, relay: 0 });
+  const diag = {
+    on: !!store.get('diagOn', false), // keep recording when the panel is closed
+    open: false,
+    conns: new Map(),                 // one entry per live connection, this session
+    total: { time: zeroRoutes(), bytes: zeroRoutes(), since: now(), ...store.get('diagTotal', {}) }, // kept across sessions
+    savedAt: 0,
+  };
+  const DIAG_STEP = 3000;
+  // which frame an answer came from, and so what the connections in it are for
+  function diagFrame(source) {
+    for (const sid in meshes) if (meshes[sid].iframe.contentWindow === source) return { id: 'chat:' + sid, kind: 'chat', sid };
+    if (voice && voice.iframe.contentWindow === source) return { id: 'voice', kind: 'voice' };
+    if (voice && voice.ssFrame && voice.ssFrame.contentWindow === source) return { id: 'share', kind: 'share' };
+    for (const [key, el] of tileEls) { const f = el.querySelector('.tile-media iframe'); if (f && f.contentWindow === source) return { id: 'tile:' + key, kind: key.endsWith(':s') ? 'screen' : 'camera', uid: key.split(':')[0] }; }
+    return null;
+  }
+  const diagUser = (uid) => { if (uid === me.id) return me; for (const sid in members) { const m = members[sid][uid]; if (m) return m.user; } for (const sv of servers) { const k = getKnown(sv.id)[uid]; if (k) return k; } return null; };
+  function onRoutes(source, list) {
+    const frame = diagFrame(source);
+    if (!frame || !Array.isArray(list) || !(diag.on || diag.open)) return;
+    const seen = now();
+    for (const r of list.slice(0, 200)) {
+      if (!r || typeof r.uuid !== 'string') continue;
+      let uid = frame.uid || null;
+      if (frame.kind === 'chat') uid = (peers[frame.sid] && peers[frame.sid].get(r.uuid) || {}).uid || null;
+      else if (frame.kind === 'voice' && voice) {
+        const hit = r.stream && Object.entries(members[voice.sid] || {}).find(([, m]) => m.vs === r.stream || m.vss === r.stream);
+        uid = hit ? hit[0] : (diag.conns.get(frame.id + '/' + r.uuid + '/in') || {}).uid || null; // my sending side shares the id of their receiving side
+      }
+      const route = r.local === 'relay' || r.remote === 'relay' ? 'relay'
+        : r.local === 'srflx' || r.remote === 'srflx' || r.wide ? 'stun' : 'lan'; // found through STUN or reaching a public address: across the internet
+      const key = frame.id + '/' + r.uuid + '/' + r.dir;
+      let c = diag.conns.get(key);
+      if (!c) { c = { key, kind: frame.kind, dir: r.dir, sid: frame.sid || (voice && voice.sid) || null, since: seen, sent: +r.sent || 0, recv: +r.recv || 0, time: zeroRoutes(), bytes: zeroRoutes(), changes: [] }; diag.conns.set(key, c); }
+      const moved = Math.max(0, (+r.sent || 0) - c.sent) + Math.max(0, (+r.recv || 0) - c.recv);
+      if (c.route && c.route !== route) c.changes.push({ at: seen, from: c.route, to: route });
+      if (c.changes.length > 20) c.changes.shift();
+      Object.assign(c, { uid: uid || c.uid || null, route, local: r.local, remote: r.remote, proto: r.proto, relayProto: r.relayProto, rtt: r.rtt, sent: +r.sent || 0, recv: +r.recv || 0, seen });
+      c.time[route] += DIAG_STEP; c.bytes[route] += moved;
+      diag.total.time[route] += DIAG_STEP; diag.total.bytes[route] += moved;
+    }
+    if (seen - diag.savedAt > 30000) { diag.savedAt = seen; store.set('diagTotal', diag.total); }
+    if (diag.open) paintDiag();
+  }
+  function pollRoutes() {
+    if (!(diag.on || diag.open) || !me) return;
+    const code = '(' + vdoRouteProbe.toString() + ')();';
+    const frames = [...Object.values(meshes).map((m) => m.iframe), voice && voice.iframe, voice && voice.ssFrame, ...[...tileEls.values()].map((el) => el.querySelector('.tile-media iframe'))];
+    for (const f of frames) if (f && f.contentWindow) try { f.contentWindow.postMessage({ function: 'eval', value: code }, '*'); } catch { }
+    for (const [key, c] of diag.conns) if (now() - c.seen > 5 * 60000) diag.conns.delete(key); // long gone
+  }
+  const fmtBytes = (n) => (n < 1024 ? Math.round(n) + ' B' : window.DischordFiles.formatSize(Math.round(n)));
+  const share = (parts) => { const all = parts.lan + parts.stun + parts.relay; return all ? { lan: parts.lan / all, stun: parts.stun / all, relay: parts.relay / all, all } : null; };
+  const pct = (x) => (x > 0 && x < 0.01 ? '<1' : Math.round(x * 100)) + '%';
+  const routeBar = (sh) => (sh ? `<i class="dg-bar"><i class="lan" style="width:${sh.lan * 100}%"></i><i class="stun" style="width:${sh.stun * 100}%"></i><i class="relay" style="width:${sh.relay * 100}%"></i></i>` : '<i class="dg-bar"></i>');
+  const DIAG_KINDS = { chat: 'Chat & files', voice: 'Voice', camera: 'Camera video', screen: 'Screen video', share: 'My screen share' };
+  function diagReport() {
+    const live = [...diag.conns.values()].filter((c) => now() - c.seen < 15000);
+    return {
+      app: APP_VER, at: new Date().toISOString(), recordingSince: new Date(diag.total.since).toISOString(),
+      totals: { timeMs: diag.total.time, bytes: diag.total.bytes },
+      connections: [...diag.conns.values()].map((c) => ({ person: (diagUser(c.uid) || {}).name || 'unknown', use: DIAG_KINDS[c.kind], direction: c.dir === 'in' ? 'receiving' : 'sending', live: live.includes(c),
+        route: c.route, localCandidate: c.local, remoteCandidate: c.remote, protocol: c.proto, relayProtocol: c.relayProto || undefined, rttMs: c.rtt, bytesSent: c.sent, bytesReceived: c.recv, timeMs: c.time, bytesByRoute: c.bytes,
+        routeChanges: c.changes.map((x) => ({ at: new Date(x.at).toISOString(), from: x.from, to: x.to })) })),
+    };
+  }
+  function paintDiag() {
+    const box = $('dgBody');
+    if (!box) return;
+    const live = [...diag.conns.values()].filter((c) => now() - c.seen < 15000);
+    const t = share(diag.total.time), b = share(diag.total.bytes);
+    const card = (id) => `<div class="dg-card ${id}"><b>${t ? pct(t[id]) : '–'}</b><span>${ROUTES[id]}</span><em>${b ? pct(b[id]) + ' of data · ' + fmtBytes(diag.total.bytes[id]) : 'no data yet'}</em></div>`;
+    let h = `<div class="dg-cards">${card('lan')}${card('stun')}${card('relay')}</div>
+      <div class="dg-sub">Share of connection time since ${esc(fmtStamp(diag.total.since))}. ${live.length} live ${live.length === 1 ? 'connection' : 'connections'} now, ${live.filter((c) => c.route === 'relay').length} relayed.</div>`;
+    const people = new Map();
+    for (const c of live) { const k = c.uid || '?'; if (!people.has(k)) people.set(k, []); people.get(k).push(c); }
+    if (!people.size) h += `<div class="dg-empty">${Object.keys(meshes).length ? 'No one else is connected right now. Connections appear here as people come online.' : 'Join a server to see connections.'}</div>`;
+    for (const [uid, list] of [...people].sort((x, y) => ((diagUser(x[0]) || {}).name || '~').localeCompare((diagUser(y[0]) || {}).name || '~'))) {
+      const u = diagUser(uid), time = zeroRoutes(), bytes = zeroRoutes();
+      list.forEach((c) => { for (const r in time) { time[r] += c.time[r]; bytes[r] += c.bytes[r]; } });
+      const sh = share(time), relayed = list.some((c) => c.route === 'relay');
+      h += `<div class="dg-person"><div class="dg-who">${u ? avatar(u) : '<div class="avatar" style="background:#4e5058">?</div>'}<div><b>${esc(u ? u.name : 'Viewer (not identified)')}</b><span>${sh ? `direct ${pct(sh.lan + sh.stun)} of the time · relayed ${pct(sh.relay)}` : ''} · ${fmtBytes(bytes.lan + bytes.stun + bytes.relay)} this session</span></div>${routeBar(sh)}<span class="dg-tag ${relayed ? 'relay' : 'ok'}">${relayed ? 'Relayed' : 'Direct'}</span></div>`;
+      for (const c of list.sort((x, y) => x.kind.localeCompare(y.kind) || x.dir.localeCompare(y.dir))) {
+        const sv = c.kind === 'chat' ? server(c.sid) : null;
+        h += `<div class="dg-conn"><span class="dg-use">${DIAG_KINDS[c.kind]}${sv ? ' · ' + esc(sv.name) : ''} <em>${c.dir === 'in' ? '↓ from them' : '↑ to them'}</em></span>
+          <span class="dg-tag ${c.route}">${ROUTES[c.route]}</span>
+          <span class="dg-num" title="Candidate types: mine ${esc(c.local)}, theirs ${esc(c.remote)}">${esc((c.relayProto ? 'TURN/' + c.relayProto : c.proto || '').toUpperCase())}</span>
+          <span class="dg-num">${c.rtt == null ? '–' : c.rtt + ' ms'}</span>
+          <span class="dg-num">↑ ${fmtBytes(c.sent)}</span><span class="dg-num">↓ ${fmtBytes(c.recv)}</span>
+          ${c.changes.length ? `<span class="dg-chg" title="${esc(c.changes.map((x) => fmtStamp(x.at) + ': ' + x.from + ' → ' + x.to).join('\n'))}">changed ${c.changes.length}×</span>` : ''}</div>`;
+      }
+      h += '</div>';
+    }
+    box.innerHTML = h;
+  }
+  function diagModal() {
+    modal(`<h2>Connection diagnostics</h2>
+      <p class="dg-lead">How your traffic reaches each person: straight to them, or relayed through a TURN server when no direct path could be found.</p>
+      <div id="dgBody"></div>
+      <div class="actions"><label class="dg-rec"><input type="checkbox" id="dgOn" ${diag.on ? 'checked' : ''}> Keep recording when this is closed</label><span class="spacer"></span>
+        <button class="btn link" id="dgReset">Reset totals</button><button class="btn" id="dgCopy">Copy report</button><button class="btn primary" data-close>Close</button></div>`, () => {
+      diag.open = true;
+      modalCleanup = () => { diag.open = false; store.set('diagTotal', diag.total); };
+      $('dgOn').onchange = () => { diag.on = $('dgOn').checked; store.set('diagOn', diag.on); };
+      $('dgReset').onclick = () => { diag.total = { time: zeroRoutes(), bytes: zeroRoutes(), since: now() }; diag.conns.forEach((c) => { c.time = zeroRoutes(); c.bytes = zeroRoutes(); c.changes = []; }); store.set('diagTotal', diag.total); paintDiag(); };
+      $('dgCopy').onclick = () => { const text = JSON.stringify(diagReport(), null, 2); (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject()).then(() => toast('Report copied'), () => toast('Could not copy the report here.')); };
+      paintDiag(); pollRoutes();
+    }, true, true);
+    $('modal').classList.add('diag');
   }
 
   function renderIfCurrent(sid, cid) { if (sid === cur.sid && cid === cur.cid) renderMessages(); }
@@ -4911,6 +5060,8 @@
   setInterval(() => { paintCallTime(); paintChannelTimes(); }, 1000);
   setInterval(pollStats, 2000);
   setInterval(() => applyVolumes(true), 4000);
+  setInterval(pollRoutes, DIAG_STEP);
+  document.addEventListener('keydown', (e) => { if (e.ctrlKey && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'd' && me) { e.preventDefault(); diagModal(); } });
   setInterval(paintImages, 15000); // retry visible uncached previews when a provider returns
 
   // ---------------------------------------------------------------- boot
