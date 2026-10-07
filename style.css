@@ -1032,10 +1032,14 @@ body.tile-out #tiles .tile { z-index: 1; }
 }
 
 /* ---------- message search: a panel on the right, beside the chat ---------- */
-#searchPanel { --search-w: clamp(300px, 30vw, 420px); width: var(--search-w); flex: none; display: flex; flex-direction: column; min-height: 0; background: var(--bg-side); border-left: 1px solid rgba(0,0,0,.28); animation: search-in .22s cubic-bezier(.2,.8,.2,1); }
+/* The panel grows from nothing at the right edge and its fixed-width contents are uncovered as it does, so
+   nothing is ever laid out beyond the window (which would let the page scroll sideways and shake the app). */
+#searchPanel { --search-w: clamp(300px, 30vw, 420px); width: var(--search-w); flex: none; min-height: 0; overflow: hidden; background: var(--bg-side); border-left: 1px solid rgba(0,0,0,.28); animation: search-in .22s cubic-bezier(.2,.8,.2,1); }
+.search-box { width: var(--search-w); height: 100%; display: flex; flex-direction: column; min-height: 0; }
 #searchPanel.closing { animation: search-out .18s ease-in forwards; }
-@keyframes search-in { from { margin-right: calc(0px - var(--search-w)); opacity: .4; } }
-@keyframes search-out { to { margin-right: calc(0px - var(--search-w)); opacity: .4; } }
+@keyframes search-in { from { width: var(--search-from, 0px); } }
+@keyframes search-out { to { width: var(--search-from, 0px); } }
+#app { overflow: hidden; }
 body.search-open #members, body.search-open #memResizer { display: none; } /* the panel takes the member list's place */
 body.search-open #searchTop { color: var(--text-strong); background: var(--bg-active); }
 .search-top { display: flex; align-items: center; gap: 8px; height: 48px; flex: none; padding: 0 8px 0 14px; border-bottom: 1px solid rgba(0,0,0,.28); color: var(--text-muted); }
@@ -1065,9 +1069,16 @@ body.search-open #searchTop { color: var(--text-strong); background: var(--bg-ac
   /* on a phone it slides over the chat from the right edge instead */
   #searchPanel { position: fixed; z-index: 42; right: 0; width: min(100%, 420px); --search-w: min(100vw, 420px);
     top: calc(var(--app-top, 0px) + var(--desktop-title-height, 0px) + var(--mobile-nav-height)); bottom: 0; padding-bottom: var(--safe-area-inset-bottom); box-shadow: -8px 0 24px rgba(0,0,0,.4); animation-name: search-slide; }
+  .search-box { width: 100%; }
   #searchPanel.closing { animation-name: search-slide-out; }
   .search-top input { font-size: 16px; }
 }
 @keyframes search-slide { from { transform: translateX(100%); } }
 @keyframes search-slide-out { to { transform: translateX(100%); } }
 @media (prefers-reduced-motion: reduce) { #searchPanel, #searchPanel.closing { animation-duration: 1ms; } }
+
+/* the Android app opens a message's menu with a long press, so it has no per-message button */
+.android-client .message-more { display: none; }
+@media (max-width: 760px), (max-width: 1024px) and (pointer: coarse) {
+  .android-client .msg { padding-right: max(12px, var(--safe-area-inset-right)); }
+}

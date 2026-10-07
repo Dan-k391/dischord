@@ -3806,13 +3806,16 @@
     const panel = $('searchPanel');
     if (!searchOpen()) {
       clearTimeout(panel._closing);
+      // it grows out of the member list it replaces (or from nothing), so the chat beside it never jumps wider first
+      panel.style.setProperty('--search-from', (mobileLayout() ? 0 : $('members').offsetWidth + $('memResizer').offsetWidth) + 'px');
       panel.classList.remove('hidden', 'closing');
       document.body.classList.add('search-open');
-      setMobilePane(null);
+      if (mobilePane) setMobilePane(null);
       paintSearchScopes();
       runSearch();
     }
-    $('sQ').focus();
+    // preventScroll: the box is still sliding in, and scrolling it into view would yank the whole app sideways
+    $('sQ').focus({ preventScroll: true });
     $('sQ').select();
   }
   function closeSearch() {
@@ -4679,7 +4682,22 @@
   };
   $('mobileChannels').onclick = () => setMobilePane(mobilePane ? null : 'channels');
   $('mobileBackdrop').onclick = () => setMobilePane(null);
-  // Phones: swipe sideways to slide the side bars in and out. Right brings in the servers and channels,
+  // Touch: holding a finger on a message opens its menu (reply, react, copy…), on any phone browser or app.
+  (() => {
+    let hold = null;
+    const cancel = () => { if (hold) { clearTimeout(hold.timer); hold = null; } };
+    $('messages').addEventListener('touchstart', (e) => {
+      cancel();
+      const row = e.touches.length === 1 && e.target.closest && !e.target.closest('button, a, input, [data-image-open]') && e.target.closest('.msg[data-mid]');
+      if (!row) return;
+      const x = e.touches[0].clientX, y = e.touches[0].clientY;
+      hold = { x, y, timer: setTimeout(() => { hold = null; messageMenu(row.dataset.mid, x, y); }, 480) };
+    }, { passive: true });
+    $('messages').addEventListener('touchmove', (e) => { const t = e.touches[0]; if (hold && t && Math.hypot(t.clientX - hold.x, t.clientY - hold.y) > 10) cancel(); }, { passive: true });
+    $('messages').addEventListener('touchend', cancel, { passive: true });
+    $('messages').addEventListener('touchcancel', cancel, { passive: true });
+  })();
+    // Phones: swipe sideways to slide the side bars in and out. Right brings in the servers and channels,
   // left the member list; the opposite swipe (or a tap outside) puts an open one away again.
   (() => {
     let from = null;
