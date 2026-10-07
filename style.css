@@ -706,8 +706,8 @@ body.resizing iframe { pointer-events: none !important; }
   #callBar .call-btn .ico-svg { width: 17px; height: 17px; }
   #callBar #cbLeave { width: 44px; height: 40px; }
 }
-.rail-btn.home { padding: 0; overflow: hidden; background: none; }
-.rail-btn.home img { width: 100%; height: 100%; display: block; }
+.rail-btn.home { padding: 0; background: none; } /* not clipped: the unread badge hangs over its corner */
+.rail-btn.home img { width: 100%; height: 100%; display: block; border-radius: inherit; }
 .welcome-logo img { width: 100%; height: 100%; display: block; border-radius: 22%; }
 #userPanel .avatar, #userPanel .me-info { cursor: pointer; }
 

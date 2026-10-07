@@ -4833,7 +4833,8 @@
     caret(id, (el) => deviceMenu(el, kind));
   }
   caret('cbShareCaret', shareMenu);
-  $('userPanel').addEventListener('click', (e) => { if (!e.target.closest('button')) settingsModal('profile'); });
+  // only the avatar and name open the profile: a click that just misses the mic or headphone button must not
+  $('userPanel').addEventListener('click', (e) => { if (e.target.closest('#meAvatar, .me-info')) settingsModal('profile'); });
   $('micBtn').onclick = toggleMic;
   $('cbMic').onclick = toggleMic;
   $('deafBtn').onclick = toggleDeaf;
