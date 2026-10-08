@@ -2177,6 +2177,28 @@
   function showVoice() { if (voice) { if (cur.sid !== voice.sid) selectServer(voice.sid); selectChannel(voice.cid); } }
 
   let audioCtx;
+  // Everyone in a call hears the same rising tone when someone joins it and the falling one when someone
+  // leaves, not only the person doing it. Each client works this out from who it sees in its own call.
+  const callEars = { key: null, here: new Set(), gone: new Map(), quietUntil: 0 };
+  function hearCallChanges() {
+    const key = voice ? voice.sid + '/' + voice.cid : null;
+    if (key !== callEars.key) { // I joined, left or moved: the people already there are not news
+      callEars.key = key; callEars.here = new Set(); callEars.gone.clear(); callEars.quietUntil = now() + 4000;
+    }
+    if (!voice) return;
+    const present = new Set(voiceOccupants(voice.sid, voice.cid).filter((o) => !o.self).map((o) => o.user.id));
+    const quiet = now() < callEars.quietUntil;
+    for (const id of present) {
+      if (callEars.gone.delete(id)) continue; // straight back (a reconnect, or switching their camera): not a leave and a join
+      if (!callEars.here.has(id)) { callEars.here.add(id); if (!quiet) playTone(true); }
+    }
+    for (const id of callEars.here) {
+      if (present.has(id)) continue;
+      const since = callEars.gone.get(id);
+      if (!since) callEars.gone.set(id, now());
+      else if (now() - since > 2500) { callEars.gone.delete(id); callEars.here.delete(id); if (!quiet) playTone(false); }
+    }
+  }
   function playTone(up) {
     try {
       audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
@@ -5075,6 +5097,7 @@
   let pendingInvite = null;
 
   // ---------------------------------------------------------------- timers
+  bgTimer.every(1200, hearCallChanges); // also in a background tab, where a call usually is
   bgTimer.every(PING_MS, broadcastState); // presence heartbeat, unaffected by background-tab throttling
   setInterval(() => {
     renderTyping();
