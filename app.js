@@ -1043,6 +1043,70 @@
     toast('That file can no longer be read. Download it again.');
   }
 
+  // A picture that can be zoomed where it is shown: pinch or scroll to zoom at that point, drag to move
+  // around once zoomed, double-tap or double-click to zoom in and back out.
+  function zoomable(box) {
+    const img = box && box.querySelector('img');
+    if (!img || box._zoomable) return;
+    box._zoomable = true;
+    box.classList.add('zoomable');
+    let s = 1, x = 0, y = 0, pinch = null, drag = null, tap = 0, moved = false;
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    const apply = () => {
+      const mx = Math.max(0, (img.offsetWidth * s - box.clientWidth) / 2), my = Math.max(0, (img.offsetHeight * s - box.clientHeight) / 2);
+      x = clamp(x, -mx, mx); y = clamp(y, -my, my);
+      img.style.transform = s > 1 ? `translate(${x}px, ${y}px) scale(${s})` : '';
+      box.classList.toggle('zoomed', s > 1);
+    };
+    // zoom to `next` keeping the point at (cx, cy) on screen where it is
+    const zoomAt = (next, cx, cy) => {
+      next = clamp(next, 1, 8);
+      const r = img.getBoundingClientRect(), ox = cx - (r.left + r.width / 2), oy = cy - (r.top + r.height / 2), k = next / s;
+      x -= ox * (k - 1); y -= oy * (k - 1); s = next;
+      if (s <= 1.01) { s = 1; x = y = 0; }
+      apply();
+    };
+    const mid = (e) => ({ x: (e.touches[0].clientX + e.touches[1].clientX) / 2, y: (e.touches[0].clientY + e.touches[1].clientY) / 2, d: Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY) || 1 });
+    box.addEventListener('wheel', (e) => { e.preventDefault(); zoomAt(s * Math.pow(1.0018, -e.deltaY), e.clientX, e.clientY); }, { passive: false });
+    box.addEventListener('dblclick', (e) => { e.preventDefault(); zoomAt(s > 1 ? 1 : 2.5, e.clientX, e.clientY); });
+    box.addEventListener('touchstart', (e) => {
+      moved = false;
+      if (e.touches.length === 2) { pinch = { ...mid(e), s }; drag = null; e.preventDefault(); }
+      else if (e.touches.length === 1 && s > 1) drag = { x: e.touches[0].clientX - x, y: e.touches[0].clientY - y };
+    }, { passive: false });
+    box.addEventListener('touchmove', (e) => {
+      if (pinch && e.touches.length === 2) {
+        e.preventDefault();
+        const m = mid(e);
+        x += m.x - pinch.x; y += m.y - pinch.y; pinch.x = m.x; pinch.y = m.y; // two fingers moving together pan
+        zoomAt(pinch.s * m.d / pinch.d, m.x, m.y);
+        moved = true;
+      } else if (drag && e.touches.length === 1) {
+        e.preventDefault();
+        x = e.touches[0].clientX - drag.x; y = e.touches[0].clientY - drag.y; moved = true; apply();
+      }
+    }, { passive: false });
+    box.addEventListener('touchend', (e) => {
+      if (e.touches.length < 2) pinch = null;
+      if (e.touches.length) { if (s > 1) drag = { x: e.touches[0].clientX - x, y: e.touches[0].clientY - y }; return; }
+      drag = null;
+      const t = e.changedTouches[0];
+      if (moved || !t) { tap = 0; return; }
+      if (now() - tap < 320) { tap = 0; e.preventDefault(); zoomAt(s > 1 ? 1 : 2.5, t.clientX, t.clientY); } else tap = now();
+    }, { passive: false });
+    // mouse: drag to move around once zoomed
+    box.addEventListener('pointerdown', (e) => {
+      if (e.pointerType !== 'mouse' || e.button || s <= 1) return;
+      const from = { x: e.clientX - x, y: e.clientY - y };
+      const move = (ev) => { x = ev.clientX - from.x; y = ev.clientY - from.y; apply(); };
+      const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); box.classList.remove('panning'); };
+      box.classList.add('panning');
+      window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+      e.preventDefault();
+    });
+    img.addEventListener('load', () => { s = 1; x = y = 0; apply(); });
+  }
+
   // ---- built-in viewer and player
   const playerPrefs = { vol: 1, rate: 1, ...store.get('player', {}) };
   const playerPos = store.get('playerPos', {}); // file id -> where playback stopped (seconds)
@@ -1084,6 +1148,7 @@
         <button type="button" class="icon-btn" data-close title="Close" aria-label="Close">${icon('x')}</button></header>
       <div class="vw-body ${kind}">${body}</div>`, () => {
       $('vwSave').onclick = () => exportFile(source, d.name);
+      if (kind === 'image') zoomable($('modal').querySelector('.vw-image'));
       if (kind === 'text') Promise.resolve().then(() => blob.slice(0, 2 * 1024 * 1024).text()).then(
         (text) => { if ($('docText')) $('docText').textContent = text + (blob.size > 2 * 1024 * 1024 ? '\n\n… (only the first 2 MB is shown)' : ''); },
         () => { if ($('docText')) $('docText').textContent = 'This file could not be read.'; });
@@ -1676,6 +1741,7 @@
       };
       if ($('saveImagePreview')) $('saveImagePreview').onclick = () => saveImagePreview(sid, cid, mid);
       if ($('saveOpenImage')) $('saveOpenImage').onclick = () => downloadImage(sid, cid, mid);
+      zoomable($('modal').querySelector('.lightbox'));
     }, true, true);
     $('modal').classList.add('lb');
     if (!url && m.img) paintImages();
@@ -4847,6 +4913,35 @@
     const t = e.target.closest('.tile.zoomed');
     if (t) { e.preventDefault(); setZoom(t.dataset.key, 1, 0, 0); }
   });
+  // Touch screens: pinch a camera or shared screen to zoom it, move both fingers to pan while pinching,
+  // drag with one finger once zoomed (the pointer handlers above), double-tap to go back to the whole picture.
+  let pinch = null, tileTap = { at: 0, key: null };
+  $('tiles').addEventListener('touchstart', (e) => {
+    const t = e.target.closest && e.target.closest('.tile.video');
+    if (!t || e.touches.length !== 2 || e.target.closest('.tile-tools') || $('voiceStage').classList.contains('mini')) return;
+    const [a, b] = e.touches, r = t.getBoundingClientRect(), z = zooms.get(t.dataset.key) || { s: 1, u: 0, v: 0 };
+    const px = ((a.clientX + b.clientX) / 2 - r.left) / r.width, py = ((a.clientY + b.clientY) / 2 - r.top) / r.height;
+    // remember which point of the picture sits between the fingers; it stays there for the whole gesture
+    pinch = { key: t.dataset.key, el: t, d: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1, s: z.s, pu: z.u + px / z.s, pv: z.v + py / z.s };
+    if (pan) { pan.el.classList.remove('panning'); pan = null; }
+    e.preventDefault(); // not the browser's own page zoom
+  }, { passive: false });
+  $('tiles').addEventListener('touchmove', (e) => {
+    if (!pinch || e.touches.length !== 2) return;
+    e.preventDefault();
+    const [a, b] = e.touches, r = pinch.el.getBoundingClientRect();
+    const px = ((a.clientX + b.clientX) / 2 - r.left) / r.width, py = ((a.clientY + b.clientY) / 2 - r.top) / r.height;
+    const scale = Math.max(1, Math.min(8, pinch.s * Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) / pinch.d));
+    setZoom(pinch.key, scale, pinch.pu - px / scale, pinch.pv - py / scale);
+    panned = true; // lifting the fingers must not count as a tap on the tile
+  }, { passive: false });
+  for (const type of ['touchend', 'touchcancel']) $('tiles').addEventListener(type, (e) => {
+    if (pinch) { if (e.touches.length < 2) pinch = null; return; }
+    const t = type === 'touchend' && !e.touches.length && e.target.closest && e.target.closest('.tile.zoomed');
+    if (!t || panned) { tileTap.at = 0; return; }
+    if (now() - tileTap.at < 320 && tileTap.key === t.dataset.key) { tileTap.at = 0; panned = true; setZoom(t.dataset.key, 1, 0, 0); }
+    else tileTap = { at: now(), key: t.dataset.key };
+  }, { passive: true });
   document.addEventListener('click', (e) => { if (!e.target.closest('#qMenu')) $('qMenu').classList.add('hidden'); });
   document.addEventListener('fullscreenchange', onFullscreenChange);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && focusUid && $('modalBack').classList.contains('hidden')) { focusUid = null; renderStage(); } });

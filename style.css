@@ -1120,3 +1120,14 @@ body.search-open #searchTop { color: var(--text-strong); background: var(--bg-ac
 
 .dg-person.self { opacity: .75; }
 .dg-person.self .dg-who span { white-space: normal; }
+
+/* ---------- pinch / scroll zoom ---------- */
+.tile.video { touch-action: none; } /* the app handles pinch and drag on a stream itself */
+.zoomable { overflow: hidden !important; touch-action: none; user-select: none; -webkit-user-select: none; }
+.zoomable img { cursor: zoom-in; will-change: transform; -webkit-user-drag: none; }
+.zoomable.zoomed img { cursor: grab; border-radius: 0; box-shadow: none; }
+.zoomable.zoomed.panning img { cursor: grabbing; }
+@media (max-width: 760px), (max-width: 1024px) and (pointer: coarse) {
+  /* room to look around a zoomed picture on a phone, instead of only the picture's own small box */
+  .lightbox.zoomable, .vw-image.zoomable { min-height: 62vh; }
+}
