@@ -569,6 +569,17 @@
     return out;
   }
 
+  // Someone changed their name or colour: update it where their messages already are, in place. Redrawing
+  // the whole chat for this reloaded every picture in it and made the screen flash.
+  function repaintAuthor(user) {
+    const box = $('messages');
+    if (!box || typeof box.querySelectorAll !== 'function') return;
+    box.querySelectorAll('[data-uid]').forEach((el) => {
+      if (el.dataset.uid !== user.id) return;
+      if (el.classList.contains('author')) { el.textContent = user.name; el.style.color = user.color; }
+      else if (el.classList.contains('gutter') && el.querySelector('.avatar')) el.innerHTML = avatar(user);
+    });
+  }
   function touch(sid, body, uuid) {
     const user = cleanUser(body.u);
     if (user && user.id === me.id) noteOwnInstance(sid, body, uuid);
@@ -594,10 +605,16 @@
     if (!k[user.id] || k[user.id].name !== user.name || k[user.id].color !== user.color) {
       k[user.id] = user;
       store.set('known.' + sid, k);
-      if (sid === cur.sid) renderMessages(); // their old messages pick up the new name / colour
+      if (sid === cur.sid) repaintAuthor(user); // their old messages pick up the new name / colour
     }
     const d = dms.find((x) => x.id === user.id);
-    if (d && (d.name !== user.name || d.color !== user.color)) { d.name = user.name; d.color = user.color; store.set('dms', dms); if (cur.sid === DM) render(); }
+    if (d && (d.name !== user.name || d.color !== user.color)) {
+      d.name = user.name; d.color = user.color; store.set('dms', dms);
+      if (cur.sid === DM) {
+        renderChannels(); repaintAuthor(user);
+        if (cur.cid === user.id) { $('chanName').textContent = user.name; $('msgInput').placeholder = `Message @${user.name}`; }
+      }
+    }
     return { user, wasOnline };
   }
 
@@ -4383,7 +4400,6 @@
       $('mOk').onclick = () => {
         const name = $('mName').value.trim().slice(0, 32);
         if (!name) { show('profile'); return $('mName').focus(); }
-        const nameChanged = name !== me.name;
         const color = state.color;
         me = { ...me, name, color };
         store.set('me', me);
@@ -4404,11 +4420,10 @@
         store.set('av', av);
         closeModal();
         broadcastState();
-        if (nameChanged) { // VDO.Ninja labels come from the URL; reconnect so labels update
-          for (const sid in meshes) disconnectMesh(sid);
-          setTimeout(() => servers.forEach(connectMesh), 400);
-        }
-        if (voice && (avChanged || nameChanged)) joinVoice(voice.sid, voice.cid, voice.cam);
+        // A new name travels with the next heartbeat (broadcastState above). It used to reconnect every server
+        // and rejoin the call to refresh VDO.Ninja's own labels, which nothing shows; for everyone else that
+        // was a person leaving and coming back, with the call redrawing around it.
+        if (voice && avChanged) joinVoice(voice.sid, voice.cid, voice.cam);
         else if (voice) applyVolumes(true);
         if (voice && shareChanged && voice.ssFrame) updateScreenShareQuality();
         if (viewChanged) { tileEls.forEach((el) => { el.dataset.vs = '__reload'; }); } // reconnect viewers with the new codec
