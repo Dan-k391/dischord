@@ -618,6 +618,7 @@
       if (first) {
         sendHistory(sid, uuid);
         sendDmHistory(sid, uuid, t.user.id);
+        retryImages(sid, uuid);
         if (p.t !== 'hello' || p.want) { hello(sid, uuid, false); pr.helloAt = now(); }
       } else if (p.t === 'hello' && p.want && now() - pr.helloAt > 1500) {
         hello(sid, uuid, false); pr.helloAt = now();
@@ -1599,14 +1600,31 @@
     armImageRequest(requested[key], 10000); // nobody who has it is online: free the slot quickly for other images
     send(sid, { t: 'imgreq', id, cid: m.cid, mid: m.id });
   }
+  // A preview that could not be fetched was only tried again when the channel happened to be redrawn, so it
+  // could stay "unavailable" with the sender sitting right there. Someone connecting is the moment a source
+  // appears: ask them for anything still wanted, and give the failed ones another go.
+  function retryImages(sid, uuid) {
+    for (const r of Object.values(requested)) {
+      if (r.sid !== sid && r.sid !== DM) continue;
+      if (send(r.sid, { t: 'imgreq', id: r.id, cid: r.cid, mid: r.mid }, uuid)) armImageRequest(r, 10000);
+    }
+    let cleared = false;
+    for (const place of [sid, DM]) {
+      for (const key of [...imageRetryAfter.keys()]) if (key.startsWith(place + '/')) imageRetryAfter.delete(key);
+      for (const key of [...imageErrors]) if (key.startsWith(place + '/')) { imageErrors.delete(key); cleared = true; }
+    }
+    if (cur.sid !== sid && cur.sid !== DM) return;
+    if (cleared) renderMessages(); else paintImages();
+  }
   function armImageRequest(request, ms) {
     clearTimeout(request.timer);
     request.timer = setTimeout(() => {
       if (requested[request.key] !== request) return;
       delete requested[request.key]; delete incoming[request.key];
+      const already = imageErrors.has(request.messageKey);
       imageErrors.add(request.messageKey);
       imageRetryAfter.set(request.messageKey, now() + 15000);
-      renderIfCurrent(request.sid, request.cid);
+      if (!already) renderIfCurrent(request.sid, request.cid); // a repeat failure changes nothing on screen
     }, ms);
   }
   function imageProgress(request, pct) {
@@ -5203,6 +5221,8 @@
   setInterval(pollStats, 2000);
   setInterval(() => applyVolumes(true), 4000);
   setInterval(pollRoutes, DIAG_STEP);
+  // previews still missing in the channel on screen are asked for again from time to time
+  setInterval(() => { if (me && !document.hidden && document.querySelector('#messages img[data-img]:not([src])')) paintImages(); }, 15000);
   setInterval(announceViewers, 8000);
   document.addEventListener('keydown', (e) => { if (e.ctrlKey && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'd' && me) { e.preventDefault(); diagModal(); } });
   setInterval(paintImages, 15000); // retry visible uncached previews when a provider returns
