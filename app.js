@@ -128,6 +128,7 @@
     music: '<path d="M9 18V5l11-2v13"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/>',
     film: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 4v16M17 4v16M3 9h4M3 15h4M17 9h4M17 15h4"/>',
     search: '<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/>',
+    flip: '<path d="M4 9a8 8 0 0 1 14.2-3.2L20 8M20 4v4h-4M20 15a8 8 0 0 1-14.2 3.2L4 16M4 20v-4h4"/><circle cx="12" cy="12" r="2.2"/>',
     chevUp: '<path d="M6 15l6-6 6 6"/>',
     chevDown: '<path d="M6 9l6 6 6-6"/>',
     people: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.5 3-5.5 6.5-5.5s6.5 2 6.5 5.5"/><circle cx="17" cy="9" r="2.5"/><path d="M17.5 14.5c2.5.2 4 1.8 4 4.5"/>',
@@ -2099,6 +2100,43 @@
     broadcastState();
     renderControls(); renderPresence();
   }
+  // Flip between the front and back camera without leaving the call. Runs inside the call frame, where
+  // the live camera and the device list are: it looks at which way the current camera faces and swaps to
+  // one facing the other way (or simply the next camera, when the labels do not say).
+  function vdoFlipCamera() {
+    (async function () {
+      var tell = function (m) { try { window.parent.postMessage({ dischordFlip: m }, '*'); } catch (_) { } };
+      try {
+        var track = typeof session !== 'undefined' && session && session.streamSrc ? session.streamSrc.getVideoTracks()[0] : null;
+        if (!track || typeof changeVideoDeviceById !== 'function') return tell({ ok: false, why: 'off' });
+        var now = track.getSettings ? track.getSettings() : {};
+        var cams = (await navigator.mediaDevices.enumerateDevices()).filter(function (d) { return d.kind === 'videoinput' && d.deviceId; });
+        if (cams.length < 2) return tell({ ok: false, why: 'one' });
+        var back = /back|rear|environment/i, front = /front|user|face(?!ing back)/i;
+        var facingBack = now.facingMode ? now.facingMode === 'environment' : back.test(track.label || '');
+        var others = cams.filter(function (d) { return d.deviceId !== now.deviceId; });
+        var pick = others.filter(function (d) { return (facingBack ? front : back).test(d.label) && !(facingBack ? back : front).test(d.label); })[0];
+        var known = !!pick;
+        if (!pick) pick = cams[(Math.max(0, cams.findIndex(function (d) { return d.deviceId === now.deviceId; })) + 1) % cams.length]; // unlabelled: the next one
+        changeVideoDeviceById(pick.deviceId);
+        tell({ ok: true, label: pick.label || '', back: known ? !facingBack : null });
+      } catch (e) { tell({ ok: false, why: String(e && e.message || e) }); }
+    })();
+  }
+  function flipCamera() {
+    if (!voice || !voice.cam) return toast('Turn your camera on first.');
+    voicePost({ function: 'eval', value: '(' + vdoFlipCamera.toString() + ')();' });
+  }
+  function onCameraFlipped(r) {
+    if (!r || !voice) return;
+    if (!r.ok) return toast(r.why === 'one' ? 'This device has only one camera.' : r.why === 'off' ? 'The camera is not running yet. Try again in a moment.' : 'Could not switch camera.');
+    if (r.label) store.set('camLabel', r.label); // rejoining keeps the camera you flipped to
+    const call = voice;
+    scheduleVoice(call, () => syncVoiceState(call), 1500); // re-apply mute after the swap, as for any device change
+    toast(r.back === null || r.back === undefined ? 'Camera: ' + (r.label || 'switched') : r.back ? 'Back camera' : 'Front camera', 1500);
+  }
+  // phones and tablets: anything driven by touch
+  const touchDevice = () => mobileLayout() || document.documentElement.classList.contains('android-client') || (typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches);
   function toggleCam() {
     if (!voice) return;
     joinVoice(voice.sid, voice.cid, !voice.cam); // rejoin so the camera is truly released when off
@@ -2360,6 +2398,7 @@
         syncVoiceState(call);
         scheduleVoice(call, () => syncVoiceState(call), 250);
       }
+      if (d.dischordFlip) return onCameraFlipped(d.dischordFlip);
       if (d.loudness) { voice.loudnessReady = true; onLoudness(d.loudness); }
       if (Array.isArray(d.deviceList) && d.cib === 'dischord-devs' && devWait) devWait.show(d.deviceList);
       if (d.stats) onSendStats(false, d.stats);
@@ -3264,6 +3303,7 @@
         else {
           h += ctxSelect('camQ', 'Resolution', av.camQ, CAM_RES) + ctxSelect('camFps', 'Frame rate', av.camFps, fpsOpts([15, 30, 60]));
           if (voice) h += ctxCheck('cam', 'Camera on', !!voice.cam);
+          if (voice && voice.cam && devs.length > 1) h += ctxItem('flip', 'flip', 'Flip camera');
         }
         h += ctxItem('avset', 'gear', 'Voice & video settings');
       }
@@ -3290,6 +3330,7 @@
             case 'denoise': saveAv({ denoise: av.denoise === false }); return applyVolumes(true);
             case 'deaf': return toggleDeaf();
             case 'cam': return toggleCam();
+            case 'flip': return flipCamera();
             case 'avset': return settingsModal('av');
           }
         };
@@ -4198,6 +4239,7 @@
     const pending = !!(voice && voice.ssFrame && !voice.ss);
     $('cbShare').classList.toggle('on', ss); $('cbShare').classList.toggle('pending', pending);
     $('cbShare').title = ss ? 'Stop sharing' : pending ? 'Waiting for you to pick a screen… (click to cancel)' : 'Share your screen';
+    $('cbFlip').classList.toggle('hidden', !(cam && touchDevice())); // flipping only makes sense on a phone with its camera on
     $('vsCam').classList.toggle('on', cam); $('vsShare').classList.toggle('on', ss); $('vsShare').classList.toggle('pending', pending);
   }
 
@@ -4738,6 +4780,7 @@
   $('cbLeave').onclick = leaveVoice;
   $('vsCam').onclick = toggleCam;
   $('cbCam').onclick = toggleCam;
+  $('cbFlip').onclick = flipCamera;
   $('vsShare').onclick = toggleShare;
   $('cbShare').onclick = toggleShare;
   $('voiceWhere').onclick = showVoice;
