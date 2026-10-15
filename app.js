@@ -4784,16 +4784,17 @@
   $('vsShare').onclick = toggleShare;
   $('cbShare').onclick = toggleShare;
   $('voiceWhere').onclick = showVoice;
-  // the call bar and the member-strip pill fade out after a few seconds without mouse movement
+  // the call bar, the member-strip pill and the buttons on a stream fade out after a moment without mouse
+  // movement, even with the pointer resting on the stream; they stay while the pointer is on one of them
   (function idleControls() {
     const stage = $('voiceStage');
-    let timer = null, overBar = false;
+    let timer = null, overBar = false, overTools = false;
     const menuOpen = () => ['ctxMenu', 'emojiMenu', 'qMenu'].some((id) => !$(id).classList.contains('hidden'));
     const wake = () => {
       stage.classList.remove('idle');
       clearTimeout(timer);
       if (mobileLayout()) return;
-      timer = setTimeout(() => { if (overBar || menuOpen()) wake(); else stage.classList.add('idle'); }, 1500);
+      timer = setTimeout(() => { if (overBar || overTools || menuOpen()) wake(); else stage.classList.add('idle'); }, 1500);
     };
     stage.addEventListener('mousemove', wake);
     stage.addEventListener('mousedown', wake);
@@ -4801,6 +4802,8 @@
     document.addEventListener('keydown', wake);
     $('callBar').addEventListener('mouseenter', () => { overBar = true; wake(); });
     $('callBar').addEventListener('mouseleave', () => { overBar = false; wake(); });
+    $('tiles').addEventListener('mouseover', (e) => { overTools = !!(e.target.closest && e.target.closest('.tile-tools')); });
+    $('tiles').addEventListener('mouseleave', () => { overTools = false; });
     wake();
   })();
 

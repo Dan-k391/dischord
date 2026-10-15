@@ -636,6 +636,7 @@ body.resizing iframe { pointer-events: none !important; }
 #callBar, #stripToggle { transition: opacity .18s; }
 #voiceStage.idle:not(.offstage) #callBar, #voiceStage.idle:not(.offstage) #stripToggle { opacity: 0; pointer-events: none; }
 #voiceStage.idle:not(.offstage) { cursor: none; }
+#voiceStage.idle:not(.offstage) .tile-tools { opacity: 0 !important; pointer-events: none; } /* also over a hovered or fullscreen stream */
 .share-ph .btn { margin-top: 4px; }
 
 /* ---------- v28: @ picker, live formatting in the message box ---------- */
