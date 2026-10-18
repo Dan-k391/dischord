@@ -2362,10 +2362,10 @@
   }
 
   // A light two-note chime for a new message from someone else, unless I am already looking at that
-  // channel. Silent while deafened; a burst of messages chimes once.
+  // channel. Deafen only silences the call, so it still chimes; a burst of messages chimes once.
   let lastChime = -Infinity;
   function messageChime(sid, m) {
-    if (!msgSound || deaf || !me || m.a.id === me.id || m.del) return;
+    if (!msgSound || !me || m.a.id === me.id || m.del) return;
     if (sid === cur.sid && m.cid === cur.cid && !document.hidden && document.hasFocus()) return;
     if (now() - lastChime < 1500) return;
     lastChime = now();

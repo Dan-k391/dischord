@@ -489,7 +489,7 @@ test('presence: answered pings measure the round trip to a person', () => {
   assert.strictEqual(app.api.members.testserver.bob.rtt, 40, 'Round trip on the fixture clock, which starts at 1000');
 });
 
-test('a new message from someone else chimes once, unless I am already looking at its channel', () => {
+test('a new message from someone else chimes once, even deafened, unless I am already looking at its channel', () => {
   const app = createApp();
   const bob = { id: 'bob', name: 'Bob', color: '#57f287' };
   const receive = (m, uuid = 'bobtab') => app.api.onPeerData('testserver', { t: 'msg', u: m.a, m }, uuid);
@@ -510,15 +510,16 @@ test('a new message from someone else chimes once, unless I am already looking a
   assert.strictEqual(app.api.chimes, 2, 'My own message from another tab is silent');
   app.api.deaf = true;
   receive(app.message({ id: 'm6', cid: 'other', a: bob }));
-  assert.strictEqual(app.api.chimes, 2, 'Deafened means no chime');
+  assert.strictEqual(app.api.chimes, 3, 'Deafen silences the call, not the message chime');
+  app.advance(2000);
   app.api.deaf = false; app.api.msgSound = false;
   receive(app.message({ id: 'm7', cid: 'other', a: bob }));
-  assert.strictEqual(app.api.chimes, 2, 'Turned off in settings means no chime');
+  assert.strictEqual(app.api.chimes, 3, 'Turned off in settings means no chime');
   app.api.msgSound = true;
   app.api.onPeerData('testserver', { t: 'hist', u: bob, ms: [app.message({ id: 'm8', cid: 'other', a: bob })] }, 'bobtab');
-  assert.strictEqual(app.api.chimes, 2, 'History catching up after a reconnect is silent');
+  assert.strictEqual(app.api.chimes, 3, 'History catching up after a reconnect is silent');
   receive(app.message({ id: 'm9', cid: 'other', a: bob }));
-  assert.strictEqual(app.api.chimes, 3);
+  assert.strictEqual(app.api.chimes, 4);
 });
 
 test('image preview: unsolicited legacy chunks cannot cache or save bytes', () => {
