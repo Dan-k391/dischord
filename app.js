@@ -198,6 +198,7 @@
   const speaking = {};   // userId -> until ts
   let voice = null;      // { sid, cid, iframe, cam, ss, vs }
   let micOn = store.get('micOn', true), deaf = store.get('deaf', false);
+  let msgSound = store.get('msgSound', true); // a soft chime when a message arrives
   let membersOpen = store.get('membersOpen', true);
   const userVol = store.get('vol', {});      // uid -> { v: 0-200 voice, sv: 0-200 stream, m: muted }
   const hiddenVid = store.get('hidevid', {}); // uid -> true (don't receive their camera)
@@ -658,6 +659,7 @@
           if (addMsg(sid, msg)) {
             if (fresh && msg.file && uuid) fileProviders.set(sid + '/' + msg.cid + '/' + msg.id, uuid);
             onNewMsg(sid, msg);
+            if (fresh) messageChime(sid, msg);
           }
         }
         break;
@@ -2350,6 +2352,39 @@
       g.gain.exponentialRampToValueAtTime(0.0001, t + 0.25);
       o.connect(g).connect(audioCtx.destination);
       o.start(); o.stop(t + 0.26);
+    } catch { }
+  }
+
+  // A light two-note chime for a new message from someone else, unless I am already looking at that
+  // channel. Silent while deafened; a burst of messages chimes once.
+  let lastChime = -Infinity;
+  function messageChime(sid, m) {
+    if (!msgSound || deaf || !me || m.a.id === me.id || m.del) return;
+    if (sid === cur.sid && m.cid === cur.cid && !document.hidden && document.hasFocus()) return;
+    if (now() - lastChime < 1500) return;
+    lastChime = now();
+    playChime();
+  }
+  function playChime() {
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      const ring = () => {
+        const t = audioCtx.currentTime + 0.01;
+        [[880, 0], [1320, 0.09]].forEach(([f, d]) => {
+          const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+          o.type = 'sine';
+          o.frequency.setValueAtTime(f, t + d);
+          g.gain.setValueAtTime(0.0001, t + d);
+          g.gain.linearRampToValueAtTime(0.05, t + d + 0.012);
+          g.gain.exponentialRampToValueAtTime(0.0001, t + d + 0.4);
+          o.connect(g).connect(audioCtx.destination);
+          o.start(t + d); o.stop(t + d + 0.42);
+        });
+      };
+      if (audioCtx.state === 'running') return ring();
+      // A browser tab nobody has clicked yet keeps audio suspended; never play the chime late once it wakes.
+      const asked = now();
+      audioCtx.resume().then(() => { if (now() - asked < 1000) ring(); }, () => { });
     } catch { }
   }
 
@@ -4378,6 +4413,7 @@
       <div class="tab-body" id="settingsProfile" data-body="profile" role="tabpanel" aria-labelledby="settingsProfileTab">
         ${profileEditor(me.name, me.color)}
         ${'Notification' in window && Notification.permission !== 'granted' ? '<label>Notifications</label><button class="btn" id="mNotif">Enable desktop notifications</button>' : ''}
+        <label class="inline-check"><input type="checkbox" id="mSound" ${msgSound ? 'checked' : ''}> Play a sound for new messages</label>
       </div>
       <div class="tab-body" id="settingsAv" data-body="av" role="tabpanel" aria-labelledby="settingsAvTab">
         <h3>Microphone</h3>
@@ -4434,6 +4470,7 @@
       wireProfileEditor(state);
       $('aMicGain').oninput = () => { $('aMicGainValue').textContent = audioPercent($('aMicGain').value) + '%'; };
       if ($('mNotif')) $('mNotif').onclick = () => Notification.requestPermission().then(() => toast('Notifications: ' + Notification.permission));
+      $('mSound').onchange = () => { if ($('mSound').checked) playChime(); }; // let them hear it
       if ($('aDevices')) $('aDevices').onclick = (e) => {
         if (!voice) return toast('Join a voice channel to choose a camera.');
         if (e) e.stopPropagation();
@@ -4445,6 +4482,8 @@
         const color = state.color;
         me = { ...me, name, color };
         store.set('me', me);
+        msgSound = $('mSound').checked;
+        store.set('msgSound', msgSound);
         const next = {
           ssAudio: !!av.ssAudio, // set from the screen share menu, not this form
           outVol: audioPercent(av.outVol), // set from the headphone menu

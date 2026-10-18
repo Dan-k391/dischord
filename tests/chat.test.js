@@ -109,6 +109,7 @@ function createApp(windowOverrides = {}) {
     createElement(tag) { return createElement(tag, (node) => { if (tag === 'a' && node.download) downloads.push(node); }); },
     querySelectorAll: (selector) => selector === 'img[data-img]:not([src])' ? imageElements.filter((image) => !image.src) : [], querySelector: () => null,
     body: createElement('body'), hidden: false, fullscreenElement: null,
+    focused: true, hasFocus() { return this.focused; },
   });
   const messageBox = document.getElementById('messages');
   let messageHTML = '';
@@ -192,6 +193,7 @@ function createApp(windowOverrides = {}) {
     renderChannels = () => {};
     renderPresence = () => {};
     playTone = () => {};
+    playChime = () => { window.chimes = (window.chimes || 0) + 1; };
     confirmModal = (title, body, label, onConfirm) => onConfirm();
     meshes.testserver = { iframe: { contentWindow: { postMessage: window.captureWire }, remove() {} } };
     cur.sid = 'testserver'; cur.cid = 'general';
@@ -202,6 +204,9 @@ function createApp(windowOverrides = {}) {
       onImgChunk, imgCache, incoming, onPeerData, voiceOccupants, peerGone, members, mergeServer, deleteChannelConfirm, leaveServer, composerDrafts, fileProviders,
       requestImg, paintImages, prepareImagePreview, imageKey, requested, imagePreparing, imageErrors,
       get replyTarget() { return replyTarget; },
+      get chimes() { return window.chimes || 0; },
+      set deaf(value) { deaf = value; },
+      set msgSound(value) { msgSound = value; },
       get fileTransfers() { return fileTransfers; },
     };
   `;
@@ -482,6 +487,38 @@ test('presence: answered pings measure the round trip to a person', () => {
   app.advance(40);
   app.api.onPeerData('testserver', { u, t: 'pong', pt: 1000, vc: 'lounge', vs: 'dcbob1', st: {} }, 'tabA');
   assert.strictEqual(app.api.members.testserver.bob.rtt, 40, 'Round trip on the fixture clock, which starts at 1000');
+});
+
+test('a new message from someone else chimes once, unless I am already looking at its channel', () => {
+  const app = createApp();
+  const bob = { id: 'bob', name: 'Bob', color: '#57f287' };
+  const receive = (m, uuid = 'bobtab') => app.api.onPeerData('testserver', { t: 'msg', u: m.a, m }, uuid);
+  receive(app.message({ id: 'm1', cid: 'other', a: bob }));
+  assert.strictEqual(app.api.chimes, 1, 'A message in a channel I am not viewing chimes');
+  receive(app.message({ id: 'm1', cid: 'other', a: bob, text: 'Changed', ed: 1 }));
+  assert.strictEqual(app.api.chimes, 1, 'An edit to a message I already have is not news');
+  app.advance(2000);
+  receive(app.message({ id: 'm2', cid: 'general', a: bob }));
+  assert.strictEqual(app.api.chimes, 1, 'The channel I am looking at stays quiet');
+  app.document.focused = false;
+  receive(app.message({ id: 'm3', cid: 'general', a: bob }));
+  assert.strictEqual(app.api.chimes, 2, 'The same channel chimes while the window is in the background');
+  receive(app.message({ id: 'm4', cid: 'other', a: bob }));
+  assert.strictEqual(app.api.chimes, 2, 'A burst of messages chimes once');
+  app.advance(2000);
+  receive(app.message({ id: 'm5', cid: 'other', a: { id: 'alice', name: 'Alice', color: '#5865f2' } }), 'aliceothertab');
+  assert.strictEqual(app.api.chimes, 2, 'My own message from another tab is silent');
+  app.api.deaf = true;
+  receive(app.message({ id: 'm6', cid: 'other', a: bob }));
+  assert.strictEqual(app.api.chimes, 2, 'Deafened means no chime');
+  app.api.deaf = false; app.api.msgSound = false;
+  receive(app.message({ id: 'm7', cid: 'other', a: bob }));
+  assert.strictEqual(app.api.chimes, 2, 'Turned off in settings means no chime');
+  app.api.msgSound = true;
+  app.api.onPeerData('testserver', { t: 'hist', u: bob, ms: [app.message({ id: 'm8', cid: 'other', a: bob })] }, 'bobtab');
+  assert.strictEqual(app.api.chimes, 2, 'History catching up after a reconnect is silent');
+  receive(app.message({ id: 'm9', cid: 'other', a: bob }));
+  assert.strictEqual(app.api.chimes, 3);
 });
 
 test('image preview: unsolicited legacy chunks cannot cache or save bytes', () => {

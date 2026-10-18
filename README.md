@@ -4,7 +4,7 @@ A Discord-style chat app built on [VDO.Ninja](https://vdo.ninja). No accounts, n
 
 ## Features
 - **Servers** with text and voice channels, shareable **invite links**
-- **Text chat** sent peer-to-peer: Markdown-ish formatting, edit/delete, typing indicators, unread badges, desktop notifications
+- **Text chat** sent peer-to-peer: Markdown-ish formatting, edit/delete, typing indicators, unread badges, desktop notifications and a soft new-message sound (switch it off in Settings)
 - **Replies**: reply from message actions or the right-click menu; click the quote to jump to the original message
 - **Files**: attach, paste or drag & drop up to four files with no app-imposed file size limit. Non-image contents transfer directly from the sender only after **Download**, with progress and cancellation
 - **Image previews**: images automatically display a high-quality preview (up to 4096 pixels on the longer side), cached for chat history. Download saves the original attachment; Save preview saves the cached image when the original sender is unavailable
