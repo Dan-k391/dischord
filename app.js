@@ -2543,7 +2543,7 @@
   function renderMobileNavigation() {
     const narrow = mobileLayout();
     if (!narrow) mobilePane = null;
-    document.body.classList.toggle('channels-open', narrow && mobilePane === 'channels');
+    document.body.classList.toggle('nav-open', narrow && mobilePane === 'channels'); // not channels-open: older Android apps close that on back themselves
     document.body.classList.toggle('members-open', narrow && mobilePane === 'members');
     $('mobileBackdrop').classList.toggle('hidden', !narrow || !mobilePane);
     $('mobileBackdrop').inert = !narrow || !mobilePane;
@@ -5111,29 +5111,124 @@
     $('messages').addEventListener('touchend', cancel, { passive: true });
     $('messages').addEventListener('touchcancel', cancel, { passive: true });
   })();
-    // Phones: swipe sideways to slide the side bars in and out. Right brings in the servers and channels,
-  // left the member list; the opposite swipe (or a tap outside) puts an open one away again.
+  // Phones: the side bars follow a sideways drag. Right brings in the servers and channels, left the member
+  // list; the opposite drag puts an open one away. Let go past halfway, or with a flick, and it finishes; else it springs back.
   (() => {
-    let from = null;
-    const busy = 'input[type="range"], .tile.zoomed, #voiceStage.mini, .ctx, #qMenu, #emojiMenu, #mentionMenu, #modalBack:not(.hidden), .image-viewer';
+    let drag = null;
+    const busy = 'input, textarea, select, [contenteditable="true"], .tile.zoomed, #voiceStage.mini, .ctx, #qMenu, #emojiMenu, #mentionMenu, #modalBack:not(.hidden), .image-viewer';
+    const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+    const sideScroller = (el) => { // a strip that scrolls sideways keeps its own swipes
+      for (; el && el !== document.body; el = el.parentElement) {
+        if (el.scrollWidth > el.clientWidth + 1 && /auto|scroll/.test(getComputedStyle(el).overflowX)) return true;
+      }
+      return false;
+    };
+    const place = (dx) => { // drawer offset and how open it is (0..1) for a finger dx from where it went down
+      const w = drag.w || 1;
+      const x = drag.kind === 'channels' ? clamp((drag.open ? 0 : -w) + dx, -w, 0) : clamp((drag.open ? 0 : w) + dx, 0, w);
+      return { x, p: drag.kind === 'channels' ? 1 + x / w : 1 - x / w };
+    };
+    const lift = () => {
+      for (const el of drag.els) Object.assign(el.style, { transition: 'none', visibility: 'visible', willChange: 'transform' });
+      Object.assign($('mobileBackdrop').style, { transition: 'none', visibility: 'visible' });
+    };
+    // hand the drawer back to the stylesheet in the same frame as the new state: it slides on from under the finger
+    const drop = (open) => {
+      const d = drag;
+      drag = null;
+      if (!d || !d.kind) return;
+      if (open !== d.open) setMobilePane(open ? d.kind : null);
+      for (const el of [...d.els, $('mobileBackdrop')]) Object.assign(el.style, { transition: '', visibility: '', willChange: '', transform: '', opacity: '' });
+    };
     document.addEventListener('touchstart', (e) => {
-      from = mobileLayout() && e.touches.length === 1 && !(e.target.closest && e.target.closest(busy))
-        ? { x: e.touches[0].clientX, y: e.touches[0].clientY, at: now() } : null;
+      if (drag && drag.kind) drop(drag.open);
+      drag = mobileLayout() && e.touches.length === 1 && !(e.target.closest && e.target.closest(busy))
+        ? { x: e.touches[0].clientX, y: e.touches[0].clientY, target: e.target, kind: null, moves: [] } : null;
     }, { passive: true });
-    document.addEventListener('touchmove', (e) => { if (e.touches.length !== 1) from = null; }, { passive: true }); // pinch, not swipe
-    document.addEventListener('touchend', (e) => {
-      const start = from, t = e.changedTouches[0];
-      from = null;
-      if (!start || !t || now() - start.at > 700 || !mobileLayout()) return;
-      const dx = t.clientX - start.x, dy = t.clientY - start.y;
-      if (Math.abs(dx) < 70 || Math.abs(dx) < Math.abs(dy) * 2) return;
-      if (String(window.getSelection && window.getSelection()) !== '') return; // selecting text, not swiping
-      const right = dx > 0, s = server(cur.sid);
-      if (searchOpen()) { if (right) closeSearch(); return; } // the search panel covers the chat on a phone: swipe it away
-      if (mobilePane) { if ((mobilePane === 'channels') !== right) setMobilePane(null); }
-      else if (right) setMobilePane('channels');
-      else if (s && !s.dm) { membersOpen = true; renderMembers(); setMobilePane('members'); }
-    }, { passive: true });
+    document.addEventListener('touchmove', (e) => {
+      if (!drag) return;
+      if (e.touches.length !== 1) { drop(drag.open); return; } // pinch, not swipe
+      const t = e.touches[0], dx = t.clientX - drag.x, dy = t.clientY - drag.y;
+      if (!drag.kind && !drag.search) {
+        const ax = Math.abs(dx), ay = Math.abs(dy);
+        if (ax < 6 && ay < 6) return;
+        if (ax < ay * 1.5) { if (ay >= ax || ax + ay > 24) drag = null; return; } // scrolling, or not clearly sideways
+        // the page is already scrolling, text is being selected, or the strip scrolls sideways itself: leave it alone
+        if (!e.cancelable || String(window.getSelection && window.getSelection()) !== '' || sideScroller(drag.target)) { drag = null; return; }
+        const right = dx > 0, s = server(cur.sid);
+        if (searchOpen()) { if (right) drag.search = true; else drag = null; return; } // the search panel covers the chat: swipe it away
+        const kind = mobilePane ? ((mobilePane === 'channels') !== right ? mobilePane : null) : right ? 'channels' : s && !s.dm ? 'members' : null;
+        if (!kind) { drag = null; return; }
+        if (kind === 'members' && !membersOpen) { membersOpen = true; renderMembers(); }
+        drag.kind = kind;
+        drag.open = mobilePane === kind;
+        drag.els = kind === 'channels' ? [$('rail'), $('sidebar')] : [$('members')];
+        drag.w = kind === 'channels' ? $('rail').offsetWidth + $('sidebar').offsetWidth : $('members').offsetWidth;
+        lift();
+      }
+      e.preventDefault(); // the finger moves the drawer, not the messages under it
+      if (drag.search) return;
+      const { x, p } = place(dx);
+      for (const el of drag.els) el.style.transform = `translate3d(${x}px,0,0)`;
+      $('mobileBackdrop').style.opacity = String(p);
+      drag.moves.push({ x: t.clientX, at: e.timeStamp });
+      if (drag.moves.length > 6) drag.moves.shift();
+    }, { passive: false });
+    const end = (e) => {
+      if (!drag) return;
+      const t = e.changedTouches && e.changedTouches[0];
+      if (drag.search) { const dx = t ? t.clientX - drag.x : 0; drag = null; if (dx > 70) closeSearch(); return; }
+      if (!drag.kind || e.type === 'touchcancel' || !t) { drop(drag.open); return; }
+      const { p } = place(t.clientX - drag.x);
+      // speed over the last ~100 ms, in px/ms towards "open"
+      const recent = drag.moves.filter((m) => e.timeStamp - m.at < 100), first = recent[0], last = drag.moves[drag.moves.length - 1];
+      const vx = first && last && last.at > first.at ? (last.x - first.x) / (last.at - first.at) : 0;
+      const v = drag.kind === 'channels' ? vx : -vx;
+      drop(v > 0.35 ? true : v < -0.35 ? false : p > 0.5);
+    };
+    document.addEventListener('touchend', end, { passive: true });
+    document.addEventListener('touchcancel', end, { passive: true });
+  })();
+  // Back (Android's back gesture, or the browser's back on a phone) steps out of the UI like Discord: menus, dialogs
+  // and the search panel close first, then the member list; from the chat it opens the channels, and from there it leaves.
+  (() => {
+    const shown = (id) => !$(id).classList.contains('hidden');
+    const backable = () => shown('ctxMenu') || shown('qMenu') || shown('emojiMenu') || shown('serverMenu') || shown('mentionMenu') ||
+      (shown('modalBack') && !modalClosing && !!$('modalBack').dataset.dismiss) || searchOpen() || !!winFs ||
+      (mobileLayout() && mobilePane !== 'channels');
+    function back() {
+      if (shown('ctxMenu')) closeCtx();
+      else if (shown('qMenu') || shown('emojiMenu') || shown('serverMenu')) for (const id of ['qMenu', 'emojiMenu', 'serverMenu']) $(id).classList.add('hidden');
+      else if (shown('mentionMenu')) closeMention();
+      else if (shown('modalBack') && !modalClosing && $('modalBack').dataset.dismiss) closeModal();
+      else if (searchOpen()) closeSearch();
+      else if (winFs) { winFs = null; renderStage(); }
+      else if (!mobileLayout() || mobilePane === 'channels') return false;
+      else setMobilePane(mobilePane === 'members' ? null : 'channels');
+      syncGuard();
+      return true;
+    }
+    window.dischordBack = back; // the Android app asks this first; false means there is nothing left to close
+    // Browsers (and Android app versions that only go back through history) get one spare history entry while
+    // back has something to do. It is pushed after a tap, so Chrome does not skip it as an entry added without the user.
+    let guard = !!(history.state && history.state.dischordBack), dropping = false;
+    function syncGuard() {
+      if (dropping) return;
+      const want = mobileLayout() && backable();
+      if (want && !guard) { history.pushState({ dischordBack: true }, ''); guard = true; }
+      else if (!want && guard) { guard = false; dropping = true; history.back(); }
+    }
+    window.addEventListener('popstate', (e) => {
+      if (e.state && e.state.dischordBack) { guard = true; return; }
+      const left = guard;
+      guard = false;
+      if (dropping) dropping = false;
+      else if (left) back();
+      syncGuard();
+    });
+    const later = () => setTimeout(syncGuard, 0);
+    for (const type of ['click', 'touchend', 'keydown']) document.addEventListener(type, later, { capture: true, passive: true });
+    if (mobileMedia && mobileMedia.addEventListener) mobileMedia.addEventListener('change', later);
   })();
   $('mobileSettings').onclick = () => { if (me) settingsModal('profile'); };
   $('mobileCall').onclick = () => { setMobilePane(null); showVoice(); };

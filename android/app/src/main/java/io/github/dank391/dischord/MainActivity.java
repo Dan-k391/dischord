@@ -313,9 +313,12 @@ public final class MainActivity extends Activity {
     }
     @Override public void onBackPressed() {
         if (fullScreenView != null) { hideFullscreen(); return; }
-        webView.evaluateJavascript("(() => {const m=document.getElementById('modalBack');if(m&&!m.classList.contains('hidden')&&m.dataset.dismiss){document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;}if(document.body.classList.contains('channels-open')||document.body.classList.contains('members-open')){document.getElementById('mobileBackdrop').click();return true;}return false;})()", handled -> {
+        // The page steps back through its own UI (menus, dialogs, drawers, then the channel list) and says
+        // false once nothing is left; then Dischord goes to the background like Discord does.
+        webView.evaluateJavascript("(() => {if(typeof window.dischordBack==='function')return window.dischordBack()===true||'exit';const m=document.getElementById('modalBack');if(m&&!m.classList.contains('hidden')&&m.dataset.dismiss){document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));return true;}if(document.body.classList.contains('channels-open')||document.body.classList.contains('members-open')){document.getElementById('mobileBackdrop').click();return true;}return false;})()", handled -> {
             if ("true".equals(handled) || destroying) return;
-            if (webView.canGoBack()) webView.goBack(); else moveTaskToBack(true);
+            if ("\"exit\"".equals(handled)) moveTaskToBack(true);
+            else if (webView.canGoBack()) webView.goBack(); else moveTaskToBack(true);
         });
     }
     @Override protected void onNewIntent(Intent intent) {
