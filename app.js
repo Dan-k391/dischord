@@ -1891,6 +1891,7 @@
     noteCallStart(sid, cid, now());
     const call = { sid, cid, iframe: f, cam: !!withCam, ss: false, vs, ssFrame: null, ssVs: vs + 's', timers: new Set(), since: rejoin && voice.since ? voice.since : now(), ...(keepShare || {}) };
     voice = call;
+    announceCall();
     for (const k in sentVol) delete sentVol[k];
     f.addEventListener('load', () => {
       if (voice !== call) return;
@@ -1924,12 +1925,17 @@
     dropVoiceFrame();
     stopShare(true);
     voice = null;
+    announceCall();
     focusUid = null;
     for (const k in speaking) delete speaking[k];
     broadcastState();
     playTone(false);
     render();
   }
+
+  // The Android app keeps its microphone service from join to leave, not just while a capture track is live:
+  // a call frame rebuilt in the background (being moved, a new device) could not start the service again.
+  function announceCall() { window.dispatchEvent(new CustomEvent('dischord-call-state', { detail: { active: !!voice } })); }
 
   function voicePost(o) { if (voice && voice.iframe.contentWindow) voice.iframe.contentWindow.postMessage(o, '*'); }
 

@@ -775,6 +775,17 @@ test('leaving before delayed camera rejoin prevents the abandoned frame loading'
   assert.strictEqual(abandoned.removed, true);
 });
 
+test('the Android call service is told the call lasts from join through a rejoin until leave', () => {
+  const app = createApp();
+  const states = [];
+  app.window.addEventListener('dischord-call-state', (event) => states.push(event.detail.active));
+  app.join();
+  app.api.toggleCam(); // rebuilds the call frame; the call itself continues
+  app.clock.advance(1000);
+  app.api.leaveVoice();
+  assert.deepStrictEqual(states, [true, true, false]);
+});
+
 test('a stale publisher load cannot apply delayed commands to a new call', () => {
   const app = createApp({ micOn: false });
   const oldFrame = app.join();

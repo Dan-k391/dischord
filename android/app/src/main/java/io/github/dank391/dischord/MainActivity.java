@@ -56,7 +56,7 @@ public final class MainActivity extends Activity {
     private PermissionRequest mediaRequest;
     private final ArrayDeque<PermissionRequest> mediaQueue = new ArrayDeque<>();
     private final Map<String, boolean[]> mediaSessions = new HashMap<>();
-    private boolean destroying, awaitingMediaPermission, loadFailed;
+    private boolean destroying, awaitingMediaPermission, loadFailed, callActive, visible;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -114,7 +114,7 @@ public final class MainActivity extends Activity {
         configureBridge();
         CallService.stopCall = () -> runOnUiThread(() -> {
             if (!destroying) webView.evaluateJavascript("window.dispatchEvent(new Event('dischord-android-call-stop'))", null);
-            mediaSessions.clear();
+            mediaSessions.clear(); callActive = false;
             stopService(new Intent(this, CallService.class));
         });
         String destination = isSite(getIntent().getData()) ? getIntent().getData().toString() : SITE;
@@ -151,6 +151,10 @@ public final class MainActivity extends Activity {
                     JSONObject request = new JSONObject(raw);
                     String type = request.optString("type");
                     if (mainFrame && origin(sourceOrigin, "dan-k391.github.io") && type.startsWith("file-")) files.handle(request, reply);
+                    else if (mainFrame && origin(sourceOrigin, "dan-k391.github.io") && "call-state".equals(type)) {
+                        callActive = request.optBoolean("active");
+                        updateCallService();
+                    }
                     else if (!mainFrame && origin(sourceOrigin, "vdo.ninja") && type.startsWith("screen-")) screens.handle(request, reply);
                     else if (!mainFrame && origin(sourceOrigin, "vdo.ninja") && "media-state".equals(type)) {
                         String scope = request.optString("scope");
@@ -167,18 +171,22 @@ public final class MainActivity extends Activity {
         } catch (IOException error) { throw new IllegalStateException("Missing Android adapter assets", error); }
     }
     private void updateCallService() {
-        boolean audio = false, video = false;
+        // A call keeps the microphone from join to leave, even while its frame briefly has no capture track.
+        boolean audio = callActive, video = false;
         for (boolean[] flags : mediaSessions.values()) { audio |= flags[0]; video |= flags[1]; }
         audio &= checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
         video &= checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED;
         if (!audio && !video) { stopService(new Intent(this, CallService.class)); return; }
+        // Android refuses to start or retype a microphone/camera service from the background, and a failed
+        // retype would end the running one. Keep it as it is until Dischord is on screen again.
+        if (!visible && CallService.running) return;
         Intent intent = new Intent(this, CallService.class).putExtra("audio", audio).putExtra("video", video);
         try { startForegroundService(intent); } catch (RuntimeException ignored) { }
     }
     private void resetSessions() {
         if (files != null) files.reset();
         if (screens != null) { if (destroying) screens.close(); else screens.reset(); }
-        mediaSessions.clear(); stopService(new Intent(this, CallService.class));
+        mediaSessions.clear(); callActive = false; stopService(new Intent(this, CallService.class));
         if (fileChoice != null) { fileChoice.onReceiveValue(null); fileChoice = null; }
         if (mediaRequest != null) { mediaRequest.deny(); mediaRequest = null; }
         while (!mediaQueue.isEmpty()) mediaQueue.poll().deny();
@@ -322,6 +330,13 @@ public final class MainActivity extends Activity {
         // WebView without reloading active voice or screen-sharing sessions.
         ViewCompat.requestApplyInsets(root);
     }
+    @Override protected void onStart() {
+        super.onStart();
+        // Back on screen: apply capture changes that happened in the background.
+        visible = true;
+        if (webView != null) updateCallService();
+    }
+    @Override protected void onStop() { visible = false; super.onStop(); }
     @Override public void onWindowFocusChanged(boolean focused) {
         super.onWindowFocusChanged(focused);
         if (focused && root != null) ViewCompat.requestApplyInsets(root);

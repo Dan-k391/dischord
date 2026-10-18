@@ -15,6 +15,8 @@ import android.os.IBinder;
 /** Keeps permitted microphone/camera capture visible while the user switches apps. */
 public final class CallService extends Service {
     public static Runnable stopCall;
+    /** True while the call notification is in the foreground. */
+    static boolean running;
     private static final String CHANNEL = "dischord_calls";
     @Override public void onCreate() {
         super.onCreate();
@@ -39,9 +41,10 @@ public final class CallService extends Service {
         try {
             if (Build.VERSION.SDK_INT >= 30) startForeground(1202, notification, type);
             else startForeground(1202, notification);
+            running = true;
         } catch (RuntimeException error) { stopSelf(); }
         return START_NOT_STICKY;
     }
     @Override public IBinder onBind(Intent intent) { return null; }
-    @Override public void onDestroy() { stopForeground(STOP_FOREGROUND_REMOVE); super.onDestroy(); }
+    @Override public void onDestroy() { running = false; stopForeground(STOP_FOREGROUND_REMOVE); super.onDestroy(); }
 }

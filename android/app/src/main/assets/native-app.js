@@ -18,4 +18,9 @@
   if (navigator.mediaDevices && !navigator.mediaDevices.getDisplayMedia) {
     navigator.mediaDevices.getDisplayMedia = () => Promise.reject(new DOMException('Use the Screen button to share.', 'NotSupportedError'));
   }
+  // The call service lasts from join to leave. Android only lets it start while Dischord is on screen, so
+  // it must not stop when the call frame briefly has no capture (a rebuilt frame, a re-acquired device).
+  if (window.DischordNative) window.addEventListener('dischord-call-state', (event) => {
+    DischordNative.postMessage(JSON.stringify({ type: 'call-state', active: !!(event.detail && event.detail.active) }));
+  });
 })();
