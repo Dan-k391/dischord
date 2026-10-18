@@ -333,6 +333,37 @@ for (const [resolution, quality] of [['720', 1], ['1080', 0], ['1440', -3], ['21
   });
 }
 
+test('a screen share asks VDO for the screen only once the echo filter is in place', () => {
+  const app = createApp();
+  app.join();
+  app.api.toggleShare();
+  const screen = app.api.voice.ssFrame;
+  assert(!new URL(screen.src).searchParams.has('autostart'), 'VDO must not ask for the screen on its own, ahead of the filter');
+  app.clock.advance(600);
+  assert(screen.messages.some((m) => m.function === 'eval' && /restrictOwnAudio/.test(m.value)), 'The echo filter is sent to the share frame');
+  assert(!screen.messages.some((m) => m.function === 'publishScreen'), 'Nothing is shared before the filter confirms');
+  app.emit(screen, { dischordOwnAudio: 'ready' });
+  app.emit(screen, { dischordOwnAudio: 'ready' });
+  const starts = screen.messages.filter((m) => m.function === 'publishScreen');
+  assert.strictEqual(starts.length, 1, 'The share starts once, after the filter');
+  assert.strictEqual(starts[0]._origin, 'https://vdo.ninja');
+  screen.dispatch('load');
+  app.clock.advance(5000);
+  assert.strictEqual(screen.messages.filter((m) => m.function === 'publishScreen').length, 1, 'The fallback does not start it again');
+});
+
+test('a screen share still starts when the echo filter cannot be installed', () => {
+  const app = createApp();
+  app.join();
+  app.api.toggleShare();
+  const screen = app.api.voice.ssFrame;
+  screen.dispatch('load');
+  app.clock.advance(2000);
+  assert(!screen.messages.some((m) => m.function === 'publishScreen'), 'It waits for the filter first');
+  app.clock.advance(600);
+  assert.strictEqual(screen.messages.filter((m) => m.function === 'publishScreen').length, 1);
+});
+
 test('new screen shares use the motion content hint by default', () => {
   const app = createApp();
   app.join();

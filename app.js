@@ -1861,7 +1861,8 @@
     const q = SS_Q[av.ssQ] ?? 0, hint = av.ssHint === 'detail' ? 'detail' : 'motion';
     // Both primary and secondary capture parameters support older self-hosted VDO.Ninja versions.
     // The target bitrate is separate from the publisher cap; motion lets encoding favor the selected FPS.
-    return VDO + '?' + p.toString() + `&screenshare&autostart&noaudio&novideo&nopreview&nocontrolbar&hideheader&chatbutton=false&nohangupbutton` +
+    // No &autostart: the share starts once the echo filter is installed (startShareCapture).
+    return VDO + '?' + p.toString() + `&screenshare&noaudio&novideo&nopreview&nocontrolbar&hideheader&chatbutton=false&nohangupbutton` +
       `&quality=${q}&screensharequality=${q}&maxframerate=${av.ssFps}&screensharefps=${av.ssFps}` +
       `&outboundvideobitrate=${av.ssBr}&maxvideobitrate=${av.ssBr}&screensharecontenthint=${hint}&contenthint=${hint}` +
       // With the switch off the browser does not offer computer sound at all.
@@ -2154,7 +2155,8 @@
   // this page's own audio out of the capture; game and video sound is still shared. Measured in Edge:
   // the filter only works when restrictOwnAudio and echoCancellation are both on (VDO turns the latter off).
   // The publisher frame is another origin, so the request is added through VDO's eval API, repeated
-  // until the frame confirms it, which happens before it asks for the screen.
+  // until the frame confirms it. Only then is VDO told to ask for the screen (see startShareCapture):
+  // with VDO's own autostart its request usually went out first (13 of 20 starts in Edge), unfiltered.
   function shareOwnAudioPatch() {
     if (window.__dischordOwnAudio) return;
     var media = navigator.mediaDevices;
@@ -2172,6 +2174,13 @@
     };
     window.__dischordOwnAudio = true;
     try { window.parent.postMessage({ dischordOwnAudio: 'ready' }, '*'); } catch (_) { }
+  }
+  // Ask VDO for the screen once the echo filter is in. If the filter cannot be installed (a self-hosted VDO
+  // without the eval API), share anyway a moment after the frame has loaded rather than not at all.
+  function startShareCapture(frame) {
+    if (!voice || voice.ssFrame !== frame || frame.dataset.started) return;
+    frame.dataset.started = '1';
+    try { frame.contentWindow.postMessage({ function: 'publishScreen' }, voice.ssQuality.origin); } catch { }
   }
   function protectShareAudio(frame, origin) {
     const code = '(' + shareOwnAudioPatch.toString() + ')();';
@@ -2193,6 +2202,7 @@
     const f = document.createElement('iframe');
     f.allow = 'autoplay; display-capture; fullscreen';
     f.src = screenUrl(ssVs);
+    f.addEventListener('load', () => setTimeout(() => startShareCapture(f), 2500), { once: true });
     $('pubHost').appendChild(f);
     voice.ssFrame = f; voice.ssVs = ssVs; voice.ss = false; voice.ssSettings = { ...av };
     voice.ssQuality = { frame: f, streamId: ssVs, origin: new URL(VDO, location.href).origin, desired: shareSettings(av), pending: null, closed: false };
@@ -2446,7 +2456,7 @@
       return;
     }
     if (voice && voice.ssFrame && e.source === voice.ssFrame.contentWindow) {
-      if (d.dischordOwnAudio === 'ready') { voice.ssFrame.dataset.ownAudio = 'ready'; return; }
+      if (d.dischordOwnAudio === 'ready') { voice.ssFrame.dataset.ownAudio = 'ready'; startShareCapture(voice.ssFrame); return; }
       const state = voice.ssQuality;
       if (d.dischordScreenQuality && state && state.pending && d.dischordScreenQuality.requestId === state.pending.requestId && e.origin === state.origin) {
         finishShareQuality(state, d.dischordScreenQuality);
