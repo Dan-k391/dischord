@@ -502,7 +502,11 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .vid-busy { position: absolute; left: 8px; bottom: 12px; max-width: calc(100% - 80px); padding: 4px 8px; border-radius: 4px; background: rgba(0,0,0,.72); color: #fff; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .vid-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background: rgba(255,255,255,.2); }
 .vid-bar::after { content: ''; position: absolute; inset: 0 auto 0 0; width: var(--at, 0%); background: var(--accent); transition: width .2s linear; }
-.msg-video + .msg-file { margin-top: 6px; }
+.vid-name { position: absolute; left: 8px; top: 8px; max-width: calc(100% - 64px); padding: 3px 8px; border-radius: 6px; background: rgba(0,0,0,.6); color: #fff; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+.vid-btn { position: absolute; right: 8px; top: 8px; width: 36px; height: 36px; min-width: 0; min-height: 0; margin: 0; padding: 0; border: 0; border-radius: 50%; display: grid; place-items: center; background: rgba(0,0,0,.6); color: #fff; cursor: pointer; }
+.vid-btn:hover, .vid-btn:focus-visible { background: rgba(0,0,0,.85); outline: none; }
+.vid-btn:disabled { opacity: .45; cursor: default; }
+.vid-btn .ico-svg { width: 18px; height: 18px; }
 
 /* ---------- v8: reactions ---------- */
 .reacts { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
@@ -618,7 +622,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 
 .ctx-note { padding: 8px; font-size: 13px; color: var(--text-muted); max-width: 240px; }
 
-.msg-img .img-save { position: absolute; right: 8px; bottom: 8px; width: 32px; height: 32px; border-radius: 6px; background: rgba(0,0,0,.65); color: #fff; display: grid; place-items: center; opacity: 0; transition: opacity .15s; }
+.msg-img .img-save { position: absolute; right: 8px; top: 8px; width: 36px; height: 36px; border-radius: 50%; background: rgba(0,0,0,.6); color: #fff; display: grid; place-items: center; opacity: 0; transition: opacity .15s; }
 .msg-img:hover .img-save, .msg-img .img-save:focus-visible { opacity: 1; }
 .msg-img .img-save:hover { background: rgba(0,0,0,.85); }
 .msg-img .img-save .ico-svg { width: 18px; height: 18px; }
@@ -865,6 +869,8 @@ body.resizing iframe { pointer-events: none !important; }
   .msg-img .img-save { opacity: 1; width: 44px; height: 44px; }
   .image-download { flex-wrap: wrap; }
   .vid-icon { width: 60px; height: 60px; }
+  .vid-btn { width: 44px; height: 44px; }
+  .vid-name { max-width: calc(100% - 72px); }
   .lb-tools { gap: 6px; }
   .lb-tools .icon-btn { width: 44px; height: 44px; }
   #composer { padding: 0 max(8px, var(--safe-area-inset-right)) max(8px, var(--safe-area-inset-bottom)) max(8px, var(--safe-area-inset-left)); }

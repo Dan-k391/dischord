@@ -1817,18 +1817,24 @@
     return compact ? button : `${note ? `<small role="status">${esc(note)}</small>` : ''}${button}`;
   }
 
-  // The play target over a video's poster: tap to download it (it then opens in the player), or to play it
-  // again once it is here. While it downloads, the poster shows the progress instead.
+  // Everything about a video sits on its poster, with no card under it: the name and size top left, a save
+  // button top right, the length bottom right, and a play target over the whole picture (tap: download, then
+  // play). While it downloads, the poster shows the progress and the save button becomes cancel.
   function videoPosterContent(sid, m) {
     const status = fileTransfers.status(sid, m.cid, m.id);
     const active = status.state === 'receiving' || status.state === 'preparing', saving = status.state === 'saving';
+    const unavailable = m.a.id === me.id && !fileTransfers.hasLocal(sid, m.cid, m.id);
     const length = m.img && m.img.d ? `<span class="vid-len">${esc(fmtClock(m.img.d))}</span>` : '';
+    const info = unavailable ? 'Unavailable after reload. Attach it again.' : status.state === 'error' ? status.message
+      : `${m.file.name} · ${window.DischordFiles.formatSize(m.file.size)}`;
+    const name = `<span class="vid-name" title="${esc(m.file.name)}">${esc(info)}</span>`;
     if (active || saving) {
       const note = saving ? 'Saving…' : status.state === 'preparing' ? 'Choose where to save…' : downloadingNote(status);
-      return `<span class="vid-busy" role="status">${esc(note)}</span><span class="vid-bar" style="--at:${Math.round(status.progress || 0)}%"></span>${length}`;
+      return `${name}<button type="button" class="vid-btn" data-file-cancel="${esc(m.id)}" title="Cancel" aria-label="Cancel download">${icon('x')}</button>` +
+        `<span class="vid-busy" role="status">${esc(note)}</span><span class="vid-bar" style="--at:${Math.round(status.progress || 0)}%"></span>${length}`;
     }
-    const unavailable = m.a.id === me.id && !fileTransfers.hasLocal(sid, m.cid, m.id);
-    return `<button type="button" class="vid-play" data-video-play="${esc(m.id)}" aria-label="${esc('Play ' + m.file.name)}" ${unavailable ? 'disabled' : ''}><span class="vid-icon">${icon('play')}</span></button>${length}`;
+    return `<button type="button" class="vid-play" data-video-play="${esc(m.id)}" aria-label="${esc('Play ' + m.file.name)}" ${unavailable ? 'disabled' : ''}><span class="vid-icon">${icon('play')}</span></button>` +
+      `${name}<button type="button" class="vid-btn" data-video-save="${esc(m.id)}" title="Save to device" aria-label="${esc('Save ' + m.file.name + ' to device')}" ${unavailable ? 'disabled' : ''}>${icon('download')}</button>${length}`;
   }
   function fileCardContent(sid, m) {
     const status = fileTransfers.status(sid, m.cid, m.id);
@@ -3894,7 +3900,7 @@
         <img data-img="${esc(m.img.id)}" data-img-sid="${esc(s.id)}" data-img-cid="${esc(m.cid)}" data-img-mid="${esc(m.id)}" decoding="async" alt="${esc(m.file ? m.file.name : 'Shared image')}"><span class="image-preview-status" role="status">${failedPreview ? 'Preview unavailable. Someone with it must be online.' : 'Loading image preview…'}</span>${imageAction}</button>` : m.file && window.DischordImages.isImage(m.file)
         ? `<div class="image-preview-placeholder" data-image-open="${esc(m.id)}">${icon('image')}<span role="status">${imagePreparing.has(imageStateKey) && !failedPreview ? 'Preparing image preview…' : 'Image preview unavailable.'}</span><span data-image-download="${esc(m.id)}" data-image-sid="${esc(s.id)}" data-image-cid="${esc(m.cid)}" data-image-compact="icon">${imageDownloadContent(s.id, m, 'icon')}</span></div>` : '';
       // Image originals download from their preview controls, without a duplicate file card.
-      const file = m.file && !window.DischordImages.isImage(m.file) ? `<div class="msg-file" data-file-card="${esc(m.id)}">${fileCardContent(s.id, m)}</div>` : '';
+      const file = m.file && !window.DischordImages.isImage(m.file) && !poster ? `<div class="msg-file" data-file-card="${esc(m.id)}">${fileCardContent(s.id, m)}</div>` : '';
       const reply = renderReply(m);
       const text = m.text ? `<div class="text">${formatText(m.text)}${edited}</div>` : '';
       const re = renderRe(m);
@@ -4802,6 +4808,16 @@
   $('messages').onclick = (e) => {
     const more = e.target.closest('[data-message-menu]');
     if (more) { e.stopPropagation(); return messageMenu(more.dataset.messageMenu, e.clientX, e.clientY); }
+    const keep = e.target.closest('[data-video-save]');
+    if (keep) {
+      e.stopPropagation();
+      if (keep.disabled) return;
+      const h = held.get(dlKey(cur.sid, cur.cid, keep.dataset.videoSave));
+      if (h && h.blob) return exportFile(h.blob, h.name);
+      if (h) return toast('Already saved to the place you chose.');
+      playAfter.delete(dlKey(cur.sid, cur.cid, keep.dataset.videoSave));
+      return fileTransfers.download(cur.sid, cur.cid, keep.dataset.videoSave);
+    }
     const play = e.target.closest('[data-video-play]');
     if (play) {
       e.stopPropagation();

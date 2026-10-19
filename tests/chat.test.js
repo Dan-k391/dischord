@@ -934,7 +934,8 @@ test('videos keep a poster preview with their length; other files cannot carry o
   app.api.renderMessages(true);
   const html = app.node('messages').innerHTML;
   assert(html.includes('data-video-play="message1"') && html.includes('1:35'), 'The poster has a play target and the length');
-  assert(html.includes('data-file-card="message1"'), 'The file card stays for saving a copy');
+  assert(!html.includes('data-file-card="message1"'), 'No card under the poster');
+  assert(html.includes('data-video-save="message1"') && html.includes('clip.mp4'), 'Name and save button sit on the poster');
 });
 
 test('a download shows its current speed next to the percentage', () => {
