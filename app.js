@@ -1775,13 +1775,17 @@
       (m.img ? `<img data-img="${esc(m.img.id)}" data-img-sid="${esc(sid)}" data-img-cid="${esc(cid)}" data-img-mid="${esc(mid)}" alt="${esc(m.file ? m.file.name : 'Shared image')}" hidden>` : '') +
       `<span class="image-preview-status" role="status">${m.file ? 'Preview unavailable. You can download the original image.' : 'Loading image preview…'}</span>`;
     const name = m.file ? m.file.name : 'Image', from = liveUser(m.a).name;
-    modal(`<header class="vw-head"><span class="vw-kind">${icon('image')}</span>
-        <div class="vw-title"><b title="${esc(name)}">${esc(name)}</b><span>${m.file ? window.DischordFiles.formatSize(m.file.size) + ' · ' : ''}from ${esc(from)}</span></div>
-        ${m.file ? `<span class="image-download" id="imageDownload" data-image-download="${esc(mid)}" data-image-sid="${esc(sid)}" data-image-cid="${esc(cid)}" data-image-compact="bar">${imageDownloadContent(sid, m, 'bar')}</span>` : `<button type="button" class="icon-btn" id="saveOpenImage" title="Download" aria-label="Download">${icon('download')}</button>`}
-        ${m.img && m.file ? `<button type="button" class="icon-btn" id="saveImagePreview" title="Save preview" aria-label="Save preview">${icon('image')}</button>` : ''}
-        ${m.img ? `<button type="button" class="icon-btn" id="copyOpenImage" title="Copy image" aria-label="Copy image">${icon('copy')}</button>` : ''}
-        <button type="button" class="icon-btn" data-close title="Close" aria-label="Close">${icon('x')}</button></header>
-      <div class="lightbox">${preview}</div>`, () => {
+    // full screen: the picture on a dark backdrop, its name and a few round icons floating over the top
+    modal(`<div class="lightbox">${preview}</div>
+      <div class="lb-top"><div class="lb-title"><b title="${esc(name)}">${esc(name)}</b><span>${m.file ? window.DischordFiles.formatSize(m.file.size) + ' · ' : ''}from ${esc(from)}</span></div>
+        <div class="lb-tools">
+          ${m.file ? `<span class="image-download" id="imageDownload" data-image-download="${esc(mid)}" data-image-sid="${esc(sid)}" data-image-cid="${esc(cid)}" data-image-compact="bar">${imageDownloadContent(sid, m, 'bar')}</span>` : `<button type="button" class="icon-btn" id="saveOpenImage" title="Download" aria-label="Download">${icon('download')}</button>`}
+          ${m.img && m.file ? `<button type="button" class="icon-btn" id="saveImagePreview" title="Save preview" aria-label="Save preview">${icon('image')}</button>` : ''}
+          ${m.img ? `<button type="button" class="icon-btn" id="copyOpenImage" title="Copy image" aria-label="Copy image">${icon('copy')}</button>` : ''}
+          <button type="button" class="icon-btn" data-close title="Close (Esc)" aria-label="Close">${icon('x')}</button>
+        </div></div>`, () => {
+      // a tap on the dark area around the picture closes it
+      $('modal').querySelector('.lightbox').addEventListener('click', (e) => { if (!e.target.closest('img')) closeModal(); });
       if (m.file) $('imageDownload').onclick = (e) => {
         const button = e.target.closest('[data-file-download], [data-file-cancel]');
         if (!button || button.disabled) return;

@@ -469,13 +469,24 @@ button { font: inherit; color: inherit; cursor: pointer; }
   display: grid; place-items: center; position: absolute; inset: 12px; border: 2px dashed var(--accent); border-radius: 12px;
   background: rgba(88,101,242,.15); color: #fff; font-size: 20px; font-weight: 700; pointer-events: none; z-index: 5;
 }
-/* the image viewer: the file viewer's icon toolbar on top, the picture as large as the window allows */
-#modal.lb { width: min(1100px, 96vw); padding: 0; background: #111214; border: 1px solid rgba(255,255,255,.06); overflow: hidden; display: flex; flex-direction: column; }
-#modal.lb .vw-head { background: var(--bg-side); }
-.lightbox { display: grid; place-items: center; min-height: 0; max-height: calc(88vh - 64px); overflow: auto; padding: 10px; }
-.lightbox img { max-width: 100%; max-height: calc(88vh - 84px); border-radius: 6px; }
-.vw-head .image-download { flex: none; gap: 6px; }
-.vw-head .image-download small { max-width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* the image viewer: full screen, the picture on a near-black backdrop, its name and round icons floating on top */
+#modalBack:has(> #modal.lb) { padding: 0; background: rgba(0,0,0,.96); }
+#modal.lb { position: relative; width: 100vw; height: 100%; max-width: none; max-height: none; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; overflow: hidden; }
+#modal.lb .lightbox { position: absolute; inset: 0; max-height: none; display: grid; place-items: center; overflow: hidden;
+  padding: max(68px, calc(var(--safe-area-inset-top, 0px) + 60px)) 16px max(20px, var(--safe-area-inset-bottom, 0px)); }
+#modal.lb .lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; }
+.lb-top { position: absolute; top: 0; left: 0; right: 0; z-index: 2; display: flex; align-items: center; gap: 12px; pointer-events: none;
+  padding: max(12px, var(--safe-area-inset-top, 0px)) max(14px, var(--safe-area-inset-right, 0px)) 12px max(16px, var(--safe-area-inset-left, 0px)); }
+.lb-title { flex: 1; min-width: 0; display: flex; flex-direction: column; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.7); }
+.lb-title b { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lb-title span { font-size: 12px; color: rgba(255,255,255,.7); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lb-tools { display: flex; align-items: center; gap: 8px; pointer-events: auto; flex: none; }
+.lb-tools .image-download { display: flex; align-items: center; gap: 8px; }
+.lb-tools .icon-btn { width: 40px; height: 40px; min-width: 0; min-height: 0; margin: 0; padding: 0; border-radius: 50%; display: grid; place-items: center; color: #fff; background: rgba(255,255,255,.12); }
+.lb-tools .icon-btn:hover, .lb-tools .icon-btn:focus-visible { background: rgba(255,255,255,.26); }
+.lb-tools .icon-btn:disabled { opacity: .4; }
+.lb-tools .icon-btn .ico-svg { width: 20px; height: 20px; }
+.lb-tools small { padding: 5px 10px; border-radius: 14px; background: rgba(255,255,255,.12); color: #fff; font-size: 12px; white-space: nowrap; max-width: 40vw; overflow: hidden; text-overflow: ellipsis; }
 
 /* a video's poster: one frame with a play target; tapping it downloads the video, which then opens in the player */
 .msg-video { cursor: default; }
@@ -599,7 +610,6 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .image-download small { color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
 .image-download .btn { flex: none; }
 .lightbox .image-preview-status { position: static; }
-#modal.lb .actions { flex-wrap: wrap; }
 .mf-sub { font-size: 12px; color: var(--text-muted); overflow-wrap: anywhere; }
 .att.file { width: 160px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; padding: 8px; box-sizing: border-box; color: var(--text-muted); }
 .att.file .ico-svg { width: 28px; height: 28px; }
@@ -854,10 +864,9 @@ body.resizing iframe { pointer-events: none !important; }
   .re-pill.add { opacity: 1; }
   .msg-img .img-save { opacity: 1; width: 44px; height: 44px; }
   .image-download { flex-wrap: wrap; }
-  .vw-head .image-download { flex-wrap: nowrap; }
-  .vw-head .image-download small { max-width: 34vw; }
-  #modal.lb { width: 100%; }
   .vid-icon { width: 60px; height: 60px; }
+  .lb-tools { gap: 6px; }
+  .lb-tools .icon-btn { width: 44px; height: 44px; }
   #composer { padding: 0 max(8px, var(--safe-area-inset-right)) max(8px, var(--safe-area-inset-bottom)) max(8px, var(--safe-area-inset-left)); }
   #typing { height: 24px; padding: 0 12px; overflow: hidden; white-space: nowrap; }
   .composer-row { align-items: flex-end; }
