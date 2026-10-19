@@ -1177,14 +1177,20 @@
             <div class="pl-group"><button type="button" class="pl-btn pl-rate" data-pl="rate" title="Speed (&lt; &gt;)" aria-label="Playback speed">1×</button>${pb('loop', 'loop', 'Repeat')}${kind === 'video' ? pb('pip', 'pip', 'Picture in picture') + pb('fs', 'expand', 'Fullscreen (F)') : ''}</div>
           </div>
         </div></div>`
-      : kind === 'image' ? `<div class="vw-image"><img src="${url}" alt="${esc(d.name)}" draggable="false"></div>`
+      : kind === 'image' ? `<div class="vw-image lightbox"><img src="${url}" alt="${esc(d.name)}" draggable="false"></div>`
       : kind === 'pdf' ? `<iframe class="vw-doc" src="${url}" title="${esc(d.name)}"></iframe>`
       : '<pre class="vw-text" id="docText">Loading…</pre>';
-    modal(`<header class="vw-head"><span class="vw-kind">${icon(kindIcon(kind))}</span>
-        <div class="vw-title"><b title="${esc(d.name)}">${esc(d.name)}</b><span>${window.DischordFiles.formatSize(d.size)}${d.from ? ' · from ' + esc(d.from) : ''}</span></div>
-        <button type="button" class="icon-btn" id="vwSave" title="Save to device" aria-label="Save to device">${icon('download')}</button>
-        <button type="button" class="icon-btn" data-close title="Close" aria-label="Close">${icon('x')}</button></header>
+    // videos and pictures open full screen like the image viewer: name and round icons floating on top
+    const full = kind === 'video' || kind === 'image';
+    const sub = `${window.DischordFiles.formatSize(d.size)}${d.from ? ' · from ' + esc(d.from) : ''}`;
+    const save = `<button type="button" class="icon-btn" id="vwSave" title="Save to device" aria-label="Save to device">${icon('download')}</button>`;
+    const close = `<button type="button" class="icon-btn" data-close title="Close (Esc)" aria-label="Close">${icon('x')}</button>`;
+    modal(full ? `<div class="vw-body ${kind}">${body}</div>
+      <div class="lb-top"><div class="lb-title"><b title="${esc(d.name)}">${esc(d.name)}</b><span>${sub}</span></div><div class="lb-tools">${save}${close}</div></div>`
+      : `<header class="vw-head"><span class="vw-kind">${icon(kindIcon(kind))}</span>
+        <div class="vw-title"><b title="${esc(d.name)}">${esc(d.name)}</b><span>${sub}</span></div>${save}${close}</header>
       <div class="vw-body ${kind}">${body}</div>`, () => {
+      if (kind === 'image') $('modal').querySelector('.vw-image').addEventListener('click', (e) => { if (!e.target.closest('img')) closeModal(); });
       $('vwSave').onclick = () => exportFile(source, d.name);
       if (kind === 'image') zoomable($('modal').querySelector('.vw-image'));
       if (kind === 'text') Promise.resolve().then(() => blob.slice(0, 2 * 1024 * 1024).text()).then(
@@ -1194,6 +1200,7 @@
       modalCleanup = () => { if (stop) stop(); if (url) URL.revokeObjectURL(url); };
     }, true, true);
     $('modal').classList.add('viewer');
+    if (kind === 'video' || kind === 'image') $('modal').classList.add('lb');
   }
   // The player: seek bar, volume, speed, repeat, picture in picture, fullscreen, previous / next among the
   // media opened this session, keyboard shortcuts; it remembers volume, speed and where each file stopped.

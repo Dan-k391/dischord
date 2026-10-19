@@ -481,6 +481,20 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .lb-title b { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lb-title span { font-size: 12px; color: rgba(255,255,255,.7); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lb-tools { display: flex; align-items: center; gap: 8px; pointer-events: auto; flex: none; }
+/* a video opened full screen the same way: the player fills the screen, controls float over its bottom, and the
+   name and icons on top fade out with them while it plays */
+#modal.lb.viewer { display: block; width: 100vw; height: 100%; max-width: none; max-height: none; padding: 0; border: 0; border-radius: 0; background: transparent; }
+#modal.lb .vw-body.video { position: absolute; inset: 0; background: transparent; overflow: hidden; }
+#modal.lb .player { height: 100%; background: transparent; }
+#modal.lb .player .pl-stage { flex: 1; min-height: 0; }
+#modal.lb .player video { width: 100%; height: 100%; max-height: none; object-fit: contain; background: transparent; }
+#modal.lb .player.video .pl-ctl { padding: 40px max(18px, var(--safe-area-inset-right, 0px)) max(16px, var(--safe-area-inset-bottom, 0px)) max(18px, var(--safe-area-inset-left, 0px)); }
+#modal.lb .lb-top { transition: opacity .2s; }
+#modal.lb:has(.player.video.idle) .lb-top { opacity: 0; pointer-events: none; }
+#modal.lb:has(.player.video.idle) .lb-tools { pointer-events: none; }
+#modal.lb .pl-group { background: rgba(255,255,255,.1); border: 0; box-shadow: none; } /* translucent, like the round buttons on top */
+#modal.lb .vw-body.image { position: absolute; inset: 0; background: transparent; overflow: hidden; }
+#modal.lb .vw-image img { width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 4px; box-shadow: none; }
 .lb-tools .image-download { display: flex; align-items: center; gap: 8px; }
 .lb-tools .icon-btn { width: 40px; height: 40px; min-width: 0; min-height: 0; margin: 0; padding: 0; border-radius: 50%; display: grid; place-items: center; color: #fff; background: rgba(255,255,255,.12); }
 .lb-tools .icon-btn:hover, .lb-tools .icon-btn:focus-visible { background: rgba(255,255,255,.26); }
