@@ -127,6 +127,7 @@
     volumeOff: '<path d="M11 5L6 9H3v6h3l5 4zM16 9.5l5 5M21 9.5l-5 5"/>',
     music: '<path d="M9 18V5l11-2v13"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/>',
     film: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 4v16M17 4v16M3 9h4M3 15h4M17 9h4M17 15h4"/>',
+    search: '<circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/>',
     flip: '<path d="M4 9a8 8 0 0 1 14.2-3.2L20 8M20 4v4h-4M20 15a8 8 0 0 1-14.2 3.2L4 16M4 20v-4h4"/><circle cx="12" cy="12" r="2.2"/>',
     chevUp: '<path d="M6 15l6-6 6 6"/>',
     chevDown: '<path d="M6 9l6 6 6-6"/>',
@@ -828,6 +829,7 @@
     if (viewing && !document.hidden) markRead(sid, m.cid);
     if (!viewing || document.hidden) notify(sid, m);
     if (viewing) { renderMessages(); renderTyping(); }
+    refreshSearch();
     renderRail();
     if (sid === cur.sid) renderChannels();
   }
@@ -2819,6 +2821,7 @@
     morphStage(stageWas);
     $('mainHeader').classList.toggle('hidden', !c);
     $('voiceView').classList.toggle('behind', inThisVoice);
+    refreshSearch();
     renderMobileNavigation();
 
     if (!c) return;
@@ -3956,6 +3959,95 @@
     inp.dispatchEvent(new Event('input'));
   }
 
+  // ---- search. It only looks through the message history saved on this device; nothing is asked of
+  // anyone else. Every word must appear in the message or its file name; from:name narrows by sender.
+  let searchScope = 'server';
+  function searchMessages(query, scope) {
+    const words = [], from = [];
+    for (const w of query.toLowerCase().split(/\s+/).filter(Boolean)) (w.startsWith('from:') && w.length > 5 ? from : words).push(w.startsWith('from:') && w.length > 5 ? w.slice(5).replace(/^@/, '') : w);
+    if (!words.length && !from.length) return { hits: [], words };
+    const places = [];
+    const add = (sv) => sv.channels.filter((c) => c.type === 'text').forEach((c) => places.push({ s: sv, c }));
+    if (scope === 'channel') { const sv = server(cur.sid), c = channel(sv, cur.cid); if (c && c.type === 'text') places.push({ s: sv, c }); }
+    else if (scope === 'server' && server(cur.sid)) add(server(cur.sid));
+    else { servers.forEach(add); add(dmServer); }
+    const hits = [];
+    for (const { s: sv, c } of places) {
+      const known = getKnown(sv.id);
+      for (const m of getMsgs(sv.id)[c.id] || []) {
+        if (m.del) continue;
+        const name = m.a.id === me.id ? me.name : (known[m.a.id] || m.a).name;
+        if (from.length && !from.every((f) => name.toLowerCase().replace(/\s+/g, '').includes(f))) continue;
+        const text = (m.text || '') + (m.file ? ' ' + m.file.name : '');
+        const low = text.toLowerCase();
+        if (!words.every((w) => low.includes(w))) continue;
+        hits.push({ sid: sv.id, cid: c.id, m, name, where: sv.dm ? '@' + c.name : '#' + c.name + (scope === 'all' ? ' · ' + sv.name : '') });
+      }
+    }
+    hits.sort((a, b) => b.m.ts - a.m.ts);
+    return { hits, words };
+  }
+  // the part of a message around the first match, with the matched words marked
+  function searchSnippet(m, words) {
+    const text = (m.text || (m.file ? m.file.name : m.img ? 'Image' : '')).replace(/\s+/g, ' ');
+    const low = text.toLowerCase();
+    const first = words.length ? Math.max(0, Math.min(...words.map((w) => low.indexOf(w)).filter((i) => i >= 0), text.length)) : 0;
+    const start = Math.max(0, first - 40), cut = text.slice(start, start + 220);
+    const marks = words.length ? new RegExp('(' + words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')', 'gi') : null;
+    const body = marks ? cut.split(marks).map((part, i) => (i % 2 ? '<mark>' + esc(part) + '</mark>' : esc(part))).join('') : esc(cut);
+    return (start ? '…' : '') + body + (start + 220 < text.length ? '…' : '') + (m.file && m.text ? ` <span class="sr-file">${icon('file', 'mini')}${esc(m.file.name)}</span>` : '');
+  }
+  // The search lives in a panel that slides in from the right, in place of the member list. It is not a
+  // dialog: the chat stays usable (scroll, read, type) while it is open, and results stay put.
+  let searchHits = [], searchTimer = null;
+  const searchOpen = () => !$('searchPanel').classList.contains('hidden');
+  function paintSearchScopes() {
+    const sv = server(cur.sid), c = channel(sv, cur.cid), inText = !!(c && c.type === 'text');
+    if (!sv) searchScope = 'all'; else if (searchScope === 'channel' && !inText) searchScope = 'server';
+    const scopes = [['channel', inText ? (sv.dm ? '@' : '#') + c.name : '', inText], ['server', sv ? (sv.dm ? 'All direct messages' : sv.name) : '', !!sv], ['all', 'Everywhere', true]];
+    const h = scopes.filter((x) => x[2]).map(([id, label]) => `<button type="button" data-scope="${id}" class="${id === searchScope ? 'on' : ''}">${esc(label)}</button>`).join('');
+    if ($('sScope').innerHTML !== h) $('sScope').innerHTML = h;
+  }
+  function runSearch() {
+    const out = $('sOut'), q = $('sQ').value.trim();
+    if (!q) { searchHits = []; out.innerHTML = '<div class="search-note">Searches the message history saved on this device. Type <b>from:name</b> to see one person\'s messages.</div>'; return; }
+    const { hits, words } = searchMessages(q, searchScope);
+    searchHits = hits.slice(0, 100);
+    out.innerHTML = hits.length ? `<div class="search-count">${hits.length} ${hits.length === 1 ? 'result' : 'results'}${hits.length > 100 ? ' · showing the newest 100' : ''}</div>` +
+      searchHits.map((h, i) => `<button type="button" class="sr" data-hit="${i}">${avatar(liveUser(h.m.a))}<div class="sr-main"><div class="sr-meta"><b style="color:${esc(liveUser(h.m.a).color)}">${esc(h.name)}</b><span>${esc(fmtStamp(h.m.ts))}</span></div><div class="sr-where">${esc(h.where)}</div><div class="sr-text">${searchSnippet(h.m, words)}</div></div></button>`).join('')
+      : '<div class="search-note">No messages match.</div>';
+  }
+  // what is being viewed changed (another channel, a new message): keep the open panel in step
+  function refreshSearch() {
+    if (!searchOpen()) return;
+    paintSearchScopes();
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(runSearch, 150);
+  }
+  function openSearch() {
+    if (!me) return;
+    const panel = $('searchPanel');
+    if (!searchOpen()) {
+      clearTimeout(panel._closing);
+      // it grows out of the member list it replaces (or from nothing), so the chat beside it never jumps wider first
+      panel.style.setProperty('--search-from', (mobileLayout() ? 0 : $('members').offsetWidth + $('memResizer').offsetWidth) + 'px');
+      panel.classList.remove('hidden', 'closing');
+      document.body.classList.add('search-open');
+      if (mobilePane) setMobilePane(null);
+      paintSearchScopes();
+      runSearch();
+    }
+    // preventScroll: the box is still sliding in, and scrolling it into view would yank the whole app sideways
+    $('sQ').focus({ preventScroll: true });
+    $('sQ').select();
+  }
+  function closeSearch() {
+    const panel = $('searchPanel');
+    if (!searchOpen() || panel.classList.contains('closing')) return;
+    panel.classList.add('closing'); // slides back out, then leaves the layout
+    panel._closing = setTimeout(() => { panel.classList.add('hidden'); panel.classList.remove('closing'); document.body.classList.remove('search-open'); }, 180);
+  }
+
   // ---- connection diagnostics. Every peer connection takes one of three routes: straight across the
   // local network, straight across the internet after STUN found a way through the routers, or relayed
   // through a TURN server when no direct path exists. While recording, each connection frame is asked
@@ -4545,6 +4637,30 @@
     if (ids.length) confirmModal('Remove offline people', `Remove ${ids.length} offline ${ids.length === 1 ? 'person' : 'people'} from the member list? Their messages stay, and anyone who comes back online is listed again.`, 'Remove', () => { const n = forgetUsers(sid, ids, true); toast(`Removed ${n} ${n === 1 ? 'person' : 'people'}`); });
   });
   $('addServerBtn').onclick = createServerModal;
+  $('searchTop').onclick = () => (searchOpen() ? closeSearch() : openSearch());
+  $('sClose').onclick = closeSearch;
+  $('sQ').oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 120); };
+  $('sQ').onkeydown = (e) => {
+    if (e.key === 'Escape') { e.stopPropagation(); closeSearch(); }
+    else if (e.key === 'Enter') { clearTimeout(searchTimer); runSearch(); }
+  };
+  $('sScope').onclick = (e) => {
+    const b = e.target.closest('[data-scope]');
+    if (!b) return;
+    searchScope = b.dataset.scope;
+    paintSearchScopes(); runSearch();
+  };
+  $('sOut').onclick = (e) => {
+    const b = e.target.closest('[data-hit]'), h = b && searchHits[+b.dataset.hit];
+    if (!h) return;
+    $('sOut').querySelectorAll('.sr.on').forEach((x) => x.classList.remove('on'));
+    b.classList.add('on');
+    if (cur.sid !== h.sid) selectServer(h.sid);
+    if (cur.cid !== h.cid) selectChannel(h.cid);
+    if (mobileLayout()) closeSearch(); // a phone has no room for both
+    setTimeout(() => jumpToMessage(h.m.id, true), 80); // straight there: the channel may only just have been drawn
+  };
+  document.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f' && me && $('modalBack').classList.contains('hidden')) { e.preventDefault(); openSearch(); } });
   $('wCreate').onclick = createServerModal;
   $('wJoin').onclick = joinModal;
   $('inviteTop').onclick = inviteModal;
@@ -5044,13 +5160,14 @@
       if (!drag) return;
       if (e.touches.length !== 1) { drop(drag.open); return; } // pinch, not swipe
       const t = e.touches[0], dx = t.clientX - drag.x, dy = t.clientY - drag.y;
-      if (!drag.kind) {
+      if (!drag.kind && !drag.search) {
         const ax = Math.abs(dx), ay = Math.abs(dy);
         if (ax < 6 && ay < 6) return;
         if (ax < ay * 1.5) { if (ay >= ax || ax + ay > 24) drag = null; return; } // scrolling, or not clearly sideways
         // the page is already scrolling, text is being selected, or the strip scrolls sideways itself: leave it alone
         if (!e.cancelable || String(window.getSelection && window.getSelection()) !== '' || sideScroller(drag.target)) { drag = null; return; }
         const right = dx > 0, s = server(cur.sid);
+        if (searchOpen()) { if (right) drag.search = true; else drag = null; return; } // the search panel covers the chat: swipe it away
         const kind = mobilePane ? ((mobilePane === 'channels') !== right ? mobilePane : null) : right ? 'channels' : s && !s.dm ? 'members' : null;
         if (!kind) { drag = null; return; }
         if (kind === 'members' && !membersOpen) { membersOpen = true; renderMembers(); }
@@ -5061,6 +5178,7 @@
         lift();
       }
       e.preventDefault(); // the finger moves the drawer, not the messages under it
+      if (drag.search) return;
       const { x, p } = place(dx);
       for (const el of drag.els) el.style.transform = `translate3d(${x}px,0,0)`;
       $('mobileBackdrop').style.opacity = String(p);
@@ -5070,6 +5188,7 @@
     const end = (e) => {
       if (!drag) return;
       const t = e.changedTouches && e.changedTouches[0];
+      if (drag.search) { const dx = t ? t.clientX - drag.x : 0; drag = null; if (dx > 70) closeSearch(); return; }
       if (!drag.kind || e.type === 'touchcancel' || !t) { drop(drag.open); return; }
       const { p } = place(t.clientX - drag.x);
       // speed over the last ~100 ms, in px/ms towards "open"
@@ -5082,17 +5201,18 @@
     document.addEventListener('touchcancel', end, { passive: true });
   })();
   // Back (Android's back gesture, or the browser's back on a phone) steps out of the UI like Discord: menus, dialogs
-  // close first, then the member list; from the chat it opens the channels, and from there it leaves.
+  // and the search panel close first, then the member list; from the chat it opens the channels, and from there it leaves.
   (() => {
     const shown = (id) => !$(id).classList.contains('hidden');
     const backable = () => shown('ctxMenu') || shown('qMenu') || shown('emojiMenu') || shown('serverMenu') || shown('mentionMenu') ||
-      (shown('modalBack') && !modalClosing && !!$('modalBack').dataset.dismiss) || !!winFs ||
+      (shown('modalBack') && !modalClosing && !!$('modalBack').dataset.dismiss) || searchOpen() || !!winFs ||
       (mobileLayout() && mobilePane !== 'channels');
     function back() {
       if (shown('ctxMenu')) closeCtx();
       else if (shown('qMenu') || shown('emojiMenu') || shown('serverMenu')) for (const id of ['qMenu', 'emojiMenu', 'serverMenu']) $(id).classList.add('hidden');
       else if (shown('mentionMenu')) closeMention();
       else if (shown('modalBack') && !modalClosing && $('modalBack').dataset.dismiss) closeModal();
+      else if (searchOpen()) closeSearch();
       else if (winFs) { winFs = null; renderStage(); }
       else if (!mobileLayout() || mobilePane === 'channels') return false;
       else setMobilePane(mobilePane === 'members' ? null : 'channels');
