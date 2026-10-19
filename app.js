@@ -1069,7 +1069,7 @@
   }
 
   // A picture that can be zoomed where it is shown: pinch or Ctrl + scroll to zoom at that point, drag or scroll
-  // to move around once zoomed, double-tap or double-click to zoom in and back out.
+  // to move around once zoomed; a click (double-tap on touch) zooms in and back out.
   function zoomable(box) {
     const img = box && box.querySelector('img');
     if (!img || box._zoomable) return;
@@ -1100,7 +1100,12 @@
       e.preventDefault();
       x -= e.shiftKey ? e.deltaY : e.deltaX; y -= e.shiftKey ? 0 : e.deltaY; apply();
     }, { passive: false });
-    box.addEventListener('dblclick', (e) => { e.preventDefault(); zoomAt(s > 1 ? 1 : 2.5, e.clientX, e.clientY); });
+    // mouse: one click on the picture zooms in at that point, another zooms back out (a drag is not a click)
+    let dragged = false;
+    box.addEventListener('click', (e) => {
+      if (e.pointerType === 'touch' || !e.target.closest('img') || dragged) { dragged = false; return; }
+      zoomAt(s > 1 ? 1 : 2.5, e.clientX, e.clientY);
+    });
     box.addEventListener('touchstart', (e) => {
       moved = false;
       if (e.touches.length === 2) { pinch = { ...mid(e), s }; drag = null; e.preventDefault(); }
@@ -1129,8 +1134,9 @@
     // mouse: drag to move around once zoomed
     box.addEventListener('pointerdown', (e) => {
       if (e.pointerType !== 'mouse' || e.button || s <= 1) return;
-      const from = { x: e.clientX - x, y: e.clientY - y };
-      const move = (ev) => { x = ev.clientX - from.x; y = ev.clientY - from.y; apply(); };
+      const from = { x: e.clientX - x, y: e.clientY - y }, start = { x: e.clientX, y: e.clientY };
+      dragged = false;
+      const move = (ev) => { if (Math.hypot(ev.clientX - start.x, ev.clientY - start.y) > 4) dragged = true; x = ev.clientX - from.x; y = ev.clientY - from.y; apply(); };
       const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); box.classList.remove('panning'); };
       box.classList.add('panning');
       window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
