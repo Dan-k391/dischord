@@ -80,13 +80,14 @@
       return meta ? { author: m.a.id, meta } : null;
     }
 
-    function change(sid, cid, mid, state, progress = 0, message = '') {
+    function change(sid, cid, mid, state, progress = 0, message = '', speed = 0) {
       const k = keyOf(sid, cid, mid);
       const previous = states.get(k);
+      // While receiving, repaint for each new percent, and at least once a second for the speed.
       if (state === 'receiving' && previous && previous.state === state &&
-          previous.progress === progress && previous.message === message) return;
+          previous.progress === progress && previous.message === message && Date.now() - previous.at < 1000) return;
       states.delete(k);
-      states.set(k, { state, progress, message });
+      states.set(k, { state, progress, message, speed, at: Date.now() });
       // Status is disposable UI state; it must not grow with indefinite chat history.
       if (states.size > MAX_STATES) {
         for (const old of states.keys()) {
@@ -286,6 +287,15 @@
       return true;
     }
 
+    // Download speed in bytes per second over the last few seconds (0 until there is enough to tell).
+    function speedOf(t) {
+      const now = Date.now(), samples = t.speedSamples || (t.speedSamples = []);
+      samples.push([now, t.bytes]);
+      while (samples.length > 2 && now - samples[1][0] >= 3000) samples.shift();
+      const [at, bytes] = samples[0];
+      return now - at >= 500 ? (t.bytes - bytes) * 1000 / (now - at) : 0;
+    }
+
     // The receiving end of the fast channel is opened before asking, so nothing the sender sends is missed.
     function startFastReceiver(t) {
       let chain = Promise.resolve();
@@ -326,7 +336,7 @@
       armReceiver(t);
       t.fast.credit(t.bytes); // lets the sender release more, and tells it when everything has arrived
       if (t.bytes < t.meta.size) {
-        change(t.sid, t.cid, t.mid, 'receiving', Math.floor(t.bytes / t.meta.size * 100));
+        change(t.sid, t.cid, t.mid, 'receiving', Math.floor(t.bytes / t.meta.size * 100), '', speedOf(t));
         return;
       }
       t.committing = true;
@@ -518,7 +528,7 @@
             stopReceiver(t, 'complete', 'File saved to your chosen location.', false);
             return;
           }
-          change(t.sid, t.cid, t.mid, 'receiving', Math.floor(t.bytes / t.meta.size * 100));
+          change(t.sid, t.cid, t.mid, 'receiving', Math.floor(t.bytes / t.meta.size * 100), '', speedOf(t));
         }
       } catch {
         stopReceiver(t, 'error', 'The browser could not write or save this file.', true);
@@ -575,7 +585,7 @@
           change(t.sid, t.cid, t.mid, 'error', 0, 'The browser could not save this file.');
         }
       } else {
-        change(sid, t.cid, t.mid, 'receiving', Math.floor(t.bytes / t.meta.size * 100));
+        change(sid, t.cid, t.mid, 'receiving', Math.floor(t.bytes / t.meta.size * 100), '', speedOf(t));
       }
     }
 

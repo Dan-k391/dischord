@@ -1785,13 +1785,14 @@
     if (!url && m.img) paintImages();
   }
 
+  const downloadingNote = (status) => `Downloading ${Math.round(status.progress)}%` + (status.speed > 0 ? ` · ${window.DischordFiles.formatSize(Math.round(status.speed))}/s` : '');
   function imageDownloadContent(sid, m, compact = '') {
     const status = fileTransfers.status(sid, m.cid, m.id);
     const active = status.state === 'receiving' || status.state === 'preparing';
     const saving = status.state === 'saving';
     const unavailable = m.a.id === me.id && !fileTransfers.hasLocal(sid, m.cid, m.id);
     const label = active ? 'Cancel download' : saving ? 'Saving…' : status.state === 'error' ? 'Retry download' : 'Download';
-    const note = status.state === 'preparing' ? 'Choose where to save this image…' : saving ? 'Saving image…' : active ? `Downloading ${Math.round(status.progress)}%`
+    const note = status.state === 'preparing' ? 'Choose where to save this image…' : saving ? 'Saving image…' : active ? downloadingNote(status)
       : status.state === 'error' ? status.message : status.state === 'complete' ? 'Saved' : unavailable ? 'Original unavailable after reload.' : '';
     const attrs = `data-file-${active ? 'cancel' : 'download'}="${esc(m.id)}" title="${esc(note || label)}" aria-label="${esc(label + ': ' + m.file.name)}"`;
     if (compact === 'overlay') return `<span class="img-save" ${attrs} role="button" tabindex="${saving || unavailable ? -1 : 0}" aria-disabled="${saving || unavailable}">${icon(active ? 'x' : 'download')}</span>`;
@@ -1810,7 +1811,7 @@
     const size = window.DischordFiles.formatSize(m.file.size) + (large ? (typeof window.showSaveFilePicker === 'function'
       ? ' · you choose a save location when downloading' : ' · large file: uses browser memory here') : '');
     const sub = status.state === 'preparing' ? 'Choose where to save this file…' : saving ? 'Saving file…'
-      : active ? `Downloading ${Math.round(status.progress)}%` : status.state === 'error' ? status.message
+      : active ? downloadingNote(status) : status.state === 'error' ? status.message
       : unavailable ? 'Unavailable after reload. Attach it again.'
       : opens && !mine ? window.DischordFiles.formatSize(m.file.size) + ' · saved · click to ' + (media ? 'play' : 'open')
       : status.state === 'complete' ? status.message || 'Saved' : size;

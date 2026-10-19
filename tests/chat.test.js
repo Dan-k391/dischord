@@ -923,6 +923,24 @@ test('download progress displays the actual percentage reported by the transfer'
   assert.strictEqual(app.idbOpens, 0);
 });
 
+test('a download shows its current speed next to the percentage', () => {
+  const app = createApp();
+  const chunkSize = 12 * 1024;
+  const message = app.api.cleanMsg(app.message({ text: '', file: { id: 'file1', name: 'notes.txt', size: chunkSize * 4, type: 'text/plain' } }));
+  app.api.addMsg('testserver', message);
+  app.api.peers.testserver = new Map([['bobuuid', { uid: 'bob', rx: 1000 }]]);
+  app.api.fileTransfers.download('testserver', 'general', message.id);
+  const request = app.sent[0].packet;
+  const chunk = (index) => app.api.fileTransfers.onPacket('testserver', { ...request, t: 'f-chunk', index,
+    data: Buffer.alloc(chunkSize).toString('base64') }, 'bobuuid', 'bob');
+  chunk(0);
+  assert(app.api.fileCardContent('testserver', message).includes('Downloading 25%'));
+  assert(!app.api.fileCardContent('testserver', message).includes('B/s'), 'No speed before there is enough to measure');
+  app.advance(1000);
+  chunk(1);
+  assert(app.api.fileCardContent('testserver', message).includes('Downloading 50% · 12 KB/s'), 'One 12 KB chunk in the last second');
+});
+
 test('an owner opens their own selected file in the viewer without it leaving the app', async () => {
   const app = createApp();
   const { file, state } = fakeFile();
