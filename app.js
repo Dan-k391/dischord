@@ -254,7 +254,8 @@
     const maximum = preview ? window.DischordImages.MAX_PREVIEW : IMG_MAX;
     if (!Number.isInteger(i.n) || i.n < 1 || i.n > maximum) return undefined;
     const side = preview ? window.DischordImages.MAX_SIDE : 10000;
-    return { id: i.id, w: clampInt(i.w, 1, side), h: clampInt(i.h, 1, side), n: i.n, ...(preview ? { preview: 1 } : {}) };
+    const d = preview && Number.isFinite(i.d) && i.d > 0 ? clampInt(i.d, 1, 864000) : 0; // a video poster also carries the video's length
+    return { id: i.id, w: clampInt(i.w, 1, side), h: clampInt(i.h, 1, side), n: i.n, ...(preview ? { preview: 1 } : {}), ...(d ? { d } : {}) };
   }
   function cleanRe(re) {
     if (!re || typeof re !== 'object') return undefined;
@@ -275,7 +276,7 @@
     const text = typeof m.text === 'string' ? m.text : '';
     const file = window.DischordFiles.cleanMeta(m.file);
     const parsedImg = cleanImg(m.img);
-    const img = parsedImg && (file ? window.DischordImages.isImage(file) && parsedImg.preview === 1 : !parsedImg.preview) ? parsedImg : undefined;
+    const img = parsedImg && (file ? window.DischordImages.hasPreview(file) && parsedImg.preview === 1 : !parsedImg.preview) ? parsedImg : undefined;
     if ((!text && !img && !file) || text.length > 4000) return null;
     return { id: m.id, cid: m.cid, ts: Math.min(m.ts, now() + 60000), a, text, img, file, reply: cleanReply(m.reply), re: cleanRe(m.re), ed: m.ed ? 1 : undefined };
   }
@@ -778,7 +779,7 @@
       if (m.del) { list[i] = m; fileTransfers.release(sid, m.cid, m.id); cancelImageRequests(sid, m.cid, m.id); fileProviders.delete(sid + '/' + m.cid + '/' + m.id); saveMsgs(sid); return true; }
       let changed = false;
       if (m.ed && m.text !== old.text) { list[i] = { ...old, text: m.text, ed: 1 }; changed = true; }
-      if (!old.img && m.img && (!old.file || (m.file && m.file.id === old.file.id && window.DischordImages.isImage(old.file) && m.img.preview === 1))) {
+      if (!old.img && m.img && (!old.file || (m.file && m.file.id === old.file.id && window.DischordImages.hasPreview(old.file) && m.img.preview === 1))) {
         list[i] = { ...list[i], img: m.img };
         changed = true;
       }
@@ -857,7 +858,7 @@
       }
       addMsg(s.id, m);
       if (!send(s.id, { t: 'msg', m }) && s.dm) toast(`${c.name} is offline. They will get this when you are both online.`, 5000);
-      if (part.att && window.DischordImages.isImage(m.file)) prepareImagePreview(s.id, m.cid, m.id, part.att);
+      if (part.att && window.DischordImages.hasPreview(m.file)) prepareImagePreview(s.id, m.cid, m.id, part.att);
       sent++;
     }
     if (sent === parts.length) cancelReply();
@@ -1015,6 +1016,7 @@
     store.set('dlPurged', 1); store.del('downloads');
     try { navigator.storage.getDirectory().then((root) => root.removeEntry('downloads', { recursive: true })).catch(() => { }); } catch { }
   }
+  const playAfter = new Set(); // downloads started from a video's poster: they open in the player when done
   function holdFile(where, meta, source) {
     const m = (getMsgs(where.sid)[where.cid] || []).find((x) => x.id === where.mid);
     const key = dlKey(where.sid, where.cid, where.mid);
@@ -1022,13 +1024,15 @@
     held.set(key, { key, id: (m && m.file && m.file.id) || key, name: meta.name, type: meta.type || '', size: meta.size, from: m ? m.a.name : '', ...source });
     while (held.size > HELD_MAX) held.delete(held.keys().next().value);
     queueFileCardPaint(where.sid, where.cid, where.mid);
+    if (playAfter.delete(key)) openHeld(held.get(key));
   }
   // A finished download that arrived in memory (anything under 100 MB).
   function saveFileDownload(blob, name, where) {
     const m = where && (getMsgs(where.sid)[where.cid] || []).find((x) => x.id === where.mid);
     const type = (m && m.file && m.file.type) || blob.type || '';
     if (m && m.a.id === me.id && canView(name, type)) return openViewer({ id: m.file.id, name, type, size: blob.size, from: '' }, blob); // my own file: just open it
-    exportFile(blob, name);
+    // pressing play on a poster plays the video; saving a copy is the file card's download button
+    if (!(where && playAfter.has(dlKey(where.sid, where.cid, where.mid)) && canView(name, type))) exportFile(blob, name);
     if (where && m && m.a.id !== me.id && canView(name, type)) holdFile(where, { name, type, size: blob.size }, { blob });
   }
   // A large download is written piece by piece to a place the person picks, never held in memory.
@@ -1500,7 +1504,7 @@
     for (const channelId of cid ? [cid] : Object.keys(all)) {
       if (channel(server(sid), channelId)?.type !== 'text') continue;
       const m = (all[channelId] || []).find((m) => !m.del && m.img && m.img.id === id && (!mid || m.id === mid));
-      if (m && (m.file ? window.DischordImages.isImage(m.file) && m.img.preview === 1 : !m.img.preview)) return m;
+      if (m && (m.file ? window.DischordImages.hasPreview(m.file) && m.img.preview === 1 : !m.img.preview)) return m;
     }
     return null;
   }
@@ -1533,7 +1537,8 @@
     imagePreparing.add(key);
     try {
       if (!live()) return;
-      const preview = await window.DischordImages.createPreview(attachment.file);
+      const images = window.DischordImages;
+      const preview = await (images.isVideo(attachment.file) ? images.createVideoPoster(attachment.file) : images.createPreview(attachment.file));
       let current = live();
       if (!current) return;
       const img = cleanImg({ ...preview, id: rid(16) });
@@ -1769,8 +1774,14 @@
     const preview = url ? `<img src="${esc(url)}" alt="${esc(m.file ? m.file.name : 'Shared image')}">` :
       (m.img ? `<img data-img="${esc(m.img.id)}" data-img-sid="${esc(sid)}" data-img-cid="${esc(cid)}" data-img-mid="${esc(mid)}" alt="${esc(m.file ? m.file.name : 'Shared image')}" hidden>` : '') +
       `<span class="image-preview-status" role="status">${m.file ? 'Preview unavailable. You can download the original image.' : 'Loading image preview…'}</span>`;
-    modal(`<div class="lightbox">${preview}</div>
-      <div class="actions">${m.file ? `<div class="image-download" id="imageDownload" data-image-download="${esc(mid)}" data-image-sid="${esc(sid)}" data-image-cid="${esc(cid)}">${imageDownloadContent(sid, m)}</div>${m.img ? '<button class="btn" id="saveImagePreview">Save preview</button>' : ''}` : '<button class="btn" id="saveOpenImage">Download</button>'}<button class="btn primary" data-close>Close</button></div>`, () => {
+    const name = m.file ? m.file.name : 'Image', from = liveUser(m.a).name;
+    modal(`<header class="vw-head"><span class="vw-kind">${icon('image')}</span>
+        <div class="vw-title"><b title="${esc(name)}">${esc(name)}</b><span>${m.file ? window.DischordFiles.formatSize(m.file.size) + ' · ' : ''}from ${esc(from)}</span></div>
+        ${m.file ? `<span class="image-download" id="imageDownload" data-image-download="${esc(mid)}" data-image-sid="${esc(sid)}" data-image-cid="${esc(cid)}" data-image-compact="bar">${imageDownloadContent(sid, m, 'bar')}</span>` : `<button type="button" class="icon-btn" id="saveOpenImage" title="Download" aria-label="Download">${icon('download')}</button>`}
+        ${m.img && m.file ? `<button type="button" class="icon-btn" id="saveImagePreview" title="Save preview" aria-label="Save preview">${icon('image')}</button>` : ''}
+        ${m.img ? `<button type="button" class="icon-btn" id="copyOpenImage" title="Copy image" aria-label="Copy image">${icon('copy')}</button>` : ''}
+        <button type="button" class="icon-btn" data-close title="Close" aria-label="Close">${icon('x')}</button></header>
+      <div class="lightbox">${preview}</div>`, () => {
       if (m.file) $('imageDownload').onclick = (e) => {
         const button = e.target.closest('[data-file-download], [data-file-cancel]');
         if (!button || button.disabled) return;
@@ -1779,6 +1790,7 @@
       };
       if ($('saveImagePreview')) $('saveImagePreview').onclick = () => saveImagePreview(sid, cid, mid);
       if ($('saveOpenImage')) $('saveOpenImage').onclick = () => downloadImage(sid, cid, mid);
+      if ($('copyOpenImage')) $('copyOpenImage').onclick = () => copyImage(sid, cid, mid);
       zoomable($('modal').querySelector('.lightbox'));
     }, true, true);
     $('modal').classList.add('lb');
@@ -1795,11 +1807,25 @@
     const note = status.state === 'preparing' ? 'Choose where to save this image…' : saving ? 'Saving image…' : active ? downloadingNote(status)
       : status.state === 'error' ? status.message : status.state === 'complete' ? 'Saved' : unavailable ? 'Original unavailable after reload.' : '';
     const attrs = `data-file-${active ? 'cancel' : 'download'}="${esc(m.id)}" title="${esc(note || label)}" aria-label="${esc(label + ': ' + m.file.name)}"`;
+    if (compact === 'bar') return `${note ? `<small role="status">${esc(note)}</small>` : ''}<button type="button" class="icon-btn" ${attrs} ${saving || unavailable ? 'disabled' : ''}>${icon(active ? 'x' : 'download')}</button>`;
     if (compact === 'overlay') return `<span class="img-save" ${attrs} role="button" tabindex="${saving || unavailable ? -1 : 0}" aria-disabled="${saving || unavailable}">${icon(active ? 'x' : 'download')}</span>`;
     const button = `<button type="button" class="${compact ? 'icon-btn' : 'btn'}" ${attrs} ${saving || unavailable ? 'disabled' : ''}>${compact ? icon(active ? 'x' : 'download') : esc(active ? 'Cancel' : label)}</button>`;
     return compact ? button : `${note ? `<small role="status">${esc(note)}</small>` : ''}${button}`;
   }
 
+  // The play target over a video's poster: tap to download it (it then opens in the player), or to play it
+  // again once it is here. While it downloads, the poster shows the progress instead.
+  function videoPosterContent(sid, m) {
+    const status = fileTransfers.status(sid, m.cid, m.id);
+    const active = status.state === 'receiving' || status.state === 'preparing', saving = status.state === 'saving';
+    const length = m.img && m.img.d ? `<span class="vid-len">${esc(fmtClock(m.img.d))}</span>` : '';
+    if (active || saving) {
+      const note = saving ? 'Saving…' : status.state === 'preparing' ? 'Choose where to save…' : downloadingNote(status);
+      return `<span class="vid-busy" role="status">${esc(note)}</span><span class="vid-bar" style="--at:${Math.round(status.progress || 0)}%"></span>${length}`;
+    }
+    const unavailable = m.a.id === me.id && !fileTransfers.hasLocal(sid, m.cid, m.id);
+    return `<button type="button" class="vid-play" data-video-play="${esc(m.id)}" aria-label="${esc('Play ' + m.file.name)}" ${unavailable ? 'disabled' : ''}><span class="vid-icon">${icon('play')}</span></button>${length}`;
+  }
   function fileCardContent(sid, m) {
     const status = fileTransfers.status(sid, m.cid, m.id);
     const active = status.state === 'receiving' || status.state === 'preparing';
@@ -1825,6 +1851,14 @@
       const m = (getMsgs(sid)[cid] || []).find((x) => x.id === el.dataset.fileCard);
       if (m && !m.del && m.file) {
         const html = fileCardContent(sid, m);
+        if (el.innerHTML !== html) el.innerHTML = html;
+      }
+    });
+    document.querySelectorAll('[data-video-poster]').forEach((el) => {
+      if (el.dataset.videoPoster !== mid || sid !== cur.sid || cid !== cur.cid) return;
+      const m = (getMsgs(sid)[cid] || []).find((x) => x.id === mid);
+      if (m && !m.del && m.file) {
+        const html = videoPosterContent(sid, m);
         if (el.innerHTML !== html) el.innerHTML = html;
       }
     });
@@ -3849,7 +3883,10 @@
       const failedPreview = imageErrors.has(imageStateKey);
       const imgW = m.img ? Math.max(48, Math.round(m.img.w * Math.min(1, 550 / m.img.w, 350 / m.img.h))) : 0;
       const imageAction = m.file ? `<span data-image-download="${esc(m.id)}" data-image-sid="${esc(s.id)}" data-image-cid="${esc(m.cid)}" data-image-compact="overlay">${imageDownloadContent(s.id, m, 'overlay')}</span>` : `<span class="img-save" data-image-save="${esc(m.id)}" role="button" tabindex="0" title="Download image" aria-label="Download image">${icon('download')}</span>`;
-      const img = m.img ? `<button type="button" class="msg-img ${failedPreview ? '' : 'loading'}" style="aspect-ratio:${m.img.w}/${m.img.h};width:min(100%, ${imgW}px)" data-image-open="${esc(m.id)}" aria-label="Open image preview">
+      const poster = m.img && m.file && window.DischordImages.isVideo(m.file);
+      const img = poster ? `<div class="msg-img msg-video ${failedPreview ? '' : 'loading'}" style="aspect-ratio:${m.img.w}/${m.img.h};width:min(100%, ${imgW}px)">
+        <img data-img="${esc(m.img.id)}" data-img-sid="${esc(s.id)}" data-img-cid="${esc(m.cid)}" data-img-mid="${esc(m.id)}" decoding="async" alt="${esc(m.file.name)}"><span class="image-preview-status" role="status">${failedPreview ? 'Preview unavailable.' : 'Loading video preview…'}</span>
+        <span class="vid-ui" data-video-poster="${esc(m.id)}">${videoPosterContent(s.id, m)}</span></div>` : m.img ? `<button type="button" class="msg-img ${failedPreview ? '' : 'loading'}" style="aspect-ratio:${m.img.w}/${m.img.h};width:min(100%, ${imgW}px)" data-image-open="${esc(m.id)}" aria-label="Open image preview">
         <img data-img="${esc(m.img.id)}" data-img-sid="${esc(s.id)}" data-img-cid="${esc(m.cid)}" data-img-mid="${esc(m.id)}" decoding="async" alt="${esc(m.file ? m.file.name : 'Shared image')}"><span class="image-preview-status" role="status">${failedPreview ? 'Preview unavailable. Someone with it must be online.' : 'Loading image preview…'}</span>${imageAction}</button>` : m.file && window.DischordImages.isImage(m.file)
         ? `<div class="image-preview-placeholder" data-image-open="${esc(m.id)}">${icon('image')}<span role="status">${imagePreparing.has(imageStateKey) && !failedPreview ? 'Preparing image preview…' : 'Image preview unavailable.'}</span><span data-image-download="${esc(m.id)}" data-image-sid="${esc(s.id)}" data-image-cid="${esc(m.cid)}" data-image-compact="icon">${imageDownloadContent(s.id, m, 'icon')}</span></div>` : '';
       // Image originals download from their preview controls, without a duplicate file card.
@@ -3860,9 +3897,9 @@
       if (head) {
         h += `<div class="msg head ${mentionsMe(m.text) ? 'mentions-me' : ''}" data-mid="${esc(m.id)}"><div class="gutter" data-uid="${esc(m.a.id)}" data-ctx="user">${avatar(a)}</div><div class="body">${more}
           <div class="meta"><span class="author" data-uid="${esc(m.a.id)}" data-ctx="user" style="color:${esc(a.color)}">${esc(a.name)}</span><span class="time" title="${esc(new Date(m.ts).toLocaleString())}">${esc(fmtStamp(m.ts))}</span></div>
-          ${reply}${text}${file}${img}${re}</div>${acts}</div>`;
+          ${reply}${text}${poster ? img + file : file + img}${re}</div>${acts}</div>`;
       } else {
-        h += `<div class="msg ${mentionsMe(m.text) ? 'mentions-me' : ''}" data-mid="${esc(m.id)}"><div class="gutter time-side">${esc(fmtTime(m.ts))}</div><div class="body">${more}${reply}${text}${file}${img}${re}</div>${acts}</div>`;
+        h += `<div class="msg ${mentionsMe(m.text) ? 'mentions-me' : ''}" data-mid="${esc(m.id)}"><div class="gutter time-side">${esc(fmtTime(m.ts))}</div><div class="body">${more}${reply}${text}${poster ? img + file : file + img}${re}</div>${acts}</div>`;
       }
       prev = m;
     }
@@ -4761,11 +4798,19 @@
   $('messages').onclick = (e) => {
     const more = e.target.closest('[data-message-menu]');
     if (more) { e.stopPropagation(); return messageMenu(more.dataset.messageMenu, e.clientX, e.clientY); }
+    const play = e.target.closest('[data-video-play]');
+    if (play) {
+      e.stopPropagation();
+      if (play.disabled) return;
+      playAfter.add(dlKey(cur.sid, cur.cid, play.dataset.videoPlay));
+      return startDownload(cur.sid, cur.cid, play.dataset.videoPlay);
+    }
     const action = e.target.closest('[data-file-download], [data-file-cancel]');
     if (action) {
       e.stopPropagation();
       if (action.disabled || action.getAttribute('aria-disabled') === 'true') return;
       if (action.dataset.fileCancel) return fileTransfers.cancel(cur.sid, cur.cid, action.dataset.fileCancel);
+      playAfter.delete(dlKey(cur.sid, cur.cid, action.dataset.fileDownload)); // the card's button saves a copy
       return startDownload(cur.sid, cur.cid, action.dataset.fileDownload);
     }
     const save = e.target.closest('[data-image-save]');

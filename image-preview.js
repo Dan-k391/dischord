@@ -1,4 +1,5 @@
-/* Images are shared with chat as a high-quality preview that people can view and save. */
+/* Images are shared with chat as a high-quality preview that people can view and save. Videos get a poster:
+   one frame, small enough to load quickly on a phone, shown with a play button until someone downloads it. */
 (() => {
   'use strict';
 
@@ -14,6 +15,15 @@
     if (type) return /^image\//i.test(type);
     return typeof meta.name === 'string' && /\.(?:png|apng|jpe?g|jfif|gif|webp|avif|bmp|svg|ico|heic|heif|tiff?)$/i.test(meta.name);
   }
+
+  function isVideo(meta) {
+    if (!meta) return false;
+    const type = typeof meta.type === 'string' ? meta.type.trim() : '';
+    if (type) return /^video\//i.test(type);
+    return typeof meta.name === 'string' && /\.(?:mp4|m4v|webm|mov|mkv|ogv)$/i.test(meta.name);
+  }
+  // attachments that share a preview with the chat
+  const hasPreview = (meta) => isImage(meta) || isVideo(meta);
 
   function validURL(url) {
     if (typeof url !== 'string' || url.length > MAX_PREVIEW) return false;
@@ -101,5 +111,51 @@
     }
   }
 
-  window.DischordImages = Object.freeze({ isImage, createPreview, validURL, MAX_PREVIEW, MAX_SIDE });
+  const POSTER_SIDE = 1280; // a poster is a placeholder for a video, so it stays light for phones and slow links
+  // One frame from early in the video (not the very first, which is often black), plus its length.
+  async function createVideoPoster(file) {
+    if (!isVideo(file)) throw new Error('This attachment is not a video.');
+    // Browsers do not load video in a hidden page: wait until it is in front again (the person switched away
+    // right after attaching) instead of timing out with no poster.
+    while (typeof document !== 'undefined' && document.hidden) {
+      await new Promise((resolve) => document.addEventListener('visibilitychange', resolve, { once: true }));
+    }
+    const url = URL.createObjectURL(file), video = document.createElement('video');
+    let canvas = null;
+    const once = (events, ms) => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => done(reject, new Error('This video could not be read in time.')), ms);
+      const done = (fn, value) => { clearTimeout(timer); for (const e of events) video.removeEventListener(e, ok); video.removeEventListener('error', bad); fn(value); };
+      const ok = () => done(resolve), bad = () => done(reject, new Error('This video format cannot be previewed by your browser.'));
+      for (const e of events) video.addEventListener(e, ok);
+      video.addEventListener('error', bad);
+    });
+    try {
+      video.muted = true; video.playsInline = true; video.preload = 'auto';
+      const loaded = once(['loadeddata'], 15000);
+      video.src = url;
+      await loaded;
+      const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+      const at = duration ? Math.min(1.5, duration / 3) : 0;
+      if (at > 0) { const seeked = once(['seeked'], 10000); video.currentTime = at; await seeked; }
+      const width = video.videoWidth, height = video.videoHeight;
+      if (!width || !height) throw new Error('This video has no picture to preview.');
+      const scale = Math.min(1, POSTER_SIDE / Math.max(width, height));
+      canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(width * scale)); canvas.height = Math.max(1, Math.round(height * scale));
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('This browser cannot create video previews.');
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      for (const quality of [0.8, 0.6, 0.4]) {
+        const data = canvas.toDataURL('image/webp', quality);
+        if (validURL(data)) return { url: data, w: canvas.width, h: canvas.height, n: data.length, preview: 1, d: Math.round(duration) };
+      }
+      throw new Error('This browser could not create a bounded video preview.');
+    } finally {
+      try { video.removeAttribute('src'); video.load(); } catch { }
+      try { URL.revokeObjectURL(url); } catch { }
+      if (canvas) { try { canvas.width = 0; canvas.height = 0; } catch { } }
+    }
+  }
+
+  window.DischordImages = Object.freeze({ isImage, isVideo, hasPreview, createPreview, createVideoPoster, validURL, MAX_PREVIEW, MAX_SIDE });
 })();

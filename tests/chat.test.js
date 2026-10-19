@@ -923,6 +923,20 @@ test('download progress displays the actual percentage reported by the transfer'
   assert.strictEqual(app.idbOpens, 0);
 });
 
+test('videos keep a poster preview with their length; other files cannot carry one', () => {
+  const app = createApp();
+  const img = { id: 'poster1', w: 640, h: 360, n: 5000, preview: 1, d: 95 };
+  const video = app.api.cleanMsg(app.message({ text: '', file: { id: 'v1', name: 'clip.mp4', size: 9e6, type: 'video/mp4' }, img }));
+  assert.strictEqual(JSON.stringify(video.img), JSON.stringify({ id: 'poster1', w: 640, h: 360, n: 5000, preview: 1, d: 95 }), 'A video keeps its poster and length');
+  const doc = app.api.cleanMsg(app.message({ text: '', file: { id: 'd1', name: 'notes.pdf', size: 9e6, type: 'application/pdf' }, img }));
+  assert.strictEqual(doc.img, undefined, 'A document cannot carry a preview');
+  app.api.addMsg('testserver', video);
+  app.api.renderMessages(true);
+  const html = app.node('messages').innerHTML;
+  assert(html.includes('data-video-play="message1"') && html.includes('1:35'), 'The poster has a play target and the length');
+  assert(html.includes('data-file-card="message1"'), 'The file card stays for saving a copy');
+});
+
 test('a download shows its current speed next to the percentage', () => {
   const app = createApp();
   const chunkSize = 12 * 1024;
