@@ -507,7 +507,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .msg-video .vid-ui { position: absolute; inset: 0; }
 .vid-play { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; padding: 0; margin: 0; background: transparent; cursor: pointer; display: grid; place-items: center; }
 .vid-icon { width: 56px; height: 56px; border-radius: 50%; background: rgba(0,0,0,.6); color: #fff; display: grid; place-items: center; transition: transform .15s ease, background .15s ease; }
-.vid-icon .ico-svg { width: 26px; height: 26px; margin-left: 3px; }
+.vid-icon .ico-svg { width: 26px; height: 26px; } /* the play shape is already drawn optically centred */
 .vid-play:hover .vid-icon, .vid-play:focus-visible .vid-icon { background: var(--accent); transform: scale(1.06); }
 .vid-play:focus-visible { outline: none; }
 .vid-play:disabled { cursor: default; }
@@ -1038,7 +1038,7 @@ body.tile-out #tiles .tile { z-index: 1; }
 .player.playing .pl-disc { transform: scale(1.04); animation: pl-pulse 1.8s ease-out infinite; }
 @keyframes pl-pulse { 0% { box-shadow: 0 10px 30px rgba(0,0,0,.45), 0 0 0 0 rgba(88,101,242,.55); } 100% { box-shadow: 0 10px 30px rgba(0,0,0,.45), 0 0 0 22px rgba(88,101,242,0); } }
 .pl-art b { color: var(--text-strong); font-size: 16px; font-weight: 600; max-width: 520px; overflow-wrap: anywhere; }
-.pl-big { position: absolute; left: 50%; top: 50%; width: 72px; height: 72px; margin: -36px 0 0 -36px; border: 0; border-radius: 50%; display: grid; place-items: center; padding-left: 5px; color: #fff; background: rgba(17,18,20,.72); box-shadow: 0 6px 22px rgba(0,0,0,.5); backdrop-filter: blur(6px); transition: opacity .18s, transform .18s, background .15s; }
+.pl-big { position: absolute; left: 50%; top: 50%; width: 72px; height: 72px; margin: -36px 0 0 -36px; border: 0; border-radius: 50%; display: grid; place-items: center; padding: 0; color: #fff; background: rgba(17,18,20,.72); box-shadow: 0 6px 22px rgba(0,0,0,.5); backdrop-filter: blur(6px); transition: opacity .18s, transform .18s, background .15s; }
 .pl-big .ico-svg { width: 32px; height: 32px; }
 .pl-big:hover { background: var(--accent); transform: scale(1.06); }
 .player.playing .pl-big, .player.audio .pl-big { opacity: 0; pointer-events: none; transform: scale(.8); }
