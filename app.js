@@ -1068,8 +1068,8 @@
     toast('That file can no longer be read. Download it again.');
   }
 
-  // A picture that can be zoomed where it is shown: pinch or scroll to zoom at that point, drag to move
-  // around once zoomed, double-tap or double-click to zoom in and back out.
+  // A picture that can be zoomed where it is shown: pinch or Ctrl + scroll to zoom at that point, drag or scroll
+  // to move around once zoomed, double-tap or double-click to zoom in and back out.
   function zoomable(box) {
     const img = box && box.querySelector('img');
     if (!img || box._zoomable) return;
@@ -1092,7 +1092,14 @@
       apply();
     };
     const mid = (e) => ({ x: (e.touches[0].clientX + e.touches[1].clientX) / 2, y: (e.touches[0].clientY + e.touches[1].clientY) / 2, d: Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY) || 1 });
-    box.addEventListener('wheel', (e) => { e.preventDefault(); zoomAt(s * Math.pow(1.0018, -e.deltaY), e.clientX, e.clientY); }, { passive: false });
+    // the wheel scrolls: around the picture once it is zoomed in, otherwise the page as usual. Ctrl + wheel (and a
+    // trackpad pinch, which arrives as one) zooms.
+    box.addEventListener('wheel', (e) => {
+      if (e.ctrlKey || e.metaKey) { e.preventDefault(); zoomAt(s * Math.pow(1.0018, -e.deltaY), e.clientX, e.clientY); return; }
+      if (s <= 1) return;
+      e.preventDefault();
+      x -= e.shiftKey ? e.deltaY : e.deltaX; y -= e.shiftKey ? 0 : e.deltaY; apply();
+    }, { passive: false });
     box.addEventListener('dblclick', (e) => { e.preventDefault(); zoomAt(s > 1 ? 1 : 2.5, e.clientX, e.clientY); });
     box.addEventListener('touchstart', (e) => {
       moved = false;
