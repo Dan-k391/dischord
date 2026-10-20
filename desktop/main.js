@@ -1,6 +1,7 @@
 'use strict';
 
-const { app, BrowserWindow, Menu, WebContentsView, desktopCapturer, dialog, ipcMain, nativeTheme, session, shell } = require('electron');
+const { app, BrowserWindow, Menu, Tray, WebContentsView, desktopCapturer, dialog, ipcMain, nativeImage, nativeTheme, session, shell } = require('electron');
+const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 
@@ -17,6 +18,13 @@ let selectedCaptureFrames = new WeakMap();
 const grants = new Set();
 const permissionDialogs = new Map();
 let mainWindow = null;
+// Closing the window keeps Dischord running in the tray (calls, messages and notifications carry on);
+// Quit in the tray menu or the app menu ends it. The choice is remembered.
+let quitting = false, tray = null;
+const prefsFile = () => path.join(app.getPath('userData'), 'desktop-prefs.json');
+function readPrefs() { try { return JSON.parse(fs.readFileSync(prefsFile(), 'utf8')) || {}; } catch { return {}; } }
+function writePrefs(next) { try { fs.writeFileSync(prefsFile(), JSON.stringify({ ...readPrefs(), ...next })); } catch { } }
+const keepRunning = () => readPrefs().keepRunning !== false;
 let retryDestination = SITE;
 let queuedInvite = null;
 
@@ -429,12 +437,38 @@ function createWindow(destination) {
       deliverInvite(invite);
     }
   });
-  mainWindow.on('close', () => {
+  mainWindow.on('close', (event) => {
     for (const pending of [...pickers.values()]) finishCapture(pending);
+    if (quitting || !keepRunning() || !tray) return;
+    event.preventDefault(); // into the tray, not closed: a call or a download keeps going
+    mainWindow.hide();
+    if (!readPrefs().trayHintShown && process.platform === 'win32') {
+      writePrefs({ trayHintShown: true });
+      try { tray.displayBalloon({ iconType: 'info', title: 'Dischord is still running', content: 'It keeps going in the tray. Click the icon to open it again, or right-click it to quit.' }); } catch { }
+    }
   });
   mainWindow.on('closed', () => { mainWindow = null; grants.clear(); selectedCaptureFrames = new WeakMap(); });
   mainWindow.once('ready-to-show', () => mainWindow?.show());
   mainWindow.loadURL(destination.href).catch(() => {});
+}
+
+function showWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) { createWindow(SITE); return; }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show(); mainWindow.focus();
+}
+function createTray() {
+  const image = nativeImage.createFromPath(path.join(__dirname, 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'));
+  tray = new Tray(image.isEmpty() ? image : image.resize({ width: 16, height: 16 }));
+  tray.setToolTip('Dischord');
+  const menu = () => Menu.buildFromTemplate([
+    { label: 'Open Dischord', click: showWindow },
+    { label: 'Keep running when closed', type: 'checkbox', checked: keepRunning(), click: (item) => { writePrefs({ keepRunning: item.checked }); tray.setContextMenu(menu()); } },
+    { type: 'separator' },
+    { label: 'Quit Dischord', click: () => app.quit() }
+  ]);
+  tray.setContextMenu(menu());
+  tray.on('click', showWindow);
 }
 
 function loadHosted(destination) {
@@ -481,8 +515,10 @@ if (!app.requestSingleInstanceLock()) {
       { label: 'View', submenu: [{ role: 'reload' }, { role: 'forceReload' }, { type: 'separator' },
         { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' }, { role: 'togglefullscreen' }] }
     ]));
+    createTray();
     createWindow(destination);
   });
+  app.on('before-quit', () => { quitting = true; });
   app.on('activate', () => { if (!mainWindow) createWindow(SITE); });
   app.on('window-all-closed', () => app.quit());
 }

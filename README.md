@@ -64,6 +64,8 @@ Download the [portable Dischord.exe](https://github.com/Dan-k391/dischord/releas
 
 It loads [the live Dischord website](https://dan-k391.github.io/dischord/) in a native desktop window. Chat, voice, camera, screen sharing, configurable FPS, audio boosts, replies, previews and explicit file downloads use the same web app and VDO.Ninja rooms. Website updates arrive when you open or refresh it. Join the same server invite as your web friends to share channels and communicate.
 
+Closing the window keeps Dischord running in the system tray, so calls, messages and notifications carry on. Click the tray icon to open it again, or right-click it to quit. Untick **Keep running when closed** in that menu to make the close button quit instead.
+
 The desktop app keeps its own persistent profile, settings and image-preview cache. Set your profile and join your existing server invites on first use; browser identities and saved local history are not automatically imported. Original files remain unpersisted offers, so keep the sending window open while recipients download them. An internet connection is required.
 
 Screen sharing uses an explicit screen/window thumbnail picker shown as an overlay **inside the current app window**. It does not open a separate Windows window. Chrome/Edge's floating sharing banner is not part of this client. Sharing remains visible in Dischord and stops through its Screen button or when you close the app. The web version's browser sharing banner is controlled by the browser.
