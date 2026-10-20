@@ -39,7 +39,7 @@ jobs:
       - name: Prepare static site
         run: |
           mkdir _site
-          cp index.html app.js file-transfer.js image-preview.js screen-quality.js style.css icon.svg _site/
+          cp index.html app.js file-transfer.js image-preview.js screen-quality.js echo-cancel-worklet.js style.css icon.svg _site/
           cp -r rnnoise _site/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

@@ -352,6 +352,20 @@ test('a screen share asks VDO for the screen only once the echo filter is in pla
   assert.strictEqual(screen.messages.filter((m) => m.function === 'publishScreen').length, 1, 'The fallback does not start it again');
 });
 
+test('only the Windows app asks the share frame to take the call out itself where the system cannot', () => {
+  const config = (app) => {
+    app.join(); app.api.toggleShare(); app.clock.advance(200);
+    const patch = app.api.voice.ssFrame.messages.find((m) => m.function === 'eval' && /restrictOwnAudio/.test(m.value));
+    return JSON.parse(patch.value.slice(patch.value.lastIndexOf(')(') + 2, -2));
+  };
+  const web = config(createApp());
+  assert.strictEqual(web.cancel, false, 'The browser shares as it is');
+  const desktop = createApp(); desktop.document.documentElement.classList.add('desktop-client');
+  const app = config(desktop);
+  assert.strictEqual(app.cancel, true);
+  assert(/echo-cancel-worklet\.js$/.test(app.worklet), 'It points at the deployed canceller');
+});
+
 test('a screen share still starts when the echo filter cannot be installed', () => {
   const app = createApp();
   app.join();

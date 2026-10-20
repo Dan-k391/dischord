@@ -2222,7 +2222,7 @@
   // The publisher frame is another origin, so the request is added through VDO's eval API, repeated
   // until the frame confirms it. Only then is VDO told to ask for the screen (see startShareCapture):
   // with VDO's own autostart its request usually went out first (13 of 20 starts in Edge), unfiltered.
-  function shareOwnAudioPatch() {
+  function shareOwnAudioPatch(config) {
     if (window.__dischordOwnAudio) return;
     var media = navigator.mediaDevices;
     if (!media || typeof media.getDisplayMedia !== 'function') return;
@@ -2235,8 +2235,90 @@
           constraints = Object.assign({}, constraints, { audio: audio });
         }
       } catch (_) { }
-      return original(constraints);
+      return original(constraints).then(withoutCallAudio);
     };
+    // Windows 10 cannot leave one program out of the computer's sound, so the browser hands back the call
+    // along with everything else. Then the call is taken out here: an adaptive echo canceller learns how what
+    // this app plays reaches the capture and subtracts it, leaving games and videos as they are.
+    function withoutCallAudio(stream) {
+      try {
+        var track = stream && stream.getAudioTracks()[0];
+        var settings = track && track.getSettings ? track.getSettings() : {};
+        if (!config || !config.cancel || !track || settings.deviceId !== 'loopback' || settings.restrictOwnAudio === true) return stream;
+        return cancelCall(stream, track).catch(function () { return stream; });
+      } catch (_) { return stream; }
+    }
+    // the call frame (same origin as this one) and what it is playing, at the volume it plays it
+    function callFrames() {
+      var out = [];
+      try { for (var i = 0; i < window.parent.frames.length; i++) { var w = window.parent.frames[i]; if (w === window) continue; try { if (w.session && w.session.rpcs && /[?&]audiogain=/.test(w.location.href)) out.push(w); } catch (_) { } } } catch (_) { }
+      return out;
+    }
+    async function cancelCall(stream, track) {
+      var ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+      await ctx.audioWorklet.addModule(config.worklet);
+      var near = ctx.createMediaStreamSource(new MediaStream([track]));
+      var refs = ctx.createGain();
+      var node = new AudioWorkletNode(ctx, 'dischord-echo-cancel', { numberOfInputs: 2, numberOfOutputs: 1, outputChannelCount: [2] });
+      // The echo reaches the capture some time after the call plays it (about 150 ms measured; it varies by PC).
+      // That delay is measured below and taken out in front of the canceller, which then covers what is left.
+      var nearLate = ctx.createDelay(1), refLate = ctx.createDelay(1);
+      near.connect(nearLate).connect(node, 0, 0); refs.connect(refLate).connect(node, 0, 1);
+      var probe = ctx.createScriptProcessor(4096, 2, 1), both = ctx.createChannelMerger(2), hush = ctx.createGain(); hush.gain.value = 0;
+      near.connect(both, 0, 0); refs.connect(both, 0, 1); both.connect(probe); probe.connect(hush).connect(ctx.destination);
+      var state = window.__dischordEcho = { lag: null, realigned: 0, resets: 0 }; // for diagnostics
+      node.port.onmessage = function (e) { if (e.data === 'reset') state.resets++; };
+      var SAMPLES = 12000, STEP = 8, cap = new Float32Array(SAMPLES), ref = new Float32Array(SAMPLES), filled = 0, rest = 0, lagNow = null;
+      probe.onaudioprocess = function (e) {
+        if (rest > 0) { rest--; return; }
+        var a = e.inputBuffer.getChannelData(0), b = e.inputBuffer.getChannelData(1);
+        for (var i = 0; i < a.length && filled < SAMPLES; i += STEP) { cap[filled] = a[i]; ref[filled] = b[i]; filled++; }
+        if (filled < SAMPLES) return;
+        filled = 0; rest = 230; // measure about every 20 s
+        var energy = 0; for (var j = 0; j < SAMPLES; j++) energy += ref[j] * ref[j];
+        if (energy / SAMPLES < 1e-7) { rest = 20; return; } // nobody talking: try again shortly
+        // cross-correlation at 6 kHz over -100 .. +600 ms (positive: the echo comes after the call)
+        var lo = -600, hi = 3600, n = SAMPLES - hi - 600, best = 0, bestLag = 0, capE = 0, refE = 0;
+        for (var lag = lo; lag <= hi; lag++) { var sum = 0; for (var k = 600 + hi; k < 600 + hi + n - 600; k++) sum += cap[k] * ref[k - lag]; if (Math.abs(sum) > Math.abs(best)) { best = sum; bestLag = lag; } }
+        for (var m = 600 + hi; m < 600 + hi + n - 600; m++) { capE += cap[m] * cap[m]; refE += ref[m - bestLag] * ref[m - bestLag]; }
+        if (Math.abs(best) / Math.sqrt(capE * refE + 1e-12) < 0.2) return; // not a clear echo: keep what we have
+        var ms = bestLag * STEP / 48;
+        if (lagNow !== null && Math.abs(ms - lagNow) < 8) return;
+        lagNow = ms; state.lag = Math.round(ms); state.realigned++;
+        // leave ~30 ms of slack on the early side; the filter spans 170 ms after that
+        refLate.delayTime.value = Math.max(0, (ms - 30) / 1000);
+        nearLate.delayTime.value = Math.max(0, (30 - ms) / 1000);
+        node.port.postMessage('reset');
+      };
+      var out = ctx.createMediaStreamDestination(); out.channelCount = 2; node.connect(out);
+      var taps = new Map();
+      var refresh = function () {
+        var seen = new Set();
+        callFrames().forEach(function (w) {
+          for (var id in w.session.rpcs) {
+            var p = w.session.rpcs[id], el = p && p.videoElement, src = el && el.srcObject;
+            var t = src && src.getAudioTracks && src.getAudioTracks()[0];
+            if (!t || t.readyState !== 'live') continue;
+            seen.add(t.id);
+            var tap = taps.get(t.id);
+            if (!tap) { tap = { src: ctx.createMediaStreamSource(new MediaStream([t])), gain: ctx.createGain() }; tap.src.connect(tap.gain).connect(refs); taps.set(t.id, tap); }
+            tap.gain.gain.value = el.muted || el.paused ? 0 : el.volume;
+          }
+        });
+        taps.forEach(function (tap, id) { if (!seen.has(id)) { try { tap.src.disconnect(); tap.gain.disconnect(); } catch (_) { } taps.delete(id); } });
+      };
+      refresh();
+      var timer = setInterval(refresh, 1000);
+      var cleaned = out.stream.getAudioTracks()[0];
+      var done = false;
+      var stop = function () { if (done) return; done = true; clearInterval(timer); probe.onaudioprocess = null; try { ctx.close(); } catch (_) { } try { track.stop(); } catch (_) { } };
+      var stopTrack = cleaned.stop.bind(cleaned);
+      cleaned.stop = function () { stopTrack(); stop(); };
+      track.addEventListener('ended', function () { try { stopTrack(); } catch (_) { } stop(); });
+      stream.getVideoTracks().forEach(function (v) { v.addEventListener('ended', stop); });
+      try { window.parent.postMessage({ dischordOwnAudio: 'cancelling' }, '*'); } catch (_) { }
+      return new MediaStream(stream.getVideoTracks().concat([cleaned]));
+    }
     window.__dischordOwnAudio = true;
     try { window.parent.postMessage({ dischordOwnAudio: 'ready' }, '*'); } catch (_) { }
   }
@@ -2248,7 +2330,9 @@
     try { frame.contentWindow.postMessage({ function: 'publishScreen' }, voice.ssQuality.origin); } catch { }
   }
   function protectShareAudio(frame, origin) {
-    const code = '(' + shareOwnAudioPatch.toString() + ')();';
+    // the Windows app takes the call out itself where the system cannot (Windows 10); the browser shares as it is
+    const config = { cancel: document.documentElement.classList.contains('desktop-client'), worklet: new URL('echo-cancel-worklet.js', location.href).href };
+    const code = '(' + shareOwnAudioPatch.toString() + ')(' + JSON.stringify(config) + ');';
     let tries = 0;
     const timer = setInterval(() => {
       if (!voice || voice.ssFrame !== frame || frame.dataset.ownAudio === 'ready' || ++tries > 250) return clearInterval(timer);
@@ -2522,6 +2606,7 @@
     }
     if (voice && voice.ssFrame && e.source === voice.ssFrame.contentWindow) {
       if (d.dischordOwnAudio === 'ready') { voice.ssFrame.dataset.ownAudio = 'ready'; startShareCapture(voice.ssFrame); return; }
+      if (d.dischordOwnAudio === 'cancelling') { voice.ssFrame.dataset.cancelling = '1'; return; } // the call is being taken out of its sound
       const state = voice.ssQuality;
       if (d.dischordScreenQuality && state && state.pending && d.dischordScreenQuality.requestId === state.pending.requestId && e.origin === state.origin) {
         finishShareQuality(state, d.dischordScreenQuality);
