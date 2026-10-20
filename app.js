@@ -2262,27 +2262,48 @@
       var node = new AudioWorkletNode(ctx, 'dischord-echo-cancel', { numberOfInputs: 2, numberOfOutputs: 1, outputChannelCount: [2] });
       // The echo reaches the capture some time after the call plays it (about 150 ms measured; it varies by PC).
       // That delay is measured below and taken out in front of the canceller, which then covers what is left.
-      var nearLate = ctx.createDelay(1), refLate = ctx.createDelay(1);
+      var nearLate = ctx.createDelay(2), refLate = ctx.createDelay(2);
       near.connect(nearLate).connect(node, 0, 0); refs.connect(refLate).connect(node, 0, 1);
       var probe = ctx.createScriptProcessor(4096, 2, 1), both = ctx.createChannelMerger(2), hush = ctx.createGain(); hush.gain.value = 0;
       near.connect(both, 0, 0); refs.connect(both, 0, 1); both.connect(probe); probe.connect(hush).connect(ctx.destination);
       var state = window.__dischordEcho = { lag: null, realigned: 0, resets: 0 }; // for diagnostics
       node.port.onmessage = function (e) { if (e.data === 'reset') state.resets++; };
-      var SAMPLES = 12000, STEP = 8, cap = new Float32Array(SAMPLES), ref = new Float32Array(SAMPLES), filled = 0, rest = 0, lagNow = null;
+      var NF = 32768; // 5.4 s at 6 kHz: room for 3 s of samples plus the longest delay, without wrap-around
+      var fftc = function (re, im, inverse) {
+        for (var i = 1, j = 0; i < NF; i++) { var bit = NF >> 1; for (; j & bit; bit >>= 1) j ^= bit; j ^= bit; if (i < j) { var t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; } }
+        for (var size = 2; size <= NF; size <<= 1) {
+          var ang = (inverse ? 2 : -2) * Math.PI / size, wr0 = Math.cos(ang), wi0 = Math.sin(ang);
+          for (var start = 0; start < NF; start += size) {
+            var wr = 1, wi = 0;
+            for (var k = 0; k < size / 2; k++) {
+              var a = start + k, b = a + size / 2, tr = re[b] * wr - im[b] * wi, ti = re[b] * wi + im[b] * wr;
+              re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+              var nwr = wr * wr0 - wi * wi0; wi = wr * wi0 + wi * wr0; wr = nwr;
+            }
+          }
+        }
+      };
+      var SAMPLES = 18000, STEP = 8, cap = new Float32Array(SAMPLES), ref = new Float32Array(SAMPLES), filled = 0, rest = 0, lagNow = null;
       probe.onaudioprocess = function (e) {
         if (rest > 0) { rest--; return; }
         var a = e.inputBuffer.getChannelData(0), b = e.inputBuffer.getChannelData(1);
         for (var i = 0; i < a.length && filled < SAMPLES; i += STEP) { cap[filled] = a[i]; ref[filled] = b[i]; filled++; }
         if (filled < SAMPLES) return;
-        filled = 0; rest = 230; // measure about every 20 s
+        filled = 0; rest = 20; // a failed measurement tries again in about 2 s
         var energy = 0; for (var j = 0; j < SAMPLES; j++) energy += ref[j] * ref[j];
         if (energy / SAMPLES < 1e-7) { rest = 20; return; } // nobody talking: try again shortly
-        // cross-correlation at 6 kHz over -100 .. +600 ms (positive: the echo comes after the call)
-        var lo = -600, hi = 3600, n = SAMPLES - hi - 600, best = 0, bestLag = 0, capE = 0, refE = 0;
-        for (var lag = lo; lag <= hi; lag++) { var sum = 0; for (var k = 600 + hi; k < 600 + hi + n - 600; k++) sum += cap[k] * ref[k - lag]; if (Math.abs(sum) > Math.abs(best)) { best = sum; bestLag = lag; } }
-        for (var m = 600 + hi; m < 600 + hi + n - 600; m++) { capE += cap[m] * cap[m]; refE += ref[m - bestLag] * ref[m - bestLag]; }
-        if (Math.abs(best) / Math.sqrt(capE * refE + 1e-12) < 0.2) return; // not a clear echo: keep what we have
+        // GCC-PHAT over -100 .. +1500 ms (positive: the echo comes after the call; 600 ms and more seen on a
+        // Windows 10 PC). Phase-only correlation gives every frequency the same say, so loud game or video sound
+        // in the capture cannot pull it to a wrong delay the way plain correlation does.
+        var ar = new Float32Array(NF), ai = new Float32Array(NF), br = new Float32Array(NF), bi = new Float32Array(NF);
+        ar.set(cap); br.set(ref); fftc(ar, ai, false); fftc(br, bi, false);
+        for (var f = 0; f < NF; f++) { var cr = ar[f] * br[f] + ai[f] * bi[f], ci = ai[f] * br[f] - ar[f] * bi[f], mag = Math.sqrt(cr * cr + ci * ci) + 1e-20; ar[f] = cr / mag; ai[f] = ci / mag; }
+        fftc(ar, ai, true);
+        var lo = -600, hi = 9000, best = 0, bestLag = 0, sum = 0, count = 0;
+        for (var lag = lo; lag <= hi; lag++) { var v = Math.abs(ar[(lag + NF) % NF]); sum += v; count++; if (v > best) { best = v; bestLag = lag; } }
+        if (best < 8 * sum / count) return; // no clear echo (nobody talking, or a single tone): keep what we have
         var ms = bestLag * STEP / 48;
+        rest = 230; // measured: check again in about 20 s
         if (lagNow !== null && Math.abs(ms - lagNow) < 8) return;
         lagNow = ms; state.lag = Math.round(ms); state.realigned++;
         // leave ~30 ms of slack on the early side; the filter spans 170 ms after that
