@@ -4,7 +4,10 @@
    learns how the reference reaches the capture (a fixed digital path: playback buffers, mixing, capture) and
    subtracts its estimate. 32 partitions of 256 samples cover about 170 ms of delay at 48 kHz. */
 const B = 256, N = 512, P = 32;
-const MU = 0.35 / P; // step size: converges in a few seconds of call audio, stays steady under other sound
+const MU = 0.35; // step size: converges in a few seconds of call audio
+// Where the capture holds much more than the call could explain (a game, a video, music), learning slows down in
+// that frequency, or the filter would chase the other sound and turn it into a robotic copy of the voice.
+const KAPPA = 3;
 
 // in-place radix-2 FFT on separate real / imaginary arrays (N = 512)
 const LOG = Math.log2(N), REV = new Uint16Array(N), COS = new Float32Array(N / 2), SIN = new Float32Array(N / 2);
@@ -30,9 +33,10 @@ class Channel {
   constructor() {
     this.wr = Array.from({ length: P }, () => new Float32Array(N));
     this.wi = Array.from({ length: P }, () => new Float32Array(N));
-    this.bad = 0;
+    this.nearSum = 0; this.errSum = 0; this.blocks = 0; // what came in and went out over the last ~0.35 s
+    this.epow = new Float32Array(N); // smoothed power of what is left, per bin
   }
-  reset() { for (let p = 0; p < P; p++) { this.wr[p].fill(0); this.wi[p].fill(0); } this.bad = 0; }
+  reset() { for (let p = 0; p < P; p++) { this.wr[p].fill(0); this.wi[p].fill(0); } this.epow.fill(0); this.nearSum = 0; this.errSum = 0; this.blocks = 0; }
 }
 
 class EchoCancel extends AudioWorkletProcessor {
@@ -42,12 +46,12 @@ class EchoCancel extends AudioWorkletProcessor {
     this.prevRef = new Float32Array(B);
     this.xr = Array.from({ length: P }, () => new Float32Array(N)); // reference spectra, newest at this.k
     this.xi = Array.from({ length: P }, () => new Float32Array(N));
-    this.pow = new Float32Array(N); this.k = 0;
+    this.pow = new Float32Array(N); this.k = 0; // per bin: reference power summed over all P partitions
     this.ch = [new Channel(), new Channel()];
     this.out = [new Float32Array(B), new Float32Array(B)]; this.outAt = B; // one block of latency
     this.re = new Float32Array(N); this.im = new Float32Array(N);
-    this.er = new Float32Array(N); this.ei = new Float32Array(N);
-    this.blocks = 0;
+    this.er = new Float32Array(N); this.ei = new Float32Array(N); this.err = new Float32Array(B);
+    this.blocks = 0; this.refPeak = 0;
     // the main thread re-aligns the reference when the echo delay changes; what was learned no longer fits
     this.port.onmessage = (e) => { if (e.data === 'reset') for (const ch of this.ch) ch.reset(); };
   }
@@ -56,11 +60,21 @@ class EchoCancel extends AudioWorkletProcessor {
     // reference spectrum of [previous block, this block]
     re.set(this.prevRef, 0); re.set(this.ref, B); im.fill(0); this.prevRef.set(this.ref);
     fft(re, im, false);
+    // The step is normalised by the power of everything the filter spans, not just this block: speech stops
+    // and starts, and a quiet block after a loud word would otherwise make a huge step and blow the filter up.
+    const oldR = this.xr[k], oldI = this.xi[k];
+    for (let i = 0; i < N; i++) this.pow[i] = Math.max(0, this.pow[i] + re[i] * re[i] + im[i] * im[i] - oldR[i] * oldR[i] - oldI[i] * oldI[i]);
     this.xr[k].set(re); this.xi[k].set(im);
-    let refEnergy = 0; for (let i = 0; i < B; i++) refEnergy += this.ref[i] * this.ref[i];
-    const adapt = refEnergy / B > 1e-8; // nothing to learn from silence
-    for (let i = 0; i < N; i++) this.pow[i] = 0.85 * this.pow[i] + 0.15 * (re[i] * re[i] + im[i] * im[i]);
-    let floor = 0; for (let i = 0; i < N; i++) floor += this.pow[i]; floor = floor / N * 0.01 + 1e-10; // keeps quiet bins from blowing up
+    if (this.blocks % P === 0) { // recount now and then, so rounding in the running sum cannot build up
+      this.pow.fill(0);
+      for (let p = 0; p < P; p++) { const xr = this.xr[p], xi = this.xi[p]; for (let i = 0; i < N; i++) this.pow[i] += xr[i] * xr[i] + xi[i] * xi[i]; }
+    }
+    let refEnergy = 0; for (let i = 0; i < B; i++) refEnergy += this.ref[i] * this.ref[i]; refEnergy /= B;
+    // Learn only while the call is clearly playing: in the pauses between words the reference is nearly silent,
+    // and a step scaled up to match it would let any other sound (a game, a video) drag the filter off course.
+    this.refPeak = Math.max(refEnergy, this.refPeak * 0.9995); // decays over about 10 s
+    const adapt = refEnergy > 1e-6 && refEnergy > this.refPeak * 1e-3; // above -60 dBFS and within 30 dB of recent speech
+    let floor = 0; for (let i = 0; i < N; i++) floor += this.pow[i]; floor = floor / N * 0.01 + P * N * 1e-6; // keeps quiet bins from blowing up
     const constrain = this.blocks++ % P; // one partition's gradient constraint per block
     for (let c = 0; c < 2; c++) {
       const ch = this.ch[c], d = this.near[c], er = this.er, ei = this.ei;
@@ -71,15 +85,24 @@ class EchoCancel extends AudioWorkletProcessor {
         for (let i = 0; i < N; i++) { er[i] += wr[i] * xr[i] - wi[i] * xi[i]; ei[i] += wr[i] * xi[i] + wi[i] * xr[i]; }
       }
       fft(er, ei, true);
-      const o = this.out[c];
+      const o = this.out[c], err = this.err;
       let nearEnergy = 0, errEnergy = 0;
-      for (let i = 0; i < B; i++) { const e = d[i] - er[B + i]; o[i] = e; nearEnergy += d[i] * d[i]; errEnergy += e * e; }
-      // a filter that adds energy instead of removing it has gone wrong: start over, pass the sound through
-      if (errEnergy > 2 * nearEnergy + 1e-9) { if (++ch.bad > 8) { ch.reset(); o.set(d); this.port.postMessage('reset'); } } else ch.bad = 0;
+      for (let i = 0; i < B; i++) { const e = d[i] - er[B + i]; err[i] = e; o[i] = e; nearEnergy += d[i] * d[i]; errEnergy += e * e; }
+      // A block the filter made clearly louder goes out as captured, so there are no bursts. (That happens for a
+      // moment when a word starts: the echo has not arrived yet.) Only a filter that has made the sound louder
+      // over a third of a second has gone wrong and starts over; resetting on single blocks wiped out what it
+      // had learned at every word.
+      if (errEnergy > 2 * nearEnergy + 1e-9) o.set(d);
+      ch.nearSum += nearEnergy; ch.errSum += errEnergy;
+      if (++ch.blocks === 64) {
+        if (ch.errSum > 2 * ch.nearSum + 64 * B * 1e-6) { ch.reset(); this.port.postMessage('reset'); }
+        ch.nearSum = 0; ch.errSum = 0; ch.blocks = 0;
+      }
       if (!adapt) continue;
-      er.fill(0); ei.fill(0); for (let i = 0; i < B; i++) er[B + i] = o[i];
+      er.fill(0); ei.fill(0); for (let i = 0; i < B; i++) er[B + i] = err[i];
       fft(er, ei, false);
-      for (let i = 0; i < N; i++) { const g = MU / (this.pow[i] + floor); er[i] *= g; ei[i] *= g; }
+      const epow = ch.epow;
+      for (let i = 0; i < N; i++) { epow[i] = 0.7 * epow[i] + 0.3 * (er[i] * er[i] + ei[i] * ei[i]); const g = MU / (this.pow[i] + KAPPA * P * epow[i] + floor); er[i] *= g; ei[i] *= g; }
       for (let p = 0; p < P; p++) {
         const q = (k - p + P) % P, xr = this.xr[q], xi = this.xi[q], wr = ch.wr[p], wi = ch.wi[p];
         // W_p += mu * conj(X) * E

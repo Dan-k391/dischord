@@ -363,7 +363,45 @@ test('only the Windows app asks the share frame to take the call out itself wher
   const desktop = createApp(); desktop.document.documentElement.classList.add('desktop-client');
   const app = config(desktop);
   assert.strictEqual(app.cancel, true);
-  assert(/echo-cancel-worklet\.js$/.test(app.worklet), 'It points at the deployed canceller');
+  assert(/echo-cancel-worklet\.js(\?v=\d+)?$/.test(app.worklet), 'It points at the deployed canceller');
+});
+
+test('the echo canceller takes out stop-start speech under other sound without blowing up', () => {
+  // The worklet runs here as it does in the browser, 128 samples at a time. The "call" is speech-like: bursts of
+  // voice-band sound with pauses between them, which is what made the first version run away (a quiet block
+  // after a loud word gave a huge step). A loud tone plays alongside, as a game or a video would.
+  let Processor = null, resets = 0;
+  const sandbox = {
+    Math, Float32Array, Uint16Array, Array,
+    AudioWorkletProcessor: class { constructor() { this.port = { postMessage: (m) => { if (m === 'reset') resets++; }, onmessage: null }; } },
+    registerProcessor: (_name, c) => { Processor = c; }
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'echo-cancel-worklet.js'), 'utf8'), sandbox);
+  const SR = 48000, T = SR * 16, ref = new Float32Array(T), echo = new Float32Array(T), other = new Float32Array(T);
+  let seed = 7; const rand = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 2 ** 32) * 2 - 1;
+  let lp = 0;
+  for (let i = 0; i < T; i++) {
+    const word = Math.sin(Math.PI * ((i / (SR * 0.45)) % 1)) * (Math.floor(i / (SR * 0.45)) % 3 === 2 ? 0 : 1); // words and pauses
+    lp = 0.7 * lp + 0.3 * rand(); ref[i] = 0.5 * word * (lp + 0.6 * Math.sin(2 * Math.PI * 180 * i / SR));
+    other[i] = 0.2 * Math.sin(2 * Math.PI * 1300 * i / SR);
+  }
+  const D = Math.round(0.03 * SR); // the delay the main thread leaves in front of the filter
+  for (let i = D + 3; i < T; i++) echo[i] = 0.15 * ref[i - D] + 0.05 * ref[i - D - 3];
+  const p = new Processor(), out = new Float32Array(T);
+  for (let t = 0; t + 128 <= T; t += 128) {
+    const near = new Float32Array(128); for (let i = 0; i < 128; i++) near[i] = echo[t + i] + other[t + i];
+    const o = [new Float32Array(128), new Float32Array(128)];
+    p.process([[near, near], [ref.subarray(t, t + 128)]], [o]);
+    out.set(o[0], t);
+  }
+  const energy = (from, to, f) => { let e = 0; for (let i = from; i < to; i++) e += f(i) ** 2; return e; };
+  const late = 255; // the worklet's one block of latency
+  let worst = 0;
+  for (let s = 0; s + SR / 10 < T - late; s += SR / 10) worst = Math.max(worst, energy(s, s + SR / 10, (i) => out[i + late]) / energy(s, s + SR / 10, (i) => echo[i] + other[i]));
+  assert(worst < 1.5, 'Never much louder than what was captured (worst 100 ms: ' + worst.toFixed(2) + 'x)');
+  const left = energy(T - 4 * SR, T - late, (i) => out[i + late] - other[i]) / energy(T - 4 * SR, T - late, (i) => echo[i]);
+  assert(10 * Math.log10(left) < -6, 'The call is at least 6 dB quieter after the canceller (' + (10 * Math.log10(left)).toFixed(1) + ' dB)');
+  assert.strictEqual(resets, 0, 'The filter does not throw away what it learned');
 });
 
 test('a screen share still starts when the echo filter cannot be installed', () => {
