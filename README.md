@@ -6,7 +6,7 @@ A Discord-style chat app built on [VDO.Ninja](https://vdo.ninja). No accounts, n
 - **Servers** with text and voice channels, shareable **invite links**
 - **Text chat** sent peer-to-peer: Markdown-ish formatting, edit/delete, typing indicators, unread badges, desktop notifications and a soft new-message sound (switch it off in Settings)
 - **Replies**: reply from message actions or the right-click menu; click the quote to jump to the original message
-- **Files**: attach, paste or drag & drop up to four files with no app-imposed file size limit. Non-image contents transfer directly from the sender only after **Download**, with progress and cancellation
+- **Files**: attach, paste or drag & drop up to four files with no app-imposed file size limit. Non-image contents transfer directly from the sender only after **Download**, with progress and cancellation; a started transfer keeps going in the background
 - **Image previews**: images automatically display a high-quality preview (up to 4096 pixels on the longer side), cached for chat history. Download saves the original attachment; Save preview saves the cached image when the original sender is unavailable
 - **Reactions** on messages, plus floating emoji reactions in voice calls
 - **History sync**: when you come online, peers send you recent messages you missed
@@ -23,7 +23,7 @@ A Discord-style chat app built on [VDO.Ninja](https://vdo.ninja). No accounts, n
 ## Phones
 Open [Dischord](https://dan-k391.github.io/dischord/) in your phone browser and join the same invite as desktop users. Use **Channels** to open server/channel navigation, the member button to see participants, and the call button to return to an active call. Chat, replies, image previews, explicit downloads, microphone controls and camera use the same rooms and protocol as the desktop app.
 
-On phones, Enter adds a new line; tap **Send** to send the message. Tap a message's three-dot button for reply and other actions. Press and hold a server or channel for its menu. Camera/microphone access still requires browser permission. Phone browsers that do not provide screen capture can watch shared screens; attempting to share shows an availability message. Large file downloads may be constrained by browser memory and storage.
+On phones, Enter adds a new line; tap **Send** to send the message. Tap a message's three-dot button for reply and other actions. Press and hold a server or channel for its menu. Camera/microphone access still requires browser permission. Phone browsers that do not provide screen capture can watch shared screens; attempting to share shows an availability message. Large file downloads may be constrained by browser memory and storage. While a file download or upload runs, the page plays a sound too low to hear with a media notification showing the progress, so the browser keeps it going when you switch apps (tested in Chrome on Android; iPhone Safari may still pause it).
 
 ## Android app
 Download [Dischord-Android.apk](https://github.com/Dan-k391/dischord/releases/download/android-v1.3.0/Dischord-Android.apk) from the [Android v1.3.0 release](https://github.com/Dan-k391/dischord/releases/tag/android-v1.3.0). It is built and signed by this repository's **Build Android APK** workflow. It requires **Android 8.0 or newer** and a current **Android System WebView**. Open the APK on your phone and allow installation from the browser or file manager you used to download it. Install the signed release APK; the unsigned GitHub Actions artifact cannot be installed directly. Version 1.0.2 installs over earlier Android releases with the same signing key, retaining your local profile and settings.
@@ -31,6 +31,8 @@ Download [Dischord-Android.apk](https://github.com/Dan-k391/dischord/releases/do
 The Android app loads the same live website and VDO.Ninja rooms as Windows and web users. Open an existing invite in Dischord, or paste it in the app's join-server form. Chat, replies, reactions, files, image previews, audio boosts, camera and quality controls share the existing protocol. Website updates arrive when the app reloads. Each installation keeps its own identity, settings and preview cache, so join your server invites on first use. An internet connection is required.
 
 During a voice call your microphone keeps sending while Dischord is in the background or the screen is off, including when someone moves you to another channel, until you leave the call or tap **Disconnect** on its notification.
+
+A file download or upload that has started keeps going while Dischord is in the background or the screen is off. A **Dischord file transfer** notification shows its progress until it finishes.
 
 Use **Screen** in a voice channel to request Android screen capture. Android shows its system consent dialog, sharing indicator and a foreground-service notification. These system controls remain visible while capture is active. Stop through Dischord's Screen button or Android's sharing controls. The camera and microphone require their own Android permissions. The selected 5, 15, 30 or 60 FPS is a target; actual delivery depends on the phone, encoder, source and network. Physical-phone camera, audio and screen capture have not yet been verified.
 
@@ -64,7 +66,7 @@ Download the [portable Dischord.exe](https://github.com/Dan-k391/dischord/releas
 
 It loads [the live Dischord website](https://dan-k391.github.io/dischord/) in a native desktop window. Chat, voice, camera, screen sharing, configurable FPS, audio boosts, replies, previews and explicit file downloads use the same web app and VDO.Ninja rooms. Website updates arrive when you open or refresh it. Join the same server invite as your web friends to share channels and communicate.
 
-Closing the window keeps Dischord running in the system tray, so calls, messages and notifications carry on. Click the tray icon to open it again, or right-click it to quit. Untick **Keep running when closed** in that menu to make the close button quit instead.
+Closing the window keeps Dischord running in the system tray, so calls, messages and notifications carry on. Click the tray icon to open it again, or right-click it to quit. Untick **Keep running when closed** in that menu to make the close button quit instead. A file download or upload keeps going while the window is closed or minimised; quitting during one asks first.
 
 The desktop app keeps its own persistent profile, settings and image-preview cache. Set your profile and join your existing server invites on first use; browser identities and saved local history are not automatically imported. Original files remain unpersisted offers, so keep the sending window open while recipients download them. An internet connection is required.
 

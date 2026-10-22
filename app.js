@@ -1516,10 +1516,10 @@
   };
   let keepAudio = null, keepAudioUrl = '', screenLock = null;
   // 25 Hz at -45 dBFS: below hearing and below what phone speakers can play, yet a real signal, so the
-  // browser counts the tab as playing.
+  // browser counts the tab as playing. 20 s long: Chrome gives sounds shorter than 5 s no media session.
   function keepAliveSound() {
     if (keepAudioUrl) return keepAudioUrl;
-    const rate = 8000, n = rate * 2, data = new DataView(new ArrayBuffer(44 + n * 2));
+    const rate = 8000, n = rate * 20, data = new DataView(new ArrayBuffer(44 + n * 2));
     const text = (at, str) => { for (let i = 0; i < str.length; i++) data.setUint8(at + i, str.charCodeAt(i)); };
     text(0, 'RIFF'); data.setUint32(4, 36 + n * 2, true); text(8, 'WAVEfmt '); data.setUint32(16, 16, true);
     data.setUint16(20, 1, true); data.setUint16(22, 1, true); data.setUint32(24, rate, true); data.setUint32(28, rate * 2, true);
@@ -1539,10 +1539,10 @@
         keepAudio.play().catch(() => { });
         if (ms) try { ms.setActionHandler('pause', () => { if (keepAudio) keepAudio.pause(); }); ms.setActionHandler('play', () => { if (keepAudio) keepAudio.play().catch(() => { }); }); } catch { }
       }
-      if (ms && typeof MediaMetadata === 'function') try { ms.metadata = new MediaMetadata({ title: text || 'File transfer', artist: 'Dischord' }); } catch { }
+      if (ms && typeof MediaMetadata === 'function') try { ms.metadata = new MediaMetadata({ title: text || 'File transfer', artist: 'Dischord' }); ms.playbackState = 'playing'; } catch { }
     } else if (keepAudio) {
       keepAudio.pause(); keepAudio.removeAttribute('src'); keepAudio.load(); keepAudio = null;
-      if (ms) try { ms.metadata = null; ms.setActionHandler('pause', null); ms.setActionHandler('play', null); } catch { }
+      if (ms) try { ms.metadata = null; ms.playbackState = 'none'; ms.setActionHandler('pause', null); ms.setActionHandler('play', null); } catch { }
     }
     keepScreenOn(active);
   }

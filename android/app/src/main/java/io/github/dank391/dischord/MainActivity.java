@@ -56,7 +56,9 @@ public final class MainActivity extends Activity {
     private PermissionRequest mediaRequest;
     private final ArrayDeque<PermissionRequest> mediaQueue = new ArrayDeque<>();
     private final Map<String, boolean[]> mediaSessions = new HashMap<>();
-    private boolean destroying, awaitingMediaPermission, loadFailed, callActive, visible;
+    private boolean destroying, awaitingMediaPermission, loadFailed, callActive, visible, transferActive;
+    private String transferText = "";
+    private int transferProgress = -1;
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -155,6 +157,14 @@ public final class MainActivity extends Activity {
                         callActive = request.optBoolean("active");
                         updateCallService();
                     }
+                    else if (mainFrame && origin(sourceOrigin, "dan-k391.github.io") && "transfer-state".equals(type)) {
+                        transferActive = request.optBoolean("active");
+                        String text = request.optString("text");
+                        transferText = text.length() > 200 ? text.substring(0, 200) : text;
+                        int progress = request.optInt("progress", -1);
+                        transferProgress = progress >= 0 && progress <= 100 ? progress : -1;
+                        updateTransferService();
+                    }
                     else if (!mainFrame && origin(sourceOrigin, "vdo.ninja") && type.startsWith("screen-")) screens.handle(request, reply);
                     else if (!mainFrame && origin(sourceOrigin, "vdo.ninja") && "media-state".equals(type)) {
                         String scope = request.optString("scope");
@@ -183,10 +193,18 @@ public final class MainActivity extends Activity {
         Intent intent = new Intent(this, CallService.class).putExtra("audio", audio).putExtra("video", video);
         try { startForegroundService(intent); } catch (RuntimeException ignored) { }
     }
+    private void updateTransferService() {
+        if (!transferActive) { TransferService.stop(this); return; }
+        if (TransferService.running) TransferService.update(this, transferText, transferProgress);
+        // Android allows the start only while Dischord is on screen. One that begins in the background (an
+        // upload someone asked for) keeps going while the app is not frozen, and gets the service on return.
+        else TransferService.start(this, transferText, transferProgress);
+    }
     private void resetSessions() {
         if (files != null) files.reset();
         if (screens != null) { if (destroying) screens.close(); else screens.reset(); }
         mediaSessions.clear(); callActive = false; stopService(new Intent(this, CallService.class));
+        transferActive = false; TransferService.stop(this);
         if (fileChoice != null) { fileChoice.onReceiveValue(null); fileChoice = null; }
         if (mediaRequest != null) { mediaRequest.deny(); mediaRequest = null; }
         while (!mediaQueue.isEmpty()) mediaQueue.poll().deny();
@@ -337,7 +355,7 @@ public final class MainActivity extends Activity {
         super.onStart();
         // Back on screen: apply capture changes that happened in the background.
         visible = true;
-        if (webView != null) updateCallService();
+        if (webView != null) { updateCallService(); updateTransferService(); }
     }
     @Override protected void onStop() { visible = false; super.onStop(); }
     @Override public void onWindowFocusChanged(boolean focused) {

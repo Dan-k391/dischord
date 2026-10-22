@@ -23,4 +23,10 @@
   if (window.DischordNative) window.addEventListener('dischord-call-state', (event) => {
     DischordNative.postMessage(JSON.stringify({ type: 'call-state', active: !!(event.detail && event.detail.active) }));
   });
+  // A download or upload keeps going behind other apps: the app runs a transfer service while one is moving.
+  if (window.DischordNative) window.addEventListener('dischord-transfer-state', (event) => {
+    const d = event.detail || {};
+    DischordNative.postMessage(JSON.stringify({ type: 'transfer-state', active: !!d.active,
+      text: typeof d.text === 'string' ? d.text.slice(0, 200) : '', progress: Number.isInteger(d.progress) ? d.progress : -1 }));
+  });
 })();

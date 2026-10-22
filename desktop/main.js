@@ -437,6 +437,18 @@ function createWindow(destination) {
       deliverInvite(invite);
     }
   });
+  // The page objects to being closed or reloaded while a file is still being sent or downloaded. Ask,
+  // instead of Electron's default of refusing without a word (Quit would just do nothing).
+  mainWindow.webContents.on('will-prevent-unload', (event) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    showWindow();
+    const choice = dialog.showMessageBoxSync(mainWindow, {
+      type: 'warning', buttons: ['Stop it and close', 'Keep going'], defaultId: 1, cancelId: 1, noLink: true,
+      title: 'Dischord', message: 'A file is still being sent or downloaded.', detail: 'Closing Dischord now stops it.'
+    });
+    if (choice === 0) event.preventDefault(); // close anyway
+    else quitting = false; // stays open; closing the window later goes to the tray again
+  });
   mainWindow.on('close', (event) => {
     for (const pending of [...pickers.values()]) finishCapture(pending);
     if (quitting || !keepRunning() || !tray) return;

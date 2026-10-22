@@ -56,8 +56,10 @@ ipcRenderer.on('dischord:screen-quality-restart-failed', (_event, payload) => {
 
 // Native window controls stay in Electron's title-bar overlay. The hosted app
 // only needs a CSS marker to reserve space for its matching draggable bar.
+// desktop-unload-guard: this shell asks before closing during a file transfer (see will-prevent-unload),
+// so the page may object to closing then.
 function markDesktop() {
-  document.documentElement.classList.add('desktop-client', 'desktop-' + process.platform);
+  document.documentElement.classList.add('desktop-client', 'desktop-' + process.platform, 'desktop-unload-guard');
   window.dispatchEvent(new Event('dischord-desktop-ready'));
 }
 window.addEventListener('DOMContentLoaded', markDesktop, { once: true });
