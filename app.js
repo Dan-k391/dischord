@@ -1345,7 +1345,7 @@
         if (data[0] === 'H') { ch.__file = x; if (recv[x] && recv[x].ch === ch) recv[x].on = true; } // the bytes that follow belong to this file
         else if (data[0] === 'A') { // the receiver has safely stored this many bytes
           var cut = x.lastIndexOf(':'), s = send[x.slice(0, cut)];
-          if (s && s.ch === ch) { s.acked = Math.max(s.acked, +x.slice(cut + 1) || 0); if (s.wake) s.wake(); tell({ ev: 'progress', xid: x.slice(0, cut) }); }
+          if (s && s.ch === ch) { s.acked = Math.max(s.acked, +x.slice(cut + 1) || 0); if (s.wake) s.wake(); tell({ ev: 'progress', xid: x.slice(0, cut), bytes: s.acked }); }
         }
         return;
       }
@@ -1424,7 +1424,7 @@
     const job = fastJobs.get(d.xid);
     if (!job || job.m !== m) return;
     if (d.ev === 'data') { if (d.buf instanceof ArrayBuffer) job.handlers.data(new Uint8Array(d.buf)); }
-    else if (d.ev === 'progress') { if (job.handlers.progress) job.handlers.progress(); }
+    else if (d.ev === 'progress') { if (job.handlers.progress) job.handlers.progress(d.bytes); }
     else if (d.ev === 'sent') { fastJobs.delete(d.xid); if (job.handlers.done) job.handlers.done(); }
     else if (d.ev === 'error') { fastJobs.delete(d.xid); job.handlers.error(); }
   }
@@ -1450,9 +1450,122 @@
     userId: () => me && me.id,
     randomId: () => rid(20),
     onChange: queueFileCardPaint,
+    onActivity: () => syncTransfers(),
     saveDownload: saveFileDownload,
     openDownload: openFileDownload,
     maxWindow: () => voice ? 32 : window.DischordFiles.MAX_WINDOW,
+  });
+
+  // ---- transfers keep going in the background. Once a download or an upload is under way, it carries on
+  // while Dischord is in another tab, minimised, in the tray or behind other apps on a phone:
+  // - the page announces it (dischord-transfer-state) so the Android app runs a foreground service with a
+  //   progress notice (Android freezes a backgrounded app within seconds otherwise);
+  // - a held Web Lock tells the browser not to freeze or discard this tab;
+  // - closing the tab or the app asks first instead of silently dropping it;
+  // - in a phone browser, which freezes a page soon after you switch away and lets no page run a service of
+  //   its own, the page plays a sound too low to hear with a media notice showing the progress: browsers
+  //   keep a tab that is playing media running. The screen also stays on while you watch.
+  let transferState = { active: false, text: '', progress: -1, at: 0 }, transferLater = false;
+  let transferLock = null, transferLockWanted = false, transferLockPending = false;
+  function transferSummary(a) {
+    const pct = (x) => x.size ? Math.floor(x.bytes / x.size * 100) : 100;
+    const one = (x, verb) => verb + ' ' + x.name + ' — ' + pct(x) + '%';
+    const all = [...a.receiving, ...a.sending], size = all.reduce((n, x) => n + x.size, 0), bytes = all.reduce((n, x) => n + x.bytes, 0);
+    const progress = size ? Math.floor(bytes / size * 100) : -1;
+    if (a.receiving.length === 1 && !a.sending.length) return { text: one(a.receiving[0], 'Downloading'), progress };
+    if (a.sending.length === 1 && !a.receiving.length) return { text: one(a.sending[0], 'Sending'), progress };
+    const parts = [];
+    if (a.receiving.length) parts.push('downloading ' + a.receiving.length + (a.receiving.length === 1 ? ' file' : ' files'));
+    if (a.sending.length) parts.push('sending ' + a.sending.length + (a.sending.length === 1 ? ' file' : ' files'));
+    const text = parts.join(', ');
+    return { text: text[0].toUpperCase() + text.slice(1) + ' — ' + progress + '%', progress };
+  }
+  function holdTransferLock(on) {
+    transferLockWanted = on;
+    if (!on) { if (transferLock) { transferLock(); transferLock = null; } return; }
+    if (transferLock || transferLockPending || !navigator.locks || typeof navigator.locks.request !== 'function') return;
+    transferLockPending = true;
+    // A name of its own, so a second Dischord tab does not wait behind this one.
+    navigator.locks.request('dischord-transfer-' + rid(8), () => {
+      transferLockPending = false;
+      if (!transferLockWanted) return undefined;
+      return new Promise((release) => { transferLock = release; });
+    }).catch(() => { transferLockPending = false; });
+  }
+  function syncTransfers() {
+    let a;
+    try { a = fileTransfers.activity(); } catch { return; }
+    const active = a.sending.length + a.receiving.length > 0;
+    const { text, progress } = active ? transferSummary(a) : { text: '', progress: -1 };
+    if (active !== transferState.active) holdTransferLock(active);
+    if (active === transferState.active && text === transferState.text) return;
+    // Starting and stopping go out at once; progress at most once a second (a worker timer, so it keeps
+    // its pace in the background).
+    if (active === transferState.active && now() - transferState.at < 1000) {
+      if (!transferLater) { transferLater = true; bgTimer.sleep(1000).then(() => { transferLater = false; syncTransfers(); }); }
+      return;
+    }
+    transferState = { active, text, progress, at: now() };
+    window.dispatchEvent(new CustomEvent('dischord-transfer-state', { detail: { active, text, progress } }));
+    phoneKeepAlive(active, text);
+  }
+  const phoneBrowser = () => {
+    const c = document.documentElement.classList;
+    return !c.contains('android-client') && !c.contains('desktop-client') &&
+      (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+  };
+  let keepAudio = null, keepAudioUrl = '', screenLock = null;
+  // 25 Hz at -45 dBFS: below hearing and below what phone speakers can play, yet a real signal, so the
+  // browser counts the tab as playing.
+  function keepAliveSound() {
+    if (keepAudioUrl) return keepAudioUrl;
+    const rate = 8000, n = rate * 2, data = new DataView(new ArrayBuffer(44 + n * 2));
+    const text = (at, str) => { for (let i = 0; i < str.length; i++) data.setUint8(at + i, str.charCodeAt(i)); };
+    text(0, 'RIFF'); data.setUint32(4, 36 + n * 2, true); text(8, 'WAVEfmt '); data.setUint32(16, 16, true);
+    data.setUint16(20, 1, true); data.setUint16(22, 1, true); data.setUint32(24, rate, true); data.setUint32(28, rate * 2, true);
+    data.setUint16(32, 2, true); data.setUint16(34, 16, true); text(36, 'data'); data.setUint32(40, n * 2, true);
+    for (let i = 0; i < n; i++) data.setInt16(44 + i * 2, Math.round(184 * Math.sin(2 * Math.PI * 25 * i / rate)), true);
+    return (keepAudioUrl = URL.createObjectURL(new Blob([data.buffer], { type: 'audio/wav' })));
+  }
+  function phoneKeepAlive(active, text) {
+    if (!phoneBrowser()) return;
+    const ms = navigator.mediaSession;
+    // A call already keeps the tab running, and a second audio stream would compete with it.
+    if (active && !voice) {
+      if (!keepAudio) {
+        keepAudio = new Audio(keepAliveSound());
+        keepAudio.loop = true;
+        keepAudio.setAttribute('playsinline', '');
+        keepAudio.play().catch(() => { });
+        if (ms) try { ms.setActionHandler('pause', () => { if (keepAudio) keepAudio.pause(); }); ms.setActionHandler('play', () => { if (keepAudio) keepAudio.play().catch(() => { }); }); } catch { }
+      }
+      if (ms && typeof MediaMetadata === 'function') try { ms.metadata = new MediaMetadata({ title: text || 'File transfer', artist: 'Dischord' }); } catch { }
+    } else if (keepAudio) {
+      keepAudio.pause(); keepAudio.removeAttribute('src'); keepAudio.load(); keepAudio = null;
+      if (ms) try { ms.metadata = null; ms.setActionHandler('pause', null); ms.setActionHandler('play', null); } catch { }
+    }
+    keepScreenOn(active);
+  }
+  function keepScreenOn(on) {
+    if (!on) { if (screenLock) { screenLock.release().catch(() => { }); screenLock = null; } return; }
+    if (screenLock || document.hidden || !navigator.wakeLock) return;
+    navigator.wakeLock.request('screen').then((lock) => {
+      if (!transferState.active) { lock.release().catch(() => { }); return; }
+      screenLock = lock;
+      lock.addEventListener('release', () => { if (screenLock === lock) screenLock = null; });
+    }).catch(() => { });
+  }
+  // The browser drops the screen lock whenever the page is hidden; take it again on return.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && transferState.active && phoneBrowser()) keepScreenOn(true); });
+  // The Android app has no prompt for this, and a Windows app older than 1.3.2 would refuse to quit at all.
+  const unloadGuard = () => {
+    const c = document.documentElement.classList;
+    return !c.contains('android-client') && (!c.contains('desktop-client') || c.contains('desktop-unload-guard'));
+  };
+  window.addEventListener('beforeunload', (e) => {
+    if (!transferState.active || !unloadGuard()) return;
+    e.preventDefault();
+    e.returnValue = '';
   });
 
   // Only image previews use this cache; original file offers remain opt-in downloads.

@@ -59,6 +59,8 @@
    * download/cancel/status/release/hasLocal use (sid,cid,mid).
    * onPacket(sid,payload,uuid,senderUid) requires the app's validated sender identity.
    * status states: idle, preparing, receiving, saving, complete, error.
+   * activity() lists what is being sent and received right now; optional onActivity() is called when that
+   * changes (a transfer starts, moves on or ends), so the app can keep itself running in the background.
    */
   function create(context) {
     const offers = new Map(), receivers = new Map(), senders = new Map(), states = new Map();
@@ -72,6 +74,7 @@
       validLocation(sid, p.cid, p.mid) && typeof p.fid === 'string' && ID.test(p.fid) &&
       typeof p.token === 'string' && TOKEN.test(p.token) && validPeer(uuid) && typeof uid === 'string' && ID.test(uid);
     const sameMeta = (a, b) => a && b && a.id === b.id && a.size === b.size && a.name === b.name && a.type === b.type;
+    const activityChanged = () => { if (typeof context.onActivity === 'function') try { context.onActivity(); } catch {} };
 
     function messageFor(sid, cid, mid) {
       const m = context.getMessage(sid, cid, mid);
@@ -95,6 +98,7 @@
         }
       }
       if (typeof context.onChange === 'function') context.onChange(sid, cid, mid);
+      activityChanged();
     }
 
     function sendPacket(sid, p, uuid) {
@@ -122,6 +126,7 @@
       if (senders.get(t.key) === t) senders.delete(t.key);
       t.file = null;
       t.sentAt.clear();
+      activityChanged();
     }
 
     function abortSink(sink) {
@@ -457,12 +462,17 @@
         peerWindow: maximum, ackEvery, sentAt: new Map(), rtt: null, baseline: null, growth: 0, pumping: false,
         count: Math.max(1, Math.ceil(offer.meta.size / CHUNK_BYTES)), timer: null };
       senders.set(key, t);
+      activityChanged();
       // Only acknowledged progress extends this deadline; reads and queued sends do not.
       armSender(t);
       if (p.fast === 1 && fastOk(sid, uuid, offer.meta.size)) {
         try {
           t.fast = context.fast.send(sid, uuid, p.token, offer.file, {
-            progress: () => { if (senders.get(t.key) === t) armSender(t); },
+            progress: (bytes) => {
+              if (senders.get(t.key) !== t) return;
+              armSender(t);
+              if (Number.isSafeInteger(bytes) && bytes >= 0) { t.fastBytes = Math.min(bytes, t.meta.size); activityChanged(); }
+            },
             done: () => { if (senders.get(t.key) === t) stopSender(t); },
             error: () => {
               if (senders.get(t.key) !== t) return;
@@ -604,6 +614,7 @@
           if (t.acked + 1 >= t.count) stopSender(t);
           else {
             armSender(t);
+            activityChanged();
             void pump(t);
           }
         }
@@ -659,8 +670,16 @@
       states.clear();
     }
 
+    // What is moving right now, for the app's background keep-alive and its progress notice.
+    function activity() {
+      const receiving = [...receivers.values()].map((t) => ({ name: t.meta.name, size: t.meta.size, bytes: t.bytes }));
+      const sending = [...senders.values()].map((t) => ({ name: t.meta.name, size: t.meta.size,
+        bytes: t.fast ? t.fastBytes || 0 : Math.min(t.meta.size, (t.acked + 1) * CHUNK_BYTES) }));
+      return { sending, receiving };
+    }
+
     return {
-      register, download, cancel, onPacket, release, closeServer, close,
+      register, download, cancel, onPacket, release, closeServer, close, activity,
       status(sid, cid, mid) { return { ...(states.get(keyOf(sid, cid, mid)) || { state: 'idle', progress: 0, message: '' }) }; },
       hasLocal(sid, cid, mid) {
         const o = offers.get(keyOf(sid, cid, mid)), m = messageFor(sid, cid, mid);

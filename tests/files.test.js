@@ -137,6 +137,7 @@ function createHarness(options = {}) {
       !!(connections.has(author) && connections.get(author).has(wantedUuid));
     if (options.openDownload) protocolContext.openDownload = options.openDownload;
     if (options.maxWindow) protocolContext.maxWindow = options.maxWindow;
+    if (options.onActivity) protocolContext.onActivity = options.onActivity;
     const api = module.create(protocolContext);
     const result = { api, uid, uuid, resolve, connections };
     peers.set(uuid, result);
@@ -323,6 +324,44 @@ test('chunk transfer preserves arbitrary binary bytes across multiple boundaries
   assert.strictEqual(state(bob).progress, 100);
   assert.strictEqual(h.clock.count(), 0, 'A completed transfer must retain no inactivity timer');
   assert(h.packets.every((p) => p.to === (p.from === alice.uuid ? bob.uuid : alice.uuid)));
+}));
+
+test('both ends report a running transfer and its progress until it ends, for background keep-alive', () => withHarness(async (h) => {
+  const calls = { alice: 0, bob: 0 };
+  const alice = h.endpoint('alice', { onActivity: () => calls.alice++ }), bob = h.endpoint('bob', { onActivity: () => calls.bob++ });
+  const bytes = Buffer.alloc(h.module.CHUNK_BYTES * 3 + 10, 7);
+  offer(h, alice, trackedFile(bytes, 'movie.mkv'));
+  assert.deepStrictEqual(copy(alice.api.activity()), { sending: [], receiving: [] }, 'An offer alone is not a transfer');
+  bob.api.download(sid, cid, mid);
+  assert(calls.bob > 0, 'Starting a download is announced');
+  assert.deepStrictEqual(copy(bob.api.activity()), { sending: [], receiving: [{ name: 'movie.mkv', size: bytes.length, bytes: 0 }] });
+  await h.deliver(h.queue.shift()); // the request reaches the sender
+  assert(calls.alice > 0, 'Starting to send is announced');
+  assert.strictEqual(alice.api.activity().sending.length, 1);
+  assert.strictEqual(alice.api.activity().sending[0].name, 'movie.mkv');
+  const seen = [];
+  while (h.queue.length) {
+    await h.deliver(h.queue.shift());
+    const r = bob.api.activity().receiving[0], sent = alice.api.activity().sending[0];
+    if (r) seen.push(r.bytes);
+    if (sent) assert(sent.bytes <= bytes.length);
+  }
+  assert(seen.some((b) => b > 0 && b < bytes.length), 'Progress is reported along the way');
+  assert.deepStrictEqual(copy(bob.api.activity()), { sending: [], receiving: [] }, 'A finished download is no longer running');
+  assert.deepStrictEqual(copy(alice.api.activity()), { sending: [], receiving: [] }, 'A finished upload is no longer running');
+  assert.strictEqual(h.saves.length, 1);
+}));
+
+test('a cancelled download stops being reported on both ends', () => withHarness(async (h) => {
+  const alice = h.endpoint('alice'), bob = h.endpoint('bob');
+  offer(h, alice, trackedFile(Buffer.alloc(h.module.CHUNK_BYTES * 4, 1)));
+  bob.api.download(sid, cid, mid);
+  await h.deliver(h.queue.shift());
+  assert.strictEqual(alice.api.activity().sending.length, 1);
+  bob.api.cancel(sid, cid, mid);
+  assert.strictEqual(bob.api.activity().receiving.length, 0);
+  await h.drain();
+  assert.strictEqual(alice.api.activity().sending.length, 0);
 }));
 
 test('an explicitly downloaded empty file completes with exactly zero bytes', () => withHarness(async (h) => {

@@ -108,7 +108,7 @@ function createApp(windowOverrides = {}) {
     getElementById(id) { if (!nodes.has(id)) nodes.set(id, createElement()); return nodes.get(id); },
     createElement(tag) { return createElement(tag, (node) => { if (tag === 'a' && node.download) downloads.push(node); }); },
     querySelectorAll: (selector) => selector === 'img[data-img]:not([src])' ? imageElements.filter((image) => !image.src) : [], querySelector: () => null,
-    body: createElement('body'), hidden: false, fullscreenElement: null,
+    body: createElement('body'), documentElement: createElement('html'), hidden: false, fullscreenElement: null,
     focused: true, hasFocus() { return this.focused; },
   });
   const messageBox = document.getElementById('messages');
@@ -136,6 +136,9 @@ function createApp(windowOverrides = {}) {
   urlApi.createObjectURL = (blob) => { objectUrls.push(blob); return 'blob:test/' + objectUrls.length; };
   urlApi.revokeObjectURL = () => {};
   const window = eventTarget({ innerHeight: 800, innerWidth: 1200, Blob, Uint8Array, URL: urlApi });
+  window.dispatchEvent = (event) => { window.dispatch(event.type, event); return true; };
+  const globals = windowOverrides.globals || {};
+  delete windowOverrides.globals;
   Object.assign(window, windowOverrides);
   const DateMock = class extends Date { constructor(...args) { super(...(args.length ? args : [time])); } static now() { return time; } };
   const context = vm.createContext({
@@ -143,6 +146,8 @@ function createApp(windowOverrides = {}) {
     TextEncoder, TextDecoder,
     location: { search: '', hash: '', pathname: '/', protocol: 'https:', hostname: 'localhost' },
     history: { replaceState() {} }, navigator: {}, matchMedia: () => ({ matches: true }),
+    CustomEvent: class { constructor(type, init = {}) { this.type = type; this.detail = init.detail; } },
+    ...globals,
     localStorage: {
       getItem: (key) => stored.has(key) ? stored.get(key) : null,
       setItem: (key, value) => { stored.set(key, value); persisted.push({ key, value }); },
@@ -216,7 +221,7 @@ function createApp(windowOverrides = {}) {
   // The one-time startup cleanup of files left in IndexedDB by older versions opens the database once;
   // everything the tests do afterwards must still leave it untouched.
   const idbBaseline = idbOpens;
-  return { api: window.chatTest, sent, downloads, objectUrls, persisted, stored, document, advance,
+  return { api: window.chatTest, sent, downloads, objectUrls, persisted, stored, document, window, advance,
     imageStored, imagePuts, imageGets, get imageElements() { return imageElements; },
     get idbOpens() { return idbOpens - idbBaseline; },
     message(overrides = {}) {
@@ -954,6 +959,68 @@ test('a download shows its current speed next to the percentage', () => {
   app.advance(1000);
   chunk(1);
   assert(app.api.fileCardContent('testserver', message).includes('Downloading 50% · 12 KB/s'), 'One 12 KB chunk in the last second');
+});
+
+// A download of notes.txt (4 chunks) from bob; returns a function that delivers the next chunk.
+function startDownload(app) {
+  const chunkSize = 12 * 1024;
+  const message = app.api.cleanMsg(app.message({ text: '', file: { id: 'file1', name: 'notes.txt', size: chunkSize * 4, type: 'text/plain' } }));
+  app.api.addMsg('testserver', message);
+  app.api.peers.testserver = new Map([['bobuuid', { uid: 'bob', rx: 1000 }]]);
+  app.api.fileTransfers.download('testserver', 'general', message.id);
+  const request = app.sent[0].packet;
+  let index = 0;
+  return () => app.api.fileTransfers.onPacket('testserver', { ...request, t: 'f-chunk', index: index++,
+    data: Buffer.alloc(chunkSize).toString('base64') }, 'bobuuid', 'bob');
+}
+
+test('a running download is announced, so each app keeps it going in the background', () => {
+  const app = createApp(), states = [];
+  app.window.addEventListener('dischord-transfer-state', (e) => states.push(e.detail));
+  const chunk = startDownload(app);
+  assert.strictEqual(states.length, 1, 'Announced as soon as it starts');
+  assert.strictEqual(states[0].active, true);
+  assert.strictEqual(states[0].text, 'Downloading notes.txt — 0%');
+  const asks = () => { let asked = false; app.window.dispatch('beforeunload', { preventDefault() { asked = true; } }); return asked; };
+  assert.strictEqual(asks(), true, 'Closing the tab asks first');
+  chunk();
+  app.advance(1000);
+  chunk();
+  assert.strictEqual(states[states.length - 1].text, 'Downloading notes.txt — 50%', 'Progress follows, at most once a second');
+  chunk(); chunk();
+  assert.strictEqual(states[states.length - 1].active, false, 'The end is announced at once');
+  assert.strictEqual(asks(), false, 'Nothing to lose once it is saved');
+});
+
+test('only a Windows app that can ask objects to closing during a transfer', () => {
+  for (const [classes, expected] of [[['desktop-client'], false], [['desktop-client', 'desktop-unload-guard'], true], [['android-client'], false]]) {
+    const app = createApp();
+    app.document.documentElement.classList.add(...classes);
+    startDownload(app);
+    let asked = false;
+    app.window.dispatch('beforeunload', { preventDefault() { asked = true; } });
+    assert.strictEqual(asked, expected, classes.join(' '));
+  }
+});
+
+test('in a phone browser a transfer plays an inaudible sound with its progress, and holds the screen on', () => {
+  const players = [], locks = [];
+  const mediaSession = { metadata: null, handlers: {}, setActionHandler(name, fn) { this.handlers[name] = fn; } };
+  class Audio { constructor(src) { this.src = src; this.paused = true; players.push(this); } play() { this.paused = false; return Promise.resolve(); } pause() { this.paused = true; } setAttribute() {} removeAttribute(name) { delete this[name]; } load() {} }
+  const app = createApp({ globals: {
+    Audio, MediaMetadata: class { constructor(init) { Object.assign(this, init); } },
+    navigator: { userAgent: 'Mozilla/5.0 (Linux; Android 14) Chrome/130 Mobile', mediaSession,
+      wakeLock: { request: () => { const lock = eventTarget({ released: false, release() { this.released = true; return Promise.resolve(); } }); locks.push(lock); return Promise.resolve(lock); } } },
+  } });
+  const chunk = startDownload(app);
+  assert.strictEqual(players.length, 1);
+  assert.strictEqual(players[0].paused, false, 'The keep-alive sound plays');
+  assert.strictEqual(players[0].loop, true);
+  assert.strictEqual(mediaSession.metadata.title, 'Downloading notes.txt — 0%', 'The media notice shows the progress');
+  assert.strictEqual(locks.length, 1, 'The screen stays on while the page is in front');
+  chunk(); chunk(); chunk(); chunk();
+  assert.strictEqual(players[0].paused, true, 'It stops with the transfer');
+  assert.strictEqual(mediaSession.metadata, null);
 });
 
 test('an owner opens their own selected file in the viewer without it leaving the app', async () => {
