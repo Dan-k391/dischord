@@ -213,6 +213,7 @@ function createApp(windowOverrides = {}) {
       set deaf(value) { deaf = value; },
       set msgSound(value) { msgSound = value; },
       get fileTransfers() { return fileTransfers; },
+      held, holdFile, leaveServer,
     };
   `;
   window.captureWire = (envelope) => sent.push({ sid: 'testserver', packet: plain(envelope.sendData.dischord), uuid: envelope.UUID });
@@ -1021,6 +1022,40 @@ test('in a phone browser a transfer plays an inaudible sound with its progress, 
   chunk(); chunk(); chunk(); chunk();
   assert.strictEqual(players[0].paused, true, 'It stops with the transfer');
   assert.strictEqual(mediaSession.metadata, null);
+});
+
+// files kept for the viewer after a download: sizes only matter, so the "blob" is a stand-in
+function keepFiles(app, sizesMB) {
+  for (let i = 0; i < sizesMB.length; i++) {
+    const mb = Math.abs(sizesMB[i]);
+    const m = app.api.cleanMsg(app.message({ id: 'kept' + i, text: '', file: { id: 'kf' + i, name: 'clip' + i + '.mp4', size: mb * 1048576, type: 'video/mp4' } }));
+    app.api.addMsg('testserver', m);
+    app.api.holdFile({ sid: 'testserver', cid: 'general', mid: m.id }, { name: m.file.name, type: m.file.type, size: m.file.size },
+      sizesMB[i] < 0 ? { handle: {} } : { blob: { size: mb * 1048576 } });
+  }
+  return () => [...app.api.held.keys()].map((k) => k.split('/')[2]);
+}
+
+test('downloads kept in memory for the viewer stay within a size budget, oldest dropped first', () => {
+  const app = createApp();
+  const kept = keepFiles(app, [90, 90, 90, 90]);
+  assert.deepStrictEqual(kept(), ['kept1', 'kept2', 'kept3'], '360 MB is over the 300 MB budget: the oldest goes');
+});
+
+test('a phone keeps less in memory, and files saved to disk do not count', () => {
+  const app = createApp();
+  app.document.documentElement.classList.add('android-client');
+  const kept = keepFiles(app, [-150, 90, -150, 90]); // negative: a large file saved where the person chose
+  assert.deepStrictEqual(kept(), ['kept0', 'kept2', 'kept3'], '180 MB is over 150 MB on a phone; the saved files stay');
+});
+
+test('deleting a message or leaving the server frees its kept download', () => {
+  const app = createApp();
+  const kept = keepFiles(app, [10, 10]);
+  app.api.addMsg('testserver', app.message({ id: 'kept0', del: true, text: '' })); // the sender deleted it
+  assert.deepStrictEqual(kept(), ['kept1'], 'A delete from the sender frees it');
+  app.api.leaveServer('testserver');
+  assert.deepStrictEqual(kept(), [], 'Leaving the server frees everything from it');
 });
 
 test('an owner opens their own selected file in the viewer without it leaving the app', async () => {

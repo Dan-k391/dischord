@@ -776,7 +776,7 @@
       const old = list[i];
       if (old.a.id !== m.a.id) return false;
       if (old.del) return false;
-      if (m.del) { list[i] = m; fileTransfers.release(sid, m.cid, m.id); cancelImageRequests(sid, m.cid, m.id); fileProviders.delete(sid + '/' + m.cid + '/' + m.id); saveMsgs(sid); return true; }
+      if (m.del) { list[i] = m; releaseFile(sid, m.cid, m.id); cancelImageRequests(sid, m.cid, m.id); fileProviders.delete(sid + '/' + m.cid + '/' + m.id); saveMsgs(sid); return true; }
       let changed = false;
       if (m.ed && m.text !== old.text) { list[i] = { ...old, text: m.text, ed: 1 }; changed = true; }
       if (!old.img && m.img && (!old.file || (m.file && m.file.id === old.file.id && window.DischordImages.hasPreview(old.file) && m.img.preview === 1))) {
@@ -791,7 +791,7 @@
     while (j > 0 && list[j - 1].ts > m.ts) j--;
     list.splice(j, 0, m);
     if (list.length > MAX_MSGS) list.splice(0, list.length - MAX_MSGS).forEach((old) => {
-      fileTransfers.release(sid, old.cid, old.id);
+      releaseFile(sid, old.cid, old.id);
       cancelImageRequests(sid, old.cid, old.id);
       fileProviders.delete(sid + '/' + old.cid + '/' + old.id);
     });
@@ -903,7 +903,7 @@
   }
   function releaseChannelFiles(sid, cid) {
     cancelImageRequests(sid, cid);
-    for (const m of getMsgs(sid)[cid] || []) fileTransfers.release(sid, cid, m.id);
+    for (const m of getMsgs(sid)[cid] || []) releaseFile(sid, cid, m.id);
     const prefix = sid + '/' + cid + '/';
     for (const key of fileProviders.keys()) if (key.startsWith(prefix)) fileProviders.delete(key);
     composerDrafts.delete(sid + '/' + cid);
@@ -920,7 +920,7 @@
     if (!m || m.a.id !== me.id) return;
     const d = { id: m.id, cid: m.cid, ts: m.ts, a: me, del: true, text: '' };
     addMsg(cur.sid, d);
-    fileTransfers.release(cur.sid, cur.cid, id);
+    releaseFile(cur.sid, cur.cid, id);
     send(cur.sid, { t: 'del', m: d });
     renderMessages();
   }
@@ -993,7 +993,22 @@
   // the session, so its chat card opens it in the player instead of downloading it again. The app stores
   // nothing itself: closing the tab forgets them.
   const held = new Map(); // 'sid/cid/mid' -> { key, id, name, type, size, from, blob | handle }
+  // Kept files that sit in memory (under 100 MB each) are capped by total size, oldest dropped first; a phone
+  // gets less. A file saved to a place the person picked costs nothing to keep: only a pointer to it is held.
   const HELD_MAX = 24;
+  const heldBudget = () => document.documentElement.classList.contains('android-client') ||
+    /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '') ? 150 * 1024 * 1024 : 300 * 1024 * 1024;
+  function forgetHeld(key) {
+    if (!held.delete(key)) return;
+    const [sid, cid, mid] = key.split('/');
+    queueFileCardPaint(sid, cid, mid);
+  }
+  // A message that is deleted or replaced, or a server that is left, takes its file with it.
+  function releaseFile(sid, cid, mid) {
+    fileTransfers.release(sid, cid, mid);
+    forgetHeld(dlKey(sid, cid, mid));
+  }
+  const forgetServerFiles = (sid) => { for (const key of [...held.keys()]) if (key.startsWith(sid + '/')) forgetHeld(key); };
   const dlKey = (sid, cid, mid) => sid + '/' + cid + '/' + mid;
   const FILE_KINDS = {
     video: { mp4: 'video/mp4', m4v: 'video/mp4', webm: 'video/webm', ogv: 'video/ogg', mov: 'video/quicktime', mkv: '' },
@@ -1022,7 +1037,11 @@
     const key = dlKey(where.sid, where.cid, where.mid);
     held.delete(key);
     held.set(key, { key, id: (m && m.file && m.file.id) || key, name: meta.name, type: meta.type || '', size: meta.size, from: m ? m.a.name : '', ...source });
-    while (held.size > HELD_MAX) held.delete(held.keys().next().value);
+    const inMemory = () => [...held.values()].reduce((n, h) => n + (h.blob ? h.blob.size : 0), 0);
+    for (const old of [...held.keys()]) {
+      if (old === key || (held.size <= HELD_MAX && inMemory() <= heldBudget())) continue;
+      if (held.size > HELD_MAX || held.get(old).blob) forgetHeld(old);
+    }
     queueFileCardPaint(where.sid, where.cid, where.mid);
     if (playAfter.delete(key)) openHeld(held.get(key));
   }
@@ -2987,6 +3006,7 @@
     if (voice && voice.sid === sid) leaveVoice();
     disconnectMesh(sid);
     fileTransfers.closeServer(sid);
+    forgetServerFiles(sid);
     cancelImageRequests(sid);
     for (const key of fileProviders.keys()) if (key.startsWith(sid + '/')) fileProviders.delete(key);
     for (const key of composerDrafts.keys()) if (key.startsWith(sid + '/')) composerDrafts.delete(key);
