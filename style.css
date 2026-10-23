@@ -463,6 +463,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .image-preview-status:empty { display: none; }
 .image-preview-placeholder { display: flex; align-items: center; gap: 8px; max-width: 520px; margin-top: 4px; padding: 16px; border-radius: 8px; background: #2b2d31; color: var(--text-muted); font-size: 13px; }
 @keyframes shimmer { to { background-position: -200% 0; } }
+.app-update { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--text); }
 #textView { position: relative; }
 .drop-hint { display: none; }
 #textView.drop .drop-hint {

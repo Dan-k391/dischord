@@ -4,6 +4,7 @@ const { app, BrowserWindow, Menu, Tray, WebContentsView, desktopCapturer, dialog
 const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
+const updater = require('./updater');
 
 const SITE = new URL('https://dan-k391.github.io/dischord/');
 const MEDIA_ORIGIN = 'https://vdo.ninja';
@@ -21,6 +22,10 @@ let mainWindow = null;
 // Closing the window keeps Dischord running in the tray (calls, messages and notifications carry on);
 // Quit in the tray menu or the app menu ends it. The choice is remembered.
 let quitting = false, tray = null, downloadsHandled = false;
+const updates = updater.create({ getWindow: () => mainWindow, showWindow: () => showWindow(), beforeInstall: () => { quitting = true; } });
+// The settings page in the hosted app asks for a check; its version line comes from here.
+ipcMain.on('dischord:check-updates', (event) => { if (mainWindow && event.sender === mainWindow.webContents) updates.check(true); });
+ipcMain.handle('dischord:app-version', () => app.getVersion());
 const prefsFile = () => path.join(app.getPath('userData'), 'desktop-prefs.json');
 function readPrefs() { try { return JSON.parse(fs.readFileSync(prefsFile(), 'utf8')) || {}; } catch { return {}; } }
 function writePrefs(next) { try { fs.writeFileSync(prefsFile(), JSON.stringify({ ...readPrefs(), ...next })); } catch { } }
@@ -489,6 +494,7 @@ function createTray() {
   const menu = () => Menu.buildFromTemplate([
     { label: 'Open Dischord', click: showWindow },
     { label: 'Keep running when closed', type: 'checkbox', checked: keepRunning(), click: (item) => { writePrefs({ keepRunning: item.checked }); tray.setContextMenu(menu()); } },
+    { label: 'Check for updates…', click: () => updates.check(true) },
     { type: 'separator' },
     { label: 'Quit Dischord', click: () => app.quit() }
   ]);
@@ -542,6 +548,7 @@ if (!app.requestSingleInstanceLock()) {
     ]));
     createTray();
     createWindow(destination);
+    updates.start();
   });
   app.on('before-quit', () => { quitting = true; });
   app.on('activate', () => { if (!mainWindow) createWindow(SITE); });

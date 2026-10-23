@@ -4742,6 +4742,8 @@
 
   const opt = (val, cur, label) => `<option value="${val}" ${String(val) === String(cur) ? 'selected' : ''}>${label}</option>`;
 
+  // Inside the Windows or Android app (versions that can check for updates themselves).
+  const appUpdates = () => ['desktop-update', 'android-update'].some((c) => document.documentElement.classList.contains(c));
   function settingsModal(tab = 'profile') {
     const state = { color: me.color };
     modal(`<div class="tabs settings-tabs" role="tablist" aria-label="Settings sections"><button id="settingsProfileTab" data-tab="profile" role="tab" aria-controls="settingsProfile">My profile</button><button id="settingsAvTab" data-tab="av" role="tab" aria-controls="settingsAv">Voice &amp; Video</button></div>
@@ -4750,6 +4752,7 @@
         ${profileEditor(me.name, me.color)}
         ${'Notification' in window && Notification.permission !== 'granted' ? '<label>Notifications</label><button class="btn" id="mNotif">Enable desktop notifications</button>' : ''}
         <label class="inline-check"><input type="checkbox" id="mSound" ${msgSound ? 'checked' : ''}> Play a sound for new messages</label>
+        ${appUpdates() ? `<label>App version</label><div class="app-update"><span>Dischord ${esc(document.documentElement.dataset.appVersion || '')}</span><button type="button" class="btn" id="mUpdate">Check for updates</button></div>` : ''}
       </div>
       <div class="tab-body" id="settingsAv" data-body="av" role="tabpanel" aria-labelledby="settingsAvTab">
         <h3>Microphone</h3>
@@ -4803,6 +4806,8 @@
       };
       $('modal').querySelectorAll('[data-tab]').forEach((b) => (b.onclick = () => show(b.dataset.tab)));
       show(tab);
+      // the Windows and Android apps check GitHub themselves and show their own answer
+      if ($('mUpdate')) $('mUpdate').onclick = () => window.dispatchEvent(new Event('dischord-check-updates'));
       wireProfileEditor(state);
       $('aMicGain').oninput = () => { $('aMicGainValue').textContent = audioPercent($('aMicGain').value) + '%'; };
       if ($('mNotif')) $('mNotif').onclick = () => Notification.requestPermission().then(() => toast('Notifications: ' + Notification.permission));

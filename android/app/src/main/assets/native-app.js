@@ -6,6 +6,11 @@
     // Native layout consumes status/navigation bars, display cutouts and IME.
     // Set the marker before page styles paint so CSS does not add them again.
     document.documentElement.classList.add('android-client');
+    // android-update: Settings can offer "Check for updates"; the check and its dialog run in the app.
+    if (window.DischordNative && typeof window.__dischordAppVersion === 'string') {
+      document.documentElement.classList.add('android-update');
+      document.documentElement.dataset.appVersion = window.__dischordAppVersion;
+    }
     return true;
   };
   if (!mark()) {
@@ -23,6 +28,7 @@
   if (window.DischordNative) window.addEventListener('dischord-call-state', (event) => {
     DischordNative.postMessage(JSON.stringify({ type: 'call-state', active: !!(event.detail && event.detail.active) }));
   });
+  if (window.DischordNative) window.addEventListener('dischord-check-updates', () => DischordNative.postMessage(JSON.stringify({ type: 'check-updates' })));
   // A download or upload keeps going behind other apps: the app runs a transfer service while one is moving.
   if (window.DischordNative) window.addEventListener('dischord-transfer-state', (event) => {
     const d = event.detail || {};

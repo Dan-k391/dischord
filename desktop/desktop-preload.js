@@ -58,8 +58,11 @@ ipcRenderer.on('dischord:screen-quality-restart-failed', (_event, payload) => {
 // only needs a CSS marker to reserve space for its matching draggable bar.
 // desktop-unload-guard: this shell asks before closing during a file transfer (see will-prevent-unload),
 // so the page may object to closing then.
+// desktop-update: Settings can offer "Check for updates"; the check and its dialogs run in the app.
 function markDesktop() {
-  document.documentElement.classList.add('desktop-client', 'desktop-' + process.platform, 'desktop-unload-guard');
+  document.documentElement.classList.add('desktop-client', 'desktop-' + process.platform, 'desktop-unload-guard', 'desktop-update');
+  ipcRenderer.invoke('dischord:app-version').then((v) => { if (typeof v === 'string' && v.length < 32) document.documentElement.dataset.appVersion = v; }).catch(() => {});
   window.dispatchEvent(new Event('dischord-desktop-ready'));
 }
 window.addEventListener('DOMContentLoaded', markDesktop, { once: true });
+window.addEventListener('dischord-check-updates', () => ipcRenderer.send('dischord:check-updates'));

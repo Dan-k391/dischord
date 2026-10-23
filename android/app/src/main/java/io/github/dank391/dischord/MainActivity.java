@@ -51,6 +51,7 @@ public final class MainActivity extends Activity {
     private View offline, fullScreenView;
     private WebChromeClient.CustomViewCallback fullScreenCallback;
     private NativeFiles files;
+    private UpdateCheck updates;
     private ScreenCaptureBridge screens;
     private ValueCallback<Uri[]> fileChoice;
     private PermissionRequest mediaRequest;
@@ -97,6 +98,7 @@ public final class MainActivity extends Activity {
         webView.setBackgroundColor(Color.rgb(49,51,56));
         root.addView(webView, new FrameLayout.LayoutParams(-1,-1));
         files = new NativeFiles(this);
+        updates = new UpdateCheck(this);
         screens = new ScreenCaptureBridge(this, webView);
         android.webkit.WebSettings settings = webView.getSettings();
         settings.setJavaScriptEnabled(true);
@@ -121,6 +123,8 @@ public final class MainActivity extends Activity {
         });
         String destination = isSite(getIntent().getData()) ? getIntent().getData().toString() : SITE;
         webView.loadUrl(destination);
+        // A newer release is offered once the app has settled; Settings can also ask at any time.
+        webView.postDelayed(() -> { if (!destroying) updates.check(false); }, 15000);
     }
 
     private static boolean isSite(Uri url) {
@@ -157,6 +161,7 @@ public final class MainActivity extends Activity {
                         callActive = request.optBoolean("active");
                         updateCallService();
                     }
+                    else if (mainFrame && origin(sourceOrigin, "dan-k391.github.io") && "check-updates".equals(type)) updates.check(true);
                     else if (mainFrame && origin(sourceOrigin, "dan-k391.github.io") && "transfer-state".equals(type)) {
                         transferActive = request.optBoolean("active");
                         String text = request.optString("text");
@@ -176,7 +181,8 @@ public final class MainActivity extends Activity {
                 } catch (Exception ignored) { }
             });
         try {
-            WebViewCompat.addDocumentStartJavaScript(webView, asset("native-app.js") + "\n" + asset("native-files.js"), new HashSet<>(Arrays.asList("https://dan-k391.github.io")));
+            WebViewCompat.addDocumentStartJavaScript(webView, "window.__dischordAppVersion = " + JSONObject.quote(BuildConfig.VERSION_NAME) + ";\n" +
+                asset("native-app.js") + "\n" + asset("native-files.js"), new HashSet<>(Arrays.asList("https://dan-k391.github.io")));
             WebViewCompat.addDocumentStartJavaScript(webView, asset("native-media.js") + "\n" + asset("native-screen.js"), new HashSet<>(Arrays.asList("https://vdo.ninja")));
         } catch (IOException error) { throw new IllegalStateException("Missing Android adapter assets", error); }
     }

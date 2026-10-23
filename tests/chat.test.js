@@ -147,6 +147,7 @@ function createApp(windowOverrides = {}) {
     location: { search: '', hash: '', pathname: '/', protocol: 'https:', hostname: 'localhost' },
     history: { replaceState() {} }, navigator: {}, matchMedia: () => ({ matches: true }),
     CustomEvent: class { constructor(type, init = {}) { this.type = type; this.detail = init.detail; } },
+    Event: class { constructor(type) { this.type = type; } },
     ...globals,
     localStorage: {
       getItem: (key) => stored.has(key) ? stored.get(key) : null,
@@ -213,7 +214,7 @@ function createApp(windowOverrides = {}) {
       set deaf(value) { deaf = value; },
       set msgSound(value) { msgSound = value; },
       get fileTransfers() { return fileTransfers; },
-      held, holdFile, leaveServer,
+      held, holdFile, leaveServer, settingsModal,
     };
   `;
   window.captureWire = (envelope) => sent.push({ sid: 'testserver', packet: plain(envelope.sendData.dischord), uuid: envelope.UUID });
@@ -1056,6 +1057,25 @@ test('deleting a message or leaving the server frees its kept download', () => {
   assert.deepStrictEqual(kept(), ['kept1'], 'A delete from the sender frees it');
   app.api.leaveServer('testserver');
   assert.deepStrictEqual(kept(), [], 'Leaving the server frees everything from it');
+});
+
+test('settings offer an update check only inside the apps, which run the check themselves', () => {
+  // the profile editor below needs more of the page than this harness models; the update row comes first
+  const open = (app) => { try { app.api.settingsModal('profile'); } catch { } };
+  const web = createApp();
+  open(web);
+  assert(!web.node('modal').innerHTML.includes('Check for updates'), 'A browser updates with the site; nothing to check');
+  for (const shell of ['desktop-update', 'android-update']) {
+    const app = createApp(), asked = [];
+    app.document.documentElement.classList.add(shell);
+    app.document.documentElement.dataset.appVersion = '1.3.3';
+    app.window.addEventListener('dischord-check-updates', () => asked.push(shell));
+    open(app);
+    assert(app.node('modal').innerHTML.includes('Dischord 1.3.3'), shell + ': shows the app version');
+    assert(app.node('modal').innerHTML.includes('Check for updates'), shell);
+    app.node('mUpdate').onclick();
+    assert.deepStrictEqual(asked, [shell], 'The app is asked to check');
+  }
 });
 
 test('an owner opens their own selected file in the viewer without it leaving the app', async () => {
