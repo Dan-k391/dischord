@@ -20,7 +20,7 @@ const permissionDialogs = new Map();
 let mainWindow = null;
 // Closing the window keeps Dischord running in the tray (calls, messages and notifications carry on);
 // Quit in the tray menu or the app menu ends it. The choice is remembered.
-let quitting = false, tray = null;
+let quitting = false, tray = null, downloadsHandled = false;
 const prefsFile = () => path.join(app.getPath('userData'), 'desktop-prefs.json');
 function readPrefs() { try { return JSON.parse(fs.readFileSync(prefsFile(), 'utf8')) || {}; } catch { return {}; } }
 function writePrefs(next) { try { fs.writeFileSync(prefsFile(), JSON.stringify({ ...readPrefs(), ...next })); } catch { } }
@@ -383,6 +383,19 @@ function createWindow(destination) {
   app.userAgentFallback = browserUserAgent;
   ses.setUserAgent(browserUserAgent);
   configurePermissions(ses);
+  // A file the page saves (a finished download, a video's Save button) asks where to put it, starting in
+  // Downloads. Electron's own fallback dropped these without a word: nothing was saved and nothing showed.
+  if (!downloadsHandled) {
+    downloadsHandled = true;
+    ses.on('will-download', (_event, item, contents) => {
+      if (item.getSavePath()) return;
+      const owner = (contents && BrowserWindow.fromWebContents(contents)) || mainWindow;
+      if (owner === mainWindow) showWindow(); // it may be in the tray when a download finishes
+      const chosen = owner && !owner.isDestroyed() ?
+        dialog.showSaveDialogSync(owner, { defaultPath: path.join(app.getPath('downloads'), item.getFilename()) }) : undefined;
+      if (chosen) item.setSavePath(chosen); else item.cancel();
+    });
+  }
   mainWindow = new BrowserWindow({
     width: 1280, height: 800, minWidth: 720, minHeight: 500,
     title: 'Dischord', backgroundColor: '#313338', show: false, autoHideMenuBar: true,
