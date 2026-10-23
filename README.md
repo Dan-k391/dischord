@@ -62,7 +62,7 @@ java -jar apksigner.jar verify --verbose --print-certs Dischord-Android.apk
 The signing tool prompts for the keystore password. Publish the verified signed APK, never the private key. Android release tags use `android-v<dischordVersionName>` from `android/gradle.properties`.
 
 ## Windows app
-Download the [portable Dischord.exe](https://github.com/Dan-k391/dischord/releases/download/desktop-v1.3.2/Dischord.exe), [Windows installer](https://github.com/Dan-k391/dischord/releases/download/desktop-v1.3.2/Dischord-Setup.exe), or [Windows ZIP](https://github.com/Dan-k391/dischord/releases/download/desktop-v1.3.2/Dischord-Windows.zip). The app requires **Windows 10/11, 64-bit** and includes its Chromium runtime. For the ZIP, extract the whole folder before running `Dischord.exe`.
+Download the [portable Dischord.exe](https://github.com/Dan-k391/dischord/releases/download/desktop-v1.3.3/Dischord.exe), [Windows installer](https://github.com/Dan-k391/dischord/releases/download/desktop-v1.3.3/Dischord-Setup.exe), or [Windows ZIP](https://github.com/Dan-k391/dischord/releases/download/desktop-v1.3.3/Dischord-Windows.zip). The app requires **Windows 10/11, 64-bit** and includes its Chromium runtime. For the ZIP, extract the whole folder before running `Dischord.exe`.
 
 It loads [the live Dischord website](https://dan-k391.github.io/dischord/) in a native desktop window. Chat, voice, camera, screen sharing, configurable FPS, audio boosts, replies, previews and explicit file downloads use the same web app and VDO.Ninja rooms. Website updates arrive when you open or refresh it. Join the same server invite as your web friends to share channels and communicate.
 
