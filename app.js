@@ -1077,6 +1077,19 @@
     box.classList.add('zoomable');
     let s = 1, x = 0, y = 0, pinch = null, drag = null, tap = 0, moved = false;
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    // The picture fills the space it has, whole: scaled up or down to the largest size that shows all of it,
+    // whatever its shape. Again whenever the window changes size.
+    const fit = () => {
+      const cs = getComputedStyle(box), w = img.naturalWidth, h = img.naturalHeight;
+      const bw = box.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight), bh = box.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+      if (!w || !h || !bw || !bh) return;
+      const k = Math.min(bw / w, bh / h);
+      img.style.width = Math.floor(w * k) + 'px'; img.style.height = Math.floor(h * k) + 'px';
+      apply();
+    };
+    if (img.complete) requestAnimationFrame(fit);
+    img.addEventListener('load', fit);
+    if (typeof ResizeObserver === 'function') new ResizeObserver(() => fit()).observe(box);
     const apply = () => {
       const mx = Math.max(0, (img.offsetWidth * s - box.clientWidth) / 2), my = Math.max(0, (img.offsetHeight * s - box.clientHeight) / 2);
       x = clamp(x, -mx, mx); y = clamp(y, -my, my);

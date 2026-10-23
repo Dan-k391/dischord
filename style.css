@@ -486,7 +486,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 #modal.lb.viewer { display: block; width: 100vw; height: 100%; max-width: none; max-height: none; padding: 0; border: 0; border-radius: 0; background: transparent; }
 #modal.lb .vw-body.video { position: absolute; inset: 0; background: transparent; overflow: hidden; }
 #modal.lb .player { height: 100%; background: transparent; }
-#modal.lb .player .pl-stage { flex: 1; min-height: 0; }
+#modal.lb .player .pl-stage { flex: 1; min-height: 0; grid-template: minmax(0, 1fr) / minmax(0, 1fr); } /* a definite area, so the video fits inside it at any shape */
 #modal.lb .player video { width: 100%; height: 100%; max-height: none; object-fit: contain; background: transparent; }
 #modal.lb .player.video .pl-ctl { padding: 40px max(18px, var(--safe-area-inset-right, 0px)) max(16px, var(--safe-area-inset-bottom, 0px)) max(18px, var(--safe-area-inset-left, 0px)); }
 #modal.lb .lb-top { transition: opacity .2s; }
@@ -1072,7 +1072,7 @@ body.tile-out #tiles .tile { z-index: 1; }
 .pl-seek::-moz-range-thumb, .pl-vol::-moz-range-thumb { width: 12px; height: 12px; border: 0; border-radius: 50%; background: #fff; }
 .pl-seekrow:hover .pl-seek::-webkit-slider-thumb, .pl-volume:hover .pl-vol::-webkit-slider-thumb, .pl-seek:active::-webkit-slider-thumb, .pl-vol:active::-webkit-slider-thumb { transform: scale(1); }
 .player:fullscreen { justify-content: center; }
-.player:fullscreen .pl-stage { flex: 1; min-height: 0; }
+.player:fullscreen .pl-stage { flex: 1; min-height: 0; grid-template: minmax(0, 1fr) / minmax(0, 1fr); }
 .player:fullscreen video { max-height: none; height: 100%; object-fit: contain; }
 .player:fullscreen .pl-ctl { padding: 48px 24px 20px; }
 @media (max-width: 760px), (max-width: 1024px) and (pointer: coarse) {
