@@ -379,9 +379,11 @@ test('only the Windows app asks the share frame to take the call out itself wher
   };
   const web = config(createApp());
   assert.strictEqual(web.cancel, false, 'The browser shares as it is');
+  assert.notStrictEqual(web.aec, false, 'A browser keeps echo cancellation on the share: Edge leaves the call out only with it');
   const desktop = createApp(); desktop.document.documentElement.classList.add('desktop-client');
   const app = config(desktop);
   assert.strictEqual(app.cancel, true);
+  assert.strictEqual(app.aec, false, 'The Windows app leaves it off: it chops up shared game and music sound while someone talks');
   assert(/echo-cancel-worklet\.js(\?v=\d+)?$/.test(app.worklet), 'It points at the deployed canceller');
 });
 

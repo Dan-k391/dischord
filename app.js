@@ -2407,7 +2407,11 @@
       try {
         if (constraints && constraints.audio) {
           var audio = constraints.audio === true ? {} : Object.assign({}, constraints.audio);
-          audio.restrictOwnAudio = true; audio.echoCancellation = true;
+          audio.restrictOwnAudio = true;
+          // Edge leaves its own sound out only with echo cancellation on as well. The Windows app leaves it out by
+          // itself, and echo cancellation on shared game or music sound makes it crackle and warble whenever
+          // someone in the call talks ("current sound"), so the app keeps it off.
+          if (!config || config.aec !== false) audio.echoCancellation = true;
           constraints = Object.assign({}, constraints, { audio: audio });
         }
       } catch (_) { }
@@ -2528,7 +2532,8 @@
   }
   function protectShareAudio(frame, origin) {
     // the Windows app takes the call out itself where the system cannot (Windows 10); the browser shares as it is
-    const config = { cancel: document.documentElement.classList.contains('desktop-client'), worklet: new URL('echo-cancel-worklet.js?v=2', location.href).href };
+    const desktop = document.documentElement.classList.contains('desktop-client');
+    const config = { cancel: desktop, aec: !desktop, worklet: new URL('echo-cancel-worklet.js?v=2', location.href).href };
     const code = '(' + shareOwnAudioPatch.toString() + ')(' + JSON.stringify(config) + ');';
     let tries = 0;
     const timer = setInterval(() => {
