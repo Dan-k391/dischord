@@ -4099,10 +4099,69 @@
   }
   const mentionsMe = (text) => !!text && (text.match(/(^|\s)@[\p{L}\p{N}_.-]{1,32}/gu) || []).some((t) => { const u = mentionTarget(t.trim()); return u && u.id === me.id; });
 
+  // ```lang
+  // code
+  // ``` is a code block, like Discord's. A language on the first line that is listed here gets light
+  // highlighting: keywords, strings, numbers and comments.
+  const CODE_LANGS = (() => {
+    const c = { line: '//', block: true, quotes: `"'` };
+    const sets = {
+      js: ['js javascript jsx mjs cjs ts typescript tsx', { ...c, quotes: '"\'`' }, 'async await break case catch class const continue debugger default delete do else export extends false finally for from function if import in instanceof let new null of return static super switch this throw true try typeof undefined var void while with yield interface type enum implements private public protected readonly as'],
+      py: ['py python', { line: '#', quotes: `"'` }, 'and as assert async await break class continue def del elif else except False finally for from global if import in is lambda None nonlocal not or pass raise return True try while with yield self print'],
+      c: ['c h cpp c++ cc hpp cs csharp java kotlin kt swift dart', c, 'auto bool break case catch char class const continue default delete do double else enum extern false final finally float for goto if implements import include int interface long namespace new null nullptr override package private protected public return short signed sizeof static string struct super switch template this throw true try typedef union unsigned using var virtual void volatile while'],
+      go: ['go golang', { ...c, quotes: '"\'`' }, 'break case chan const continue default defer else fallthrough false for func go goto if import interface map nil package range return select struct switch true type var'],
+      rust: ['rs rust', c, 'as async await break const continue crate else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while'],
+      sh: ['sh bash shell zsh ps1 powershell bat cmd', { line: '#', quotes: `"'` }, 'if then else elif fi for while do done case esac in function return export local echo exit set function param foreach'],
+      sql: ['sql', { line: '--', block: true, quotes: `'"` }, 'select from where and or not insert into values update set delete create table drop alter index join left right inner outer on group by order having limit as distinct null is like in between union all primary key'],
+      css: ['css scss less', { block: true, quotes: `"'` }, 'important media import from to and not only'],
+      json: ['json jsonc', { line: '//', block: true, quotes: '"' }, 'true false null'],
+      yaml: ['yaml yml toml ini', { line: '#', quotes: `"'` }, 'true false null yes no on off'],
+    };
+    const out = {};
+    for (const [names, rule, words] of Object.values(sets)) {
+      const kw = new Set(words.split(' ').concat(words.toLowerCase().split(' ')));
+      for (const n of names.split(' ')) out[n] = { ...rule, kw, ci: names.startsWith('sql') };
+    }
+    return out;
+  })();
+  function highlightCode(code, lang) {
+    const L = CODE_LANGS[lang];
+    if (!L) return esc(code);
+    const parts = [];
+    if (L.block) parts.push('\\/\\*[\\s\\S]*?(?:\\*\\/|$)');
+    if (L.line) parts.push(L.line.replace(/[/*]/g, '\\$&') + '[^\\n]*');
+    for (const q of L.quotes) parts.push(q + '(?:\\\\[\\s\\S]|(?!' + q + ')[^\\\\' + (q === '`' ? '' : '\\n') + '])*' + q + '?');
+    parts.push('\\b\\d[\\d_]*(?:\\.\\d+)?(?:e[+-]?\\d+)?\\b|\\b0x[0-9a-f]+\\b', '[A-Za-z_$][\\w$]*');
+    const re = new RegExp(parts.map((p) => '(' + p + ')').join('|'), 'gi');
+    const kinds = [...(L.block ? ['c'] : []), ...(L.line ? ['c'] : []), ...[...L.quotes].map(() => 's'), 'n', 'w'];
+    let out = '', at = 0, m;
+    while ((m = re.exec(code))) {
+      out += esc(code.slice(at, m.index));
+      const kind = kinds[m.slice(1).findIndex((g) => g !== undefined)];
+      const word = m[0], k = kind === 'w' ? (L.kw.has(L.ci ? word.toLowerCase() : word) ? 'k' : '') : kind;
+      out += k ? `<span class="tk-${k}">${esc(word)}</span>` : esc(word);
+      at = m.index + word.length;
+      if (!word.length) re.lastIndex++;
+    }
+    return out + esc(code.slice(at));
+  }
+  function codeBlock(inner) {
+    let lang = '', code = inner;
+    const nl = inner.indexOf('\n');
+    if (nl >= 0) {
+      const first = inner.slice(0, nl).trim();
+      if (!first) code = inner.slice(nl + 1);
+      else if (/^[a-z0-9+#.-]{1,20}$/i.test(first) && inner.slice(nl + 1).trim()) { lang = first.toLowerCase(); code = inner.slice(nl + 1); }
+    }
+    code = code.replace(/\n$/, '');
+    return `<pre class="code-block"${lang ? ` data-lang="${esc(lang)}"` : ''}><button type="button" class="code-copy" data-copy-code title="Copy code" aria-label="Copy code">${icon('copy')}</button><code>${highlightCode(code, lang)}</code></pre>`;
+  }
   function formatText(raw) {
     const blocks = [];
-    let t = esc(raw).replace(/```(?:[a-z0-9]+\n)?([\s\S]*?)```/gi, (_, code) => { blocks.push(`<pre>${code}</pre>`); return `\u0000${blocks.length - 1}\u0000`; });
-    t = t.replace(/`([^`\n]+)`/g, (_, code) => { blocks.push(`<code>${code}</code>`); return `\u0000${blocks.length - 1}\u0000`; });
+    const keep = (html) => { blocks.push(html); return `\u0000${blocks.length - 1}\u0000`; };
+    // code is taken out of the raw text first, so nothing else (links, mentions, bold) applies inside it
+    let t = String(raw).replace(/\u0000/g, '').replace(/```([\s\S]*?)```/g, (_, inner) => keep(codeBlock(inner)));
+    t = esc(t).replace(/`([^`\n]+)`/g, (_, code) => keep(`<code>${code}</code>`));
     t = t
       .replace(/\b(https?:\/\/[^\s<]+[^\s<.,:;!?)\]'"])/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>')
       .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
@@ -5085,6 +5144,12 @@
   $('messages').onclick = (e) => {
     const more = e.target.closest('[data-message-menu]');
     if (more) { e.stopPropagation(); return messageMenu(more.dataset.messageMenu, e.clientX, e.clientY); }
+    const copy = e.target.closest('[data-copy-code]');
+    if (copy) {
+      e.stopPropagation();
+      const code = copy.parentElement.querySelector('code');
+      return (navigator.clipboard ? navigator.clipboard.writeText(code ? code.textContent : '') : Promise.reject()).then(() => toast('Code copied', 1200), () => toast('Could not copy the code.'));
+    }
     const keep = e.target.closest('[data-video-save]');
     if (keep) {
       e.stopPropagation();
@@ -5161,6 +5226,8 @@
   });
   input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !mobileLayout()) {
+      // inside a code block that is still open (an odd number of ``` before the caret), Enter starts a new line
+      if ((input.value.slice(0, input.selectionStart).match(/```/g) || []).length % 2) return;
       e.preventDefault();
       if (sendMessage(input.value)) input.value = '';
       autosize();

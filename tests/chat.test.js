@@ -214,7 +214,7 @@ function createApp(windowOverrides = {}) {
       set deaf(value) { deaf = value; },
       set msgSound(value) { msgSound = value; },
       get fileTransfers() { return fileTransfers; },
-      held, holdFile, leaveServer, settingsModal,
+      held, holdFile, leaveServer, settingsModal, formatText,
     };
   `;
   window.captureWire = (envelope) => sent.push({ sid: 'testserver', packet: plain(envelope.sendData.dischord), uuid: envelope.UUID });
@@ -1076,6 +1076,27 @@ test('settings offer an update check only inside the apps, which run the check t
     app.node('mUpdate').onclick();
     assert.deepStrictEqual(asked, [shell], 'The app is asked to check');
   }
+});
+
+test('code blocks: a language line, highlighting, a copy button, and nothing else applied inside', () => {
+  const { formatText } = createApp().api;
+  const js = formatText('look:\n```js\nconst a = "hi"; // note\nreturn 42;\n```');
+  assert(js.includes('<pre class="code-block" data-lang="js">'), 'The first line names the language');
+  assert(!js.includes('>js\n'), 'The language line is not part of the code');
+  assert(js.includes('<span class="tk-k">const</span>') && js.includes('<span class="tk-s">&quot;hi&quot;</span>') &&
+    js.includes('<span class="tk-c">// note</span>') && js.includes('<span class="tk-n">42</span>'), js);
+  assert(js.includes('data-copy-code'), 'A copy button');
+  const plain = formatText('```\n<script>alert(1)</script> **x** https://a.example @alice\n```');
+  assert(plain.includes('&lt;script&gt;alert(1)&lt;/script&gt;'), 'Code is shown, never run');
+  assert(!/<b>|<a |class="mention/.test(plain), 'No bold, links or mentions inside code');
+  assert(!plain.includes('data-lang'), 'No language: no highlighting');
+  const unknown = formatText('```brainfuck\n+++.\n```');
+  assert(unknown.includes('data-lang="brainfuck"') && unknown.includes('+++.') && !unknown.includes('tk-'), 'An unknown language is shown plain');
+  const oneLine = formatText('run ```npm test``` now');
+  assert(oneLine.includes('<code>npm test</code>'), 'A one-line block keeps its text');
+  assert(formatText('use `x < y` here').includes('<code>x &lt; y</code>'), 'Inline code still works');
+  assert(!formatText('``` not closed').includes('code-block'), 'An unclosed block is plain text');
+  assert(!formatText('a\u0000' + '0\u0000b').includes('\u0000'), 'Placeholders cannot be forged');
 });
 
 test('an owner opens their own selected file in the viewer without it leaving the app', async () => {
