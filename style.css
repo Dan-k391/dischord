@@ -421,6 +421,12 @@ button { font: inherit; color: inherit; cursor: pointer; }
   display: inline-flex; align-items: center; justify-content: center; gap: 6px; font-size: 12px; font-weight: 600;
 }
 .tool-btn:hover { background: rgba(0,0,0,.85); }
+.tool-btn:disabled { opacity: .6; cursor: default; }
+.tool-btn.rc-stop { background: #da373c; }
+.tool-btn.rc-stop:hover { background: #a12829; }
+/* a stream under remote control: outlined; the controller's pointer and keys go to it */
+.tile.rc-active { box-shadow: 0 0 0 2px #da373c; }
+.tile.rc-active:not(.self) { touch-action: none; } /* a finger on the stream steers the remote pointer, not the page */
 .tool-btn .ico-svg { width: 16px; height: 16px; }
 .tile:fullscreen { border-radius: 0; }
 .tile:fullscreen .tile-tools { bottom: 16px; right: 16px; opacity: .45; z-index: 2; }

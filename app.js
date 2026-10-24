@@ -108,6 +108,7 @@
     plusCircle: '<circle cx="12" cy="12" r="9.5"/><path d="M12 8v8M8 12h8"/>',
     volume: '<path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/>',
     eyeOff: '<path d="M3 3l18 18M10.6 6.1A9.8 9.8 0 0 1 12 6c5 0 9 6 9 6a17 17 0 0 1-3.2 3.8M6.6 6.6A17 17 0 0 0 3 12s4 6 9 6a9 9 0 0 0 4.2-1"/>',
+    cursor: '<path d="M5 3l14 7.5-6.2 1.7L9.6 18z"/><path d="M12.8 12.2l5 5"/>',
     copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>',
     reply: '<path d="M9 4l-6 6 6 6M3 10h9a8 8 0 0 1 8 8"/>',
     file: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/>',
@@ -297,7 +298,7 @@
   function cleanState(st) {
     st = st && typeof st === 'object' ? st : {};
     const br = (v) => (Number.isFinite(+v) && +v >= 100 && +v <= 50000 ? Math.round(+v) : 0);
-    return { m: !!st.m, d: !!st.d, c: !!st.c, s: !!st.s, cb: br(st.cb), sb: br(st.sb) };
+    return { m: !!st.m, d: !!st.d, c: !!st.c, s: !!st.s, cb: br(st.cb), sb: br(st.sb), rc: !!st.rc };
   }
 
   dms = (store.get('dms', []) || []).map((u) => { const c = cleanUser(u); return c && (u.hid > 0 ? { ...c, hid: +u.hid } : c); }).filter(Boolean);
@@ -379,7 +380,7 @@
   }
 
   const myVoiceIn = (sid) => (voice && voice.sid === sid ? voice.cid : null);
-  const myState = () => ({ m: !micOn || deaf, d: deaf, c: !!(voice && voice.cam), s: !!(voice && voice.ss), cb: av.camBr, sb: voice && voice.ssSettings ? voice.ssSettings.ssBr : av.ssBr });
+  const myState = () => ({ m: !micOn || deaf, d: deaf, c: !!(voice && voice.cam), s: !!(voice && voice.ss), cb: av.camBr, sb: voice && voice.ssSettings ? voice.ssSettings.ssBr : av.ssBr, ...(canBeControlled() ? { rc: 1 } : {}) });
 
   // When the call in a voice channel started. Nobody owns that fact, so everyone in the call keeps
   // repeating how long it has been running as far as they know, and each client keeps the longest.
@@ -426,6 +427,8 @@
   }
 
   function peerGone(sid, uuid) {
+    if (rcHost && rcHost.sid === sid && rcHost.uuid === uuid) rcHostEnd(false);
+    if (rcCtl && rcCtl.sid === sid && rcCtl.uuid === uuid) rcCtlEnd(false, `Lost the connection to ${rcCtl.name}: remote control ended.`);
     const map = peers[sid];
     if (!map) return;
     const p = map.get(uuid);
@@ -726,6 +729,8 @@
         if (Array.isArray(p.ids)) forgetUsers(sid, p.ids.slice(0, 200).filter(isId), false);
         break;
       case 'bye': {
+        if (rcHost && rcHost.sid === sid && rcHost.uuid === uuid) rcHostEnd(false);
+        if (rcCtl && rcCtl.sid === sid && rcCtl.uuid === uuid) rcCtlEnd(false, `${rcCtl.name} left: remote control ended.`);
         const m = members[sid][t.user.id];
         // only this connection is leaving; the same person may still be here in another tab
         if (m) { if (m.conns) m.conns.delete(uuid || '_'); m.uuids.delete(uuid); settle(m); if (!m.conns || !m.conns.size) m.seen = 0; }
@@ -734,6 +739,8 @@
       case 'ping':
         if (Number.isFinite(p.pt) && uuid) send(sid, { t: 'pong', pt: p.pt }, uuid);
         break;
+      case 'rc-req': rcRequest(sid, uuid, t.user, p); break;
+      case 'rc': case 'rc-ok': case 'rc-no': case 'rc-end': rcPacket(sid, uuid, t.user, p); break;
       case 'pong': {
         const m = members[sid][t.user.id], rtt = now() - p.pt;
         if (m && Number.isFinite(rtt) && rtt >= 0 && rtt < 60000) { m.rtt = m.rtt ? m.rtt * 0.6 + rtt * 0.4 : rtt; m.rttAt = now(); }
@@ -2156,6 +2163,7 @@
 
   function leaveVoice() {
     if (!voice) return;
+    rcCtlEnd(true);
     dropVoiceFrame();
     stopShare(true);
     voice = null;
@@ -2568,8 +2576,177 @@
     try { f.contentWindow.postMessage({ close: true }, '*'); } catch { }
     setTimeout(() => f.remove(), 300);
     voice.ssFrame = null; voice.ss = false; voice.ssSettings = null; voice.ssQuality = null;
+    rcHostEnd(true); // nobody controls a share that has ended
     if (!silent) { broadcastState(); renderControls(); renderPresence(); }
   }
+
+  // ---- remote control of a screen share. Only the Windows app can be controlled: it alone can move the mouse
+  // and type on its computer. Anyone watching the share can ask. The app asks the person sharing in a dialog
+  // of its own (nothing on this page, and nobody else, can answer it), lets one person control at a time, and
+  // can stop it any moment (a bar on top of everything, Ctrl+Alt+Esc, the tray). Ending the share, leaving the
+  // call or disconnecting ends it too. Messages: rc-req (viewer asks), rc-ok / rc-no (answer), rc (input),
+  // rc-end (either side stops).
+  const rcAvailable = () => document.documentElement.classList.contains('desktop-control');
+  const canBeControlled = () => rcAvailable() && !!(voice && voice.ss);
+  let rcHost = null; // { sid, uuid, uid, name }: the one person controlling this computer
+  let rcAsk = null;  // { sid, uuid, uid, name, id }: a request waiting for the answer here
+  let rcCtl = null;  // { sid, uuid, uid, name, key, vss, state: 'asking' | 'on', timer }: the share I control
+  const rcShell = (detail) => window.dispatchEvent(new CustomEvent('dischord-rc', { detail }));
+  function rcHostEnd(tell, quiet) {
+    if (!rcHost) return;
+    const h = rcHost;
+    rcHost = null;
+    rcShell({ op: 'end' });
+    if (tell) send(h.sid, { t: 'rc-end' }, h.uuid);
+    if (!quiet) toast(`${h.name} is no longer controlling your screen.`);
+    renderStage();
+  }
+  function rcRequest(sid, uuid, user, p) {
+    if (!uuid) return;
+    const no = (why) => send(sid, { t: 'rc-no', why }, uuid);
+    if (!canBeControlled() || voice.sid !== sid || p.vss !== voice.ssVs) return no('unavailable');
+    if (rcHost || rcAsk) return no('busy'); // one person at a time, and one question at a time
+    rcAsk = { sid, uuid, uid: user.id, name: user.name, id: rid(12) };
+    rcShell({ op: 'ask', id: rcAsk.id, name: user.name });
+  }
+  window.addEventListener('dischord-rc-answer', (e) => {
+    const d = e.detail || {};
+    if (!rcAsk || d.id !== rcAsk.id) { if (d.allow) rcShell({ op: 'end' }); return; }
+    const a = rcAsk;
+    rcAsk = null;
+    if (!d.allow || !canBeControlled() || voice.sid !== a.sid) {
+      if (d.allow) rcShell({ op: 'end' });
+      return send(a.sid, { t: 'rc-no', why: 'declined' }, a.uuid);
+    }
+    rcHost = { sid: a.sid, uuid: a.uuid, uid: a.uid, name: a.name };
+    const size = (n) => (Number.isInteger(n) && n > 0 && n < 100000 ? n : undefined);
+    send(a.sid, { t: 'rc-ok', w: size(d.w), h: size(d.h) }, a.uuid);
+    toast(`${a.name} is controlling your screen. Stop it from the bar at the top of your screen or Ctrl+Alt+Esc.`, 5000);
+    renderStage();
+  });
+  // stopped in the app (its bar, shortcut, tray, or the share ending): tell the person who was controlling
+  window.addEventListener('dischord-rc-ended', () => {
+    if (!rcHost) return;
+    const h = rcHost;
+    rcHost = null;
+    send(h.sid, { t: 'rc-end' }, h.uuid);
+    toast(`${h.name} is no longer controlling your screen.`);
+    renderStage();
+  });
+  function rcPacket(sid, uuid, user, p) {
+    const fromHost = rcCtl && rcCtl.sid === sid && rcCtl.uuid === uuid && rcCtl.uid === user.id;
+    const fromController = rcHost && rcHost.sid === sid && rcHost.uuid === uuid && rcHost.uid === user.id;
+    if (p.t === 'rc') {
+      if (!fromController) return;
+      const n = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+      const ev = { e: typeof p.e === 'string' ? p.e.slice(0, 2) : '', x: n(p.x), y: n(p.y), b: n(p.b), dx: n(p.dx), dy: n(p.dy), c: typeof p.c === 'string' ? p.c.slice(0, 31) : undefined };
+      if (ev.x !== undefined) ev.x = Math.min(1, Math.max(0, ev.x));
+      if (ev.y !== undefined) ev.y = Math.min(1, Math.max(0, ev.y));
+      return rcShell({ op: 'input', ev });
+    }
+    if (p.t === 'rc-end') {
+      if (fromController) return rcHostEnd(false);
+      if (fromHost) return rcCtlEnd(false, `${rcCtl.name} ended remote control.`);
+      return;
+    }
+    if (p.t === 'rc-ok') {
+      if (!fromHost || rcCtl.state !== 'asking') return send(sid, { t: 'rc-end' }, uuid); // nobody here is waiting for it
+      clearTimeout(rcCtl.timer);
+      rcCtl.state = 'on';
+      if (Number.isInteger(p.w) && Number.isInteger(p.h) && p.w > 0 && p.h > 0 && p.w < 100000 && p.h < 100000) { rcCtl.w = p.w; rcCtl.h = p.h; }
+      toast(`You are controlling ${rcCtl.name}'s screen. Click into it to type there.`, 4000);
+      return renderStage();
+    }
+    if (p.t === 'rc-no' && fromHost && rcCtl.state === 'asking') {
+      const name = rcCtl.name;
+      rcCtlEnd(false, p.why === 'busy' ? `Someone else is already controlling ${name}'s screen.` :
+        p.why === 'declined' ? `${name} declined remote control.` : `${name}'s screen can't be controlled right now.`);
+    }
+  }
+  function rcCtlRequest(key) {
+    if (!voice || rcCtl) return;
+    const uid = key.replace(/:s$/, ''), m = members[voice.sid] && members[voice.sid][uid];
+    let uuid = null, vss = null;
+    if (m && m.conns) for (const [id, c] of m.conns) if (c.vss && id !== '_') { uuid = id; vss = c.vss; }
+    if (!uuid || !m.st || !m.st.rc) return toast('This screen can\'t be controlled.');
+    rcCtl = { sid: voice.sid, uuid, uid, name: m.user.name, key, vss, state: 'asking',
+      timer: setTimeout(() => { if (rcCtl && rcCtl.state === 'asking') rcCtlEnd(true, `${m.user.name} didn't answer.`); }, 65000) };
+    send(voice.sid, { t: 'rc-req', vss }, uuid);
+    toast(`Asking ${m.user.name} for control…`, 3000);
+    renderStage();
+  }
+  function rcCtlEnd(tell, message) {
+    if (!rcCtl) return;
+    const c = rcCtl;
+    rcKeysUp();
+    rcCtl = null;
+    clearTimeout(c.timer);
+    if (tell) send(c.sid, { t: 'rc-end' }, c.uuid);
+    if (message) toast(message);
+    renderStage();
+  }
+  // ---- sending my input to the share I control
+  let rcKeyboard = false, rcMove = null, rcMoveQueued = false;
+  const rcHeld = new Set();
+  const rcSend = (ev) => { if (rcCtl && rcCtl.state === 'on') send(rcCtl.sid, { t: 'rc', ...ev }, rcCtl.uuid); };
+  function rcKeysUp() { for (const c of rcHeld) rcSend({ e: 'ku', c }); rcHeld.clear(); }
+  const rcTileOf = (target) => {
+    const tile = rcCtl && rcCtl.state === 'on' && target && target.closest && target.closest('#tiles .tile');
+    return tile && tile.dataset.key === rcCtl.key && !target.closest('.tile-tools') ? tile : null;
+  };
+  // where the pointer is on the picture itself, 0..1. The stream plays letterboxed in a frame that fills the tile;
+  // its shape comes from the live stream stats, or else from the size the sharer's app reported.
+  function rcPoint(tile, e) {
+    const f = tile.querySelector('.tile-media iframe');
+    const vw = +tile.dataset.rw || (rcCtl && rcCtl.w), vh = +tile.dataset.rh || (rcCtl && rcCtl.h);
+    if (!f || !vw || !vh) return null;
+    const r = f.getBoundingClientRect(), k = Math.min(r.width / vw, r.height / vh);
+    const w = vw * k, h = vh * k, left = r.left + (r.width - w) / 2, top = r.top + (r.height - h) / 2;
+    const x = (e.clientX - left) / w, y = (e.clientY - top) / h;
+    return x >= 0 && x <= 1 && y >= 0 && y <= 1 ? { x: Math.round(x * 10000) / 10000, y: Math.round(y * 10000) / 10000 } : null;
+  }
+  (() => {
+    const tiles = $('tiles');
+    if (!tiles) return;
+    const grab = (e) => { e.preventDefault(); e.stopPropagation(); };
+    tiles.addEventListener('pointermove', (e) => {
+      const tile = rcTileOf(e.target);
+      if (!tile) return;
+      grab(e);
+      rcMove = rcPoint(tile, e);
+      if (!rcMove || rcMoveQueued) return;
+      rcMoveQueued = true;
+      bgTimer.sleep(16).then(() => { rcMoveQueued = false; if (rcMove) rcSend({ e: 'm', ...rcMove }); }); // about 60 a second at most
+    }, true);
+    for (const type of ['pointerdown', 'pointerup']) tiles.addEventListener(type, (e) => {
+      const tile = rcTileOf(e.target);
+      if (!tile) { if (type === 'pointerdown' && rcKeyboard) { rcKeyboard = false; rcKeysUp(); } return; }
+      grab(e);
+      const at = rcPoint(tile, e);
+      if (type === 'pointerdown') {
+        rcKeyboard = true;
+        try { tile.setPointerCapture(e.pointerId); } catch { }
+        try { tile.focus({ preventScroll: true }); } catch { }
+      }
+      if (at || type === 'pointerup') rcSend({ e: type === 'pointerdown' ? 'd' : 'u', b: e.button === 1 || e.button === 2 ? e.button : 0, ...(at || {}) });
+    }, true);
+    for (const type of ['click', 'dblclick', 'contextmenu', 'mousedown']) tiles.addEventListener(type, (e) => { if (rcTileOf(e.target)) grab(e); }, true);
+    tiles.addEventListener('wheel', (e) => {
+      if (!rcTileOf(e.target)) return;
+      grab(e);
+      const k = e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1;
+      rcSend({ e: 'w', dx: Math.round(e.deltaX * k), dy: Math.round(e.deltaY * k) });
+    }, { capture: true, passive: false });
+    // keys go to the controlled screen after a click into it, until a click elsewhere
+    for (const type of ['keydown', 'keyup']) document.addEventListener(type, (e) => {
+      if (!rcKeyboard || !rcCtl || rcCtl.state !== 'on' || e.isComposing || !e.code) return;
+      if (type === 'keydown' && e.target && e.target.closest && e.target.closest('input, textarea, [contenteditable="true"]')) return;
+      e.preventDefault(); e.stopPropagation();
+      if (type === 'keydown') rcHeld.add(e.code); else rcHeld.delete(e.code);
+      rcSend({ e: type === 'keydown' ? 'kd' : 'ku', c: e.code });
+    }, true);
+    window.addEventListener('blur', () => { if (rcKeyboard) { rcKeyboard = false; rcKeysUp(); } });
+  })();
   window.addEventListener('dischord-screen-share-cancelled', (e) => {
     if (voice && voice.ssFrame && !voice.ss && e.detail?.streamId === voice.ssVs) stopShare();
   });
@@ -3185,6 +3362,7 @@
   const unwatched = new Set();  // screen share stream ids I chose not to watch (no video is received for them)
   function setWatching(vss, on) {
     if (!vss) return;
+    if (!on && rcCtl && rcCtl.vss === vss) rcCtlEnd(true);
     if (on) unwatched.delete(vss); else unwatched.add(vss);
     renderStage();
   }
@@ -3343,13 +3521,19 @@
       if (!hasVid) el.querySelector('.tile-stats').textContent = sendNote[t.key] || '';
       el.classList.toggle('screen', t.screen);
       el.classList.toggle('self', t.self);
+      el.classList.toggle('rc-active', !!(t.screen && ((rcCtl && rcCtl.state === 'on' && rcCtl.key === t.key) || (t.self && rcHost))));
       const st = t.st;
       const label = t.screen ? `${esc(t.user.name)}${t.self ? ' (you)' : ''}'s screen` : `${esc(t.user.name)}${t.self ? ' (you)' : ''}`;
       const name = (t.screen ? '<span class="live-tag">LIVE</span>' : (st.d ? icon('deaf', 'mini off') : st.m ? icon('micOff', 'mini off') : '')) + `<span>${label}</span>`;
       const nameEl = el.querySelector('.tile-name');
       if (nameEl.innerHTML !== name) nameEl.innerHTML = name;
       const tools = hasVid
-        ? (t.screen && !t.self ? `<button class="tool-btn" data-unwatch="${esc(t.vss)}" title="Stop watching">${icon('eyeOff')}</button>` : '') +
+        ? (t.screen && t.self && rcHost ? `<button class="tool-btn rc-stop" data-rc-host-stop title="${esc(rcHost.name)} is controlling your screen">${icon('cursor')}Stop control</button>` : '') +
+          (t.screen && !t.self && rcCtl && rcCtl.key === t.key ? (rcCtl.state === 'on'
+            ? `<button class="tool-btn rc-stop" data-rc-stop title="Give back control">${icon('cursor')}Stop controlling</button>`
+            : `<button class="tool-btn" disabled title="Waiting for an answer">${icon('cursor')}Asking…</button>`)
+            : t.screen && !t.self && t.st.rc && !rcCtl ? `<button class="tool-btn" data-rc="${esc(t.key)}" title="Ask to control this screen">${icon('cursor')}Control</button>` : '') +
+          (t.screen && !t.self ? `<button class="tool-btn" data-unwatch="${esc(t.vss)}" title="Stop watching">${icon('eyeOff')}</button>` : '') +
           (t.self ? '' : `<button class="tool-btn q-btn" data-q="${esc(t.key)}" title="Stream quality">${esc(streamBr[t.vs] ? mbps(br) : 'Auto · ' + mbps(br))}</button>`) +
           `<button class="tool-btn" data-wfs="${esc(t.key)}" title="${winFs === t.key ? 'Exit window fullscreen' : 'Fill the window'}">${icon(winFs === t.key ? 'collapse' : 'winfs')}</button>` +
           `<button class="tool-btn fs-btn" data-fs="${esc(t.key)}" title="${document.fullscreenElement === el ? 'Exit fullscreen' : 'Fullscreen'}">${icon(document.fullscreenElement === el ? 'collapse' : 'expand')}</button>`
@@ -3593,6 +3777,9 @@
     const vid = Object.values(st).find((o) => o && typeof o === 'object' && (o._type === 'video' || /video/i.test(o.type || ''))) || st;
     const p2p = st['Peer-to-Peer'] || {};
     const res = vid.Resolution || vid.resolution || (vid._frameWidth ? vid._frameWidth + 'x' + vid._frameHeight : '');
+    // the picture's shape, for aiming remote control inside its letterbox
+    const size = String(res).match(/(\d+)\s*x\s*(\d+)/);
+    if (size && +size[1] > 0 && +size[2] > 0) { el.dataset.rw = size[1]; el.dataset.rh = size[2]; }
     const fps = vid.FPS ?? vid.fps;
     const br = +(vid.Bitrate_in_kbps ?? vid.video_bitrate_kbps ?? 0);
     const codec = vid.codec || vid.video_codec || '';
@@ -5457,6 +5644,10 @@
     if ($('voiceStage').classList.contains('mini')) return; // the preview only jumps back to the call
     const q = e.target.closest('[data-q]');
     if (q) { e.stopPropagation(); return qualityMenu(q.dataset.q, q); }
+    const rc = e.target.closest('[data-rc]');
+    if (rc) { e.stopPropagation(); return rcCtlRequest(rc.dataset.rc); }
+    if (e.target.closest('[data-rc-stop]')) { e.stopPropagation(); return rcCtlEnd(true, 'You gave back control.'); }
+    if (e.target.closest('[data-rc-host-stop]')) { e.stopPropagation(); return rcHostEnd(true); }
     const wf = e.target.closest('[data-wfs]');
     if (wf) { winFs = winFs === wf.dataset.wfs ? null : wf.dataset.wfs; if (document.fullscreenElement) document.exitFullscreen(); return renderStage(); }
     const fs = e.target.closest('[data-fs]');

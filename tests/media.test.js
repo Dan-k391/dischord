@@ -171,7 +171,11 @@ function createApp({ micOn = true, deaf = false, av = {}, legacyAv = false, vol 
       get micOn() { return micOn; }, get deaf() { return deaf; },
       setAudio(mic, muted) { micOn = mic; deaf = muted; },
       members, userVol, cur,
+      rcRequest, rcPacket, rcHostEnd, rcCtlRequest, rcCtlEnd,
+      get rcHost() { return rcHost; }, get rcCtl() { return rcCtl; },
     };
+    window.sentPackets = [];
+    meshes.testserver = { iframe: { contentWindow: { postMessage: (o) => { if (o && o.sendData) window.sentPackets.push({ to: o.UUID, p: o.sendData.dischord }); } }, remove() {} } };
   `;
   const source = appSource.replace(boot, '').replace(/\}\)\(\);\s*$/, hooks + '\n})();');
   vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'file-transfer.js'), 'utf8'), context, { filename: 'file-transfer.js' });
@@ -187,6 +191,21 @@ function createApp({ micOn = true, deaf = false, av = {}, legacyAv = false, vol 
       api.members[server.id][id] = { user: { id, name: id, color: '#5865f2' }, vc: 'lounge',
         vs: stream, vss: screen, st: { m: false, d: false, c: false, s: !!screen }, seen: clock.now(), uuids: new Set([id]) };
     } };
+}
+
+// remote control: what the page asked of the Windows app, and what it sent to whom
+function rcHarness({ app: appShell = true } = {}) {
+  const app = createApp();
+  if (appShell) app.document.documentElement.classList.add('desktop-control');
+  const shell = [];
+  app.window.addEventListener('dischord-rc', (e) => shell.push(e.detail));
+  const sent = (to, t) => app.window.sentPackets.filter((x) => x.to === to && (!t || x.p.t === t)).map((x) => x.p);
+  const bob = { id: 'bob', name: 'Bob', color: '#5865f2' }, carol = { id: 'carol', name: 'Carol', color: '#5865f2' };
+  return { app, shell, sent, bob, carol };
+}
+function startSharing(app) {
+  app.join(); app.api.toggleShare(); app.api.voice.ss = true; // as once the share's stream is up
+  return app.api.voice.ssVs;
 }
 
 function lastMessage(frame, key) {
@@ -402,6 +421,75 @@ test('the echo canceller takes out stop-start speech under other sound without b
   const left = energy(T - 4 * SR, T - late, (i) => out[i + late] - other[i]) / energy(T - 4 * SR, T - late, (i) => echo[i]);
   assert(10 * Math.log10(left) < -6, 'The call is at least 6 dB quieter after the canceller (' + (10 * Math.log10(left)).toFixed(1) + ' dB)');
   assert.strictEqual(resets, 0, 'The filter does not throw away what it learned');
+});
+
+test('remote control: the Windows app asks its owner, one controller, input only from them, ends with the share', () => {
+  const { app, shell, sent, bob, carol } = rcHarness();
+  const vss = startSharing(app);
+  assert.strictEqual(app.api.myState().rc, 1, 'The share says it can be controlled');
+  app.api.rcRequest('testserver', 'bobuuid', bob, { t: 'rc-req', vss });
+  const ask = shell.find((d) => d.op === 'ask');
+  assert(ask && ask.name === 'Bob', 'The app is asked, with who is asking');
+  app.api.rcRequest('testserver', 'caroluuid', carol, { t: 'rc-req', vss });
+  assert.strictEqual(sent('caroluuid', 'rc-no')[0].why, 'busy', 'One question at a time');
+  app.window.dispatch('dischord-rc-answer', { detail: { id: ask.id, allow: true } });
+  assert.strictEqual(sent('bobuuid', 'rc-ok').length, 1, 'Bob is told he may control');
+  assert.strictEqual(app.api.rcHost.uid, 'bob');
+  app.api.rcRequest('testserver', 'caroluuid', carol, { t: 'rc-req', vss });
+  assert.strictEqual(sent('caroluuid', 'rc-no').length, 2, 'Only one person controls');
+  app.api.rcPacket('testserver', 'bobuuid', bob, { t: 'rc', e: 'm', x: 1.7, y: 0.25 });
+  const input = shell.filter((d) => d.op === 'input');
+  assert.deepStrictEqual(input.map((d) => [d.ev.e, d.ev.x, d.ev.y]), [['m', 1, 0.25]], 'Input reaches the app, kept on the screen');
+  app.api.rcPacket('testserver', 'caroluuid', carol, { t: 'rc', e: 'kd', c: 'KeyA' });
+  app.api.rcPacket('testserver', 'bobuuid2', bob, { t: 'rc', e: 'kd', c: 'KeyA' });
+  assert.strictEqual(shell.filter((d) => d.op === 'input').length, 1, 'Nobody else, not even Bob from another tab, can send input');
+  app.api.stopShare();
+  assert(shell.some((d) => d.op === 'end'), 'Ending the share ends control in the app');
+  assert.strictEqual(sent('bobuuid', 'rc-end').length, 1, 'and tells Bob');
+  assert.strictEqual(app.api.rcHost, null);
+  assert(!app.api.myState().rc);
+});
+
+test('remote control: a declined request, a stop from the app, and a browser that cannot be controlled', () => {
+  const { app, shell, sent, bob } = rcHarness();
+  const vss = startSharing(app);
+  app.api.rcRequest('testserver', 'bobuuid', bob, { t: 'rc-req', vss });
+  app.window.dispatch('dischord-rc-answer', { detail: { id: shell[0].id, allow: false } });
+  assert.strictEqual(sent('bobuuid', 'rc-no')[0].why, 'declined');
+  app.api.rcRequest('testserver', 'bobuuid', bob, { t: 'rc-req', vss });
+  app.window.dispatch('dischord-rc-answer', { detail: { id: shell.filter((d) => d.op === 'ask')[1].id, allow: true } });
+  app.window.dispatch('dischord-rc-ended', { detail: { reason: 'stopped' } }); // the bar, Ctrl+Alt+Esc or the tray
+  assert.strictEqual(sent('bobuuid', 'rc-end').length, 1, 'Bob hears it ended');
+  assert.strictEqual(app.api.rcHost, null);
+  app.api.rcRequest('testserver', 'bobuuid', bob, { t: 'rc-req', vss: 'someoneelse' });
+  assert.strictEqual(sent('bobuuid', 'rc-no').pop().why, 'unavailable', 'Only the share being shown');
+  const web = rcHarness({ app: false });
+  const webVss = startSharing(web.app);
+  assert(!web.app.api.myState().rc, 'A browser does not offer control');
+  web.app.api.rcRequest('testserver', 'bobuuid', bob, { t: 'rc-req', vss: webVss });
+  assert.strictEqual(web.sent('bobuuid', 'rc-no')[0].why, 'unavailable');
+  assert(!web.shell.length, 'Nothing is asked');
+});
+
+test('remote control: asking, being accepted, giving back control, and nobody answering', () => {
+  const { app, sent, bob } = rcHarness({ app: false });
+  app.join();
+  app.addPeer('bob', 'streambob', 'ssbob');
+  const m = app.api.members.testserver.bob;
+  m.conns = new Map([['bobuuid', { vss: 'ssbob' }]]); m.st.rc = true;
+  app.api.rcCtlRequest('bob:s');
+  assert.strictEqual(sent('bobuuid', 'rc-req')[0].vss, 'ssbob', 'The request goes to the sharing connection');
+  assert.strictEqual(app.api.rcCtl.state, 'asking');
+  app.api.rcPacket('testserver', 'bobuuid', bob, { t: 'rc-ok' });
+  assert.strictEqual(app.api.rcCtl.state, 'on');
+  app.api.rcCtlEnd(true);
+  assert.strictEqual(sent('bobuuid', 'rc-end').length, 1, 'Giving back control tells Bob');
+  app.api.rcPacket('testserver', 'bobuuid', bob, { t: 'rc-ok' });
+  assert.strictEqual(sent('bobuuid', 'rc-end').length, 2, 'An answer nobody waits for is turned down');
+  app.api.rcCtlRequest('bob:s');
+  app.clock.advance(66000);
+  assert.strictEqual(app.api.rcCtl, null, 'No answer: the request lapses');
+  assert.strictEqual(sent('bobuuid', 'rc-end').length, 3);
 });
 
 test('a screen share still starts when the echo filter cannot be installed', () => {

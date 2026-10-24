@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const updater = require('./updater');
+const remoteControl = require('./remote-control');
 
 const SITE = new URL('https://dan-k391.github.io/dischord/');
 const MEDIA_ORIGIN = 'https://vdo.ninja';
@@ -26,6 +27,23 @@ const updates = updater.create({ getWindow: () => mainWindow, showWindow: () => 
 // The settings page in the hosted app asks for a check; its version line comes from here.
 ipcMain.on('dischord:check-updates', (event) => { if (mainWindow && event.sender === mainWindow.webContents) updates.check(true); });
 ipcMain.handle('dischord:app-version', () => app.getVersion());
+// What this app is sharing right now (screen or window), for remote control: input may only land there.
+let activeShare = null, refreshTray = () => {};
+const control = remoteControl.create({
+  getWindow: () => mainWindow, showWindow: () => showWindow(), getShare: () => activeShare,
+  onChange: (on, reason) => {
+    refreshTray();
+    // ended here (Stop bar, shortcut, tray, share ended): the page tells the person who was controlling
+    if (!on && reason !== 'remote' && appContents(mainWindow?.webContents)) mainWindow.webContents.send('dischord:rc-ended', { reason });
+  }
+});
+const fromApp = (event) => !!mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents && event.senderFrame === mainWindow.webContents.mainFrame;
+ipcMain.handle('dischord:rc-ask', (event, payload) => {
+  if (!fromApp(event) || typeof payload?.name !== 'string' || !payload.name || payload.name.length > 64) return { allow: false };
+  return control.ask(payload.name);
+});
+ipcMain.on('dischord:rc-input', (event, ev) => { if (fromApp(event)) control.input(ev); });
+ipcMain.on('dischord:rc-end', (event) => { if (fromApp(event)) control.end('remote'); });
 const prefsFile = () => path.join(app.getPath('userData'), 'desktop-prefs.json');
 function readPrefs() { try { return JSON.parse(fs.readFileSync(prefsFile(), 'utf8')) || {}; } catch { return {}; } }
 function writePrefs(next) { try { fs.writeFileSync(prefsFile(), JSON.stringify({ ...readPrefs(), ...next })); } catch { } }
@@ -153,6 +171,7 @@ ipcMain.on('dischord:screen-quality-restart-cancel', (event, payload) => {
 ipcMain.on('dischord:screen-share-stopped', (event, payload) => {
   if (!captureOwner(event) || typeof payload?.streamId !== 'string' || payload.streamId.length > 256) return;
   const selection = captureSelection(payload.streamId);
+  if (selection && activeShare && activeShare.frame === selection.frame) { activeShare = null; control.end('share'); }
   if (selection) {
     cancelledCaptureFrames.add(selection.frame);
     selectedCaptureFrames.delete(selection.frame);
@@ -172,6 +191,8 @@ function finishCapture(pending, source, includeAudio = false) {
     if (streamId) selectedCaptureFrames.set(pending.request.frame, {
       sourceId: source.id, displayId: source.display_id || '', streamId, includeAudio: !!streams.audio, restart: null
     });
+    if (activeShare && activeShare.sourceId !== source.id) control.end('share'); // a different screen now
+    activeShare = { frame: pending.request.frame, sourceId: source.id, displayId: source.display_id || '' };
   }
   try { pending.callback(streams); } catch { }
   pending.owner.removeListener('resize', pending.layout);
@@ -419,10 +440,10 @@ function createWindow(destination) {
   mainWindow.webContents.setUserAgent(browserUserAgent);
   mainWindow.webContents.on('did-start-navigation', (details) => {
     if (details.isSameDocument) return;
-    if (details.isMainFrame) selectedCaptureFrames = new WeakMap();
+    if (details.isMainFrame) { selectedCaptureFrames = new WeakMap(); activeShare = null; control.end('share'); }
     else if (details.frame) selectedCaptureFrames.delete(details.frame);
   });
-  mainWindow.webContents.on('render-process-gone', () => { selectedCaptureFrames = new WeakMap(); });
+  mainWindow.webContents.on('render-process-gone', () => { selectedCaptureFrames = new WeakMap(); activeShare = null; control.end('share'); });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     const invite = siteURL(url);
     if (invite) acceptInvite(invite); else openExternal(url);
@@ -495,10 +516,12 @@ function createTray() {
     { label: 'Open Dischord', click: showWindow },
     { label: 'Keep running when closed', type: 'checkbox', checked: keepRunning(), click: (item) => { writePrefs({ keepRunning: item.checked }); tray.setContextMenu(menu()); } },
     { label: 'Check for updates…', click: () => updates.check(true) },
+    { label: 'Stop remote control', enabled: control.active(), click: () => control.end('stopped') },
     { type: 'separator' },
     { label: 'Quit Dischord', click: () => app.quit() }
   ]);
   tray.setContextMenu(menu());
+  refreshTray = () => { if (tray && !tray.isDestroyed()) { tray.setContextMenu(menu()); tray.setToolTip(control.active() ? 'Dischord · ' + control.name() + ' is controlling your screen' : 'Dischord'); } };
   tray.on('click', showWindow);
 }
 
@@ -550,7 +573,7 @@ if (!app.requestSingleInstanceLock()) {
     createWindow(destination);
     updates.start();
   });
-  app.on('before-quit', () => { quitting = true; });
+  app.on('before-quit', () => { quitting = true; control.end('stopped'); });
   app.on('activate', () => { if (!mainWindow) createWindow(SITE); });
   app.on('window-all-closed', () => app.quit());
 }

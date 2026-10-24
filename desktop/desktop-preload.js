@@ -61,8 +61,27 @@ ipcRenderer.on('dischord:screen-quality-restart-failed', (_event, payload) => {
 // desktop-update: Settings can offer "Check for updates"; the check and its dialogs run in the app.
 function markDesktop() {
   document.documentElement.classList.add('desktop-client', 'desktop-' + process.platform, 'desktop-unload-guard', 'desktop-update');
+  // desktop-control: this app can be remotely controlled while it shares a screen (Windows only)
+  if (process.platform === 'win32') document.documentElement.classList.add('desktop-control');
   ipcRenderer.invoke('dischord:app-version').then((v) => { if (typeof v === 'string' && v.length < 32) document.documentElement.dataset.appVersion = v; }).catch(() => {});
   window.dispatchEvent(new Event('dischord-desktop-ready'));
 }
 window.addEventListener('DOMContentLoaded', markDesktop, { once: true });
 window.addEventListener('dischord-check-updates', () => ipcRenderer.send('dischord:check-updates'));
+
+// Remote control of this computer's screen share. The page relays a viewer's request; the app itself asks the
+// person here (a native dialog the page cannot answer) and injects the approved viewer's input.
+const rcEvent = (name, detail) => window.dispatchEvent(new CustomEvent(name, { detail }));
+window.addEventListener('dischord-rc', async (event) => {
+  const d = event.detail || {};
+  if (d.op === 'ask' && typeof d.id === 'string' && typeof d.name === 'string') {
+    let answer = null;
+    try { answer = await ipcRenderer.invoke('dischord:rc-ask', { name: d.name.slice(0, 64) }); } catch { }
+    const size = (n) => (Number.isInteger(n) && n > 0 && n < 100000 ? n : undefined);
+    rcEvent('dischord-rc-answer', { id: d.id, allow: answer?.allow === true, w: size(answer?.w), h: size(answer?.h) });
+  } else if (d.op === 'input' && d.ev && typeof d.ev === 'object') {
+    const ev = d.ev, n = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+    ipcRenderer.send('dischord:rc-input', { e: String(ev.e).slice(0, 2), x: n(ev.x), y: n(ev.y), b: n(ev.b), dx: n(ev.dx), dy: n(ev.dy), c: typeof ev.c === 'string' ? ev.c.slice(0, 31) : undefined });
+  } else if (d.op === 'end') ipcRenderer.send('dischord:rc-end');
+});
+ipcRenderer.on('dischord:rc-ended', (_event, payload) => rcEvent('dischord-rc-ended', { reason: typeof payload?.reason === 'string' ? payload.reason : 'stopped' }));

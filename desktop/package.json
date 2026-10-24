@@ -4,7 +4,9 @@
   "private": true,
   "description": "Dischord desktop client for the hosted peer-to-peer chat app.",
   "author": "Dan-k391",
-  "contributors": ["ZJJ-2785"],
+  "contributors": [
+    "ZJJ-2785"
+  ],
   "homepage": "https://dan-k391.github.io/dischord/",
   "repository": {
     "type": "git",
@@ -39,9 +41,24 @@
     "win": {
       "icon": "assets/icon.ico",
       "target": [
-        { "target": "portable", "arch": ["x64"] },
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "zip", "arch": ["x64"] }
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
     },
     "portable": {
@@ -57,5 +74,8 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
     }
+  },
+  "dependencies": {
+    "koffi": "3.3.3"
   }
 }
