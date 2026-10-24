@@ -925,25 +925,48 @@
     renderMessages();
   }
 
+  // Editing happens in place, like Discord: the message's text becomes a box, Enter saves, Escape cancels.
+  // The list is redrawn whenever anything arrives, so the box is part of that drawing and keeps its text,
+  // cursor and focus across redraws.
+  let editing = null; // { sid, cid, id, draft, start, end }
+  const editingMsg = () => editing && (getMsgs(editing.sid)[editing.cid] || []).find((x) => x.id === editing.id && !x.del);
   function editMessage(id) {
-    const list = getMsgs(cur.sid)[cur.cid] || [];
-    const m = list.find((x) => x.id === id);
-    if (!m || m.a.id !== me.id) return;
-    modal(`<h2>Edit message</h2>
-      <textarea id="mEdit" rows="4" maxlength="4000">${esc(m.text)}</textarea>
-      <div class="actions"><button class="btn link" data-close>Cancel</button><button class="btn primary" id="mOk">Save</button></div>`, () => {
-      const ta = $('mEdit');
-      ta.focus();
-      $('mOk').onclick = () => {
-        const text = ta.value.trim();
-        if (!text) return;
-        const e = { ...m, text, ed: 1 };
-        addMsg(cur.sid, e);
-        send(cur.sid, { t: 'edit', m: e });
-        closeModal();
-        renderMessages();
-      };
-    });
+    const m = (getMsgs(cur.sid)[cur.cid] || []).find((x) => x.id === id);
+    if (!m || m.a.id !== me.id || !m.text) return;
+    editing = { sid: cur.sid, cid: cur.cid, id, draft: m.text, start: m.text.length, end: m.text.length };
+    renderMessages();
+    const box = $('messages').querySelector('.edit-box');
+    if (box && typeof box.scrollIntoView === 'function') box.scrollIntoView({ block: 'nearest' });
+  }
+  function editorHtml() {
+    const phone = mobileLayout();
+    const actions = phone
+      ? '<button type="button" class="btn link" data-edit-cancel>Cancel</button><button type="button" class="btn primary" data-edit-save>Save</button>'
+      : 'escape to <button type="button" class="edit-link" data-edit-cancel>cancel</button> • enter to <button type="button" class="edit-link" data-edit-save>save</button>';
+    return `<div class="msg-edit"><textarea class="edit-box" rows="1" maxlength="4000" aria-label="Edit message">${esc(editing.draft)}</textarea><div class="edit-hint${phone ? ' phone' : ''}">${actions}</div></div>`;
+  }
+  function fitEditor(box) { box.style.height = 'auto'; box.style.height = Math.min(box.scrollHeight + 2, window.innerHeight * 0.5) + 'px'; }
+  function restoreEditor() {
+    const box = $('messages').querySelector('.edit-box');
+    if (!box) return;
+    fitEditor(box);
+    try { box.focus({ preventScroll: true }); box.setSelectionRange(editing.start, editing.end); } catch { }
+  }
+  function stopEditing() {
+    editing = null;
+    renderMessages();
+    $('msgInput').focus();
+  }
+  function saveEdit() {
+    const m = editingMsg();
+    if (!m) return stopEditing();
+    const text = editing.draft.trim();
+    if (text === m.text) return stopEditing();
+    if (!text) return confirmModal('Delete message', 'Saving an empty message deletes it. Delete it?', 'Delete', () => { editing = null; deleteMessage(m.id); });
+    const e = { ...m, text, ed: 1 };
+    addMsg(cur.sid, e);
+    send(cur.sid, { t: 'edit', m: e });
+    stopEditing();
   }
 
   function markRead(sid, cid) {
@@ -2939,6 +2962,7 @@
   }
   function selectChannel(cid) {
     const changed = cur.cid !== cid;
+    if (changed) editing = null; // an unsaved edit is dropped, as in Discord
     setMobilePane(null);
     saveComposerDraft();
     cur.cid = cid;
@@ -4233,7 +4257,8 @@
       // Image originals download from their preview controls, without a duplicate file card.
       const file = m.file && !window.DischordImages.isImage(m.file) && !poster ? `<div class="msg-file" data-file-card="${esc(m.id)}">${fileCardContent(s.id, m)}</div>` : '';
       const reply = renderReply(m);
-      const text = m.text ? `<div class="text">${formatText(m.text)}${edited}</div>` : '';
+      const text = editing && editing.id === m.id && editing.sid === s.id && editing.cid === m.cid && mine ? editorHtml() :
+        m.text ? `<div class="text">${formatText(m.text)}${edited}</div>` : '';
       const re = renderRe(m);
       if (head) {
         h += `<div class="msg head ${mentionsMe(m.text) ? 'mentions-me' : ''}" data-mid="${esc(m.id)}"><div class="gutter" data-uid="${esc(m.a.id)}" data-ctx="user">${avatar(a)}</div><div class="body">${more}
@@ -4246,6 +4271,7 @@
     }
     box.innerHTML = h;
     if (forceBottom || nearBottom) box.scrollTop = box.scrollHeight;
+    if (editing) restoreEditor();
     paintImages();
     renderReplyBar();
   }
@@ -5193,7 +5219,24 @@
     if (d) return deleteMessage(d.dataset.del);
     const ed = e.target.closest('[data-edit]');
     if (ed) return editMessage(ed.dataset.edit);
+    if (e.target.closest('[data-edit-save]')) return saveEdit();
+    if (e.target.closest('[data-edit-cancel]')) return stopEditing();
   };
+  $('messages').addEventListener('input', (e) => {
+    if (!editing || !e.target.classList || !e.target.classList.contains('edit-box')) return;
+    editing.draft = e.target.value; editing.start = e.target.selectionStart; editing.end = e.target.selectionEnd;
+    fitEditor(e.target);
+  });
+  $('messages').addEventListener('keyup', (e) => {
+    if (editing && e.target.classList && e.target.classList.contains('edit-box')) { editing.start = e.target.selectionStart; editing.end = e.target.selectionEnd; }
+  });
+  $('messages').addEventListener('keydown', (e) => {
+    if (!editing || !e.target.classList || !e.target.classList.contains('edit-box')) return;
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); return stopEditing(); }
+    // Enter saves on a keyboard, except inside a still-open ``` block; on a phone Enter is a new line and Save is a button
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !mobileLayout() &&
+        !((e.target.value.slice(0, e.target.selectionStart).match(/```/g) || []).length % 2)) { e.preventDefault(); saveEdit(); }
+  });
   $('messages').addEventListener('keydown', (e) => {
     const action = e.target.closest('.img-save[role="button"]');
     if (!action || (e.key !== 'Enter' && e.key !== ' ')) return;
@@ -5225,6 +5268,11 @@
     acceptMention(+b.dataset.i);
   });
   input.addEventListener('keydown', (e) => {
+    // Up in an empty message box edits your last message, as in Discord
+    if (e.key === 'ArrowUp' && !input.value && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey && !mobileLayout()) {
+      const last = (getMsgs(cur.sid)[cur.cid] || []).filter((m) => !m.del && m.text && m.a.id === me.id).pop();
+      if (last) { e.preventDefault(); return editMessage(last.id); }
+    }
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !mobileLayout()) {
       // inside a code block that is still open (an odd number of ``` before the caret), Enter starts a new line
       if ((input.value.slice(0, input.selectionStart).match(/```/g) || []).length % 2) return;

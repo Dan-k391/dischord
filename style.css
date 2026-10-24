@@ -226,14 +226,23 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .msg .time { font-size: 12px; color: var(--text-muted); }
 .msg .text { line-height: 1.375; white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere; }
 .msg .text a { color: #00a8fc; }
-.msg .text code { background: #2b2d31; padding: 1px 4px; border-radius: 4px; font-size: 90%; }
+.msg .text code { background: #2b2d31; padding: .1em .32em; border-radius: 4px; font: .86em/1.3 ui-monospace, "Cascadia Code", "SF Mono", Consolas, Menlo, monospace;
+  font-variant-ligatures: none; font-feature-settings: "liga" 0, "calt" 0; border: 1px solid #1e1f22; } /* same face as code blocks */
 .msg .text pre { background: #2b2d31; padding: 8px; border-radius: 4px; border: 1px solid #1e1f22; white-space: pre-wrap; margin: 4px 0; }
 /* code blocks: monospace, one line per line (scrolls sideways rather than wrapping), copy button on hover */
 .msg .text pre.code-block { position: relative; display: block; max-width: min(100%, 900px); margin: 6px 0 2px; padding: 9px 12px; border-radius: 6px; overflow-x: auto;
   white-space: pre; overflow-wrap: normal; word-wrap: normal; tab-size: 4; font: 13px/1.5 ui-monospace, "Cascadia Code", "SF Mono", Consolas, Menlo, monospace; color: #dbdee1;
   font-variant-ligatures: none; font-feature-settings: "liga" 0, "calt" 0; /* => and !== stay as typed */
   scrollbar-width: thin; scrollbar-color: #1a1b1e transparent; }
-.msg .text pre.code-block code { background: none; padding: 0; border-radius: 0; font: inherit; }
+.msg .text pre.code-block code { background: none; padding: 0; border: 0; border-radius: 0; font: inherit; }
+/* editing a message in place */
+.msg-edit { margin: 4px 0 2px; }
+.edit-box { display: block; width: 100%; min-height: 44px; max-height: 50vh; resize: none; box-sizing: border-box; padding: 11px 14px; border: 0; border-radius: 8px;
+  background: var(--bg-input, #383a40); color: var(--text); font: inherit; line-height: 1.375; outline: none; overflow-y: auto; }
+.edit-hint { margin-top: 4px; font-size: 12px; color: var(--text-muted); }
+.edit-hint.phone { display: flex; justify-content: flex-end; gap: 8px; }
+.edit-link { border: 0; padding: 0; background: none; color: #00a8fc; font: inherit; cursor: pointer; }
+.edit-link:hover { text-decoration: underline; }
 .code-copy { position: absolute; top: 6px; right: 6px; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; display: grid; place-items: center;
   background: #1e1f22; color: var(--text-muted); cursor: pointer; opacity: 0; transition: opacity .12s, color .12s; }
 .code-copy .ico-svg { width: 15px; height: 15px; }

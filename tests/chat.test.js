@@ -214,7 +214,8 @@ function createApp(windowOverrides = {}) {
       set deaf(value) { deaf = value; },
       set msgSound(value) { msgSound = value; },
       get fileTransfers() { return fileTransfers; },
-      held, holdFile, leaveServer, settingsModal, formatText,
+      held, holdFile, leaveServer, settingsModal, formatText, editMessage, saveEdit, stopEditing,
+      get editing() { return editing; },
     };
   `;
   window.captureWire = (envelope) => sent.push({ sid: 'testserver', packet: plain(envelope.sendData.dischord), uuid: envelope.UUID });
@@ -1097,6 +1098,40 @@ test('code blocks: a language line, highlighting, a copy button, and nothing els
   assert(formatText('use `x < y` here').includes('<code>x &lt; y</code>'), 'Inline code still works');
   assert(!formatText('``` not closed').includes('code-block'), 'An unclosed block is plain text');
   assert(!formatText('a\u0000' + '0\u0000b').includes('\u0000'), 'Placeholders cannot be forged');
+});
+
+test('editing happens in place: the text becomes a box, saving sends the edit, nothing pops up', () => {
+  const app = createApp();
+  const mine = app.api.cleanMsg(app.message({ id: 'mine1', a: { id: 'alice', name: 'Alice', color: '#5865f2' }, text: 'helo 66' }));
+  app.api.addMsg('testserver', mine);
+  app.api.renderMessages();
+  app.api.editMessage('mine1');
+  const html = app.node('messages').innerHTML;
+  assert(html.includes('class="edit-box"') && html.includes('helo 66</textarea>'), 'The message text turns into the edit box');
+  assert(html.includes('data-edit-save') && html.includes('data-edit-cancel'), 'escape to cancel, enter to save');
+  assert(!app.node('modal').innerHTML.includes('Edit message'), 'No popup');
+  app.api.editing.draft = 'hello 66';
+  app.api.saveEdit();
+  const sent = app.sent.find((x) => x.packet.t === 'edit');
+  assert(sent && sent.packet.m.text === 'hello 66' && sent.packet.m.ed === 1, 'The edit goes out');
+  assert.strictEqual(app.api.editing, null);
+  assert(app.node('messages').innerHTML.includes('hello 66') && !app.node('messages').innerHTML.includes('edit-box'), 'Back to the text, marked edited');
+  // unchanged: nothing is sent
+  app.api.editMessage('mine1'); app.api.saveEdit();
+  assert.strictEqual(app.sent.filter((x) => x.packet.t === 'edit').length, 1);
+  // someone else's message cannot be edited
+  app.api.addMsg('testserver', app.api.cleanMsg(app.message({ id: 'theirs' })));
+  app.api.editMessage('theirs');
+  assert.strictEqual(app.api.editing, null);
+});
+
+test('saving an emptied edit asks to delete the message', () => {
+  const app = createApp();
+  app.api.addMsg('testserver', app.api.cleanMsg(app.message({ id: 'mine2', a: { id: 'alice', name: 'Alice', color: '#5865f2' }, text: 'oops' })));
+  app.api.editMessage('mine2');
+  app.api.editing.draft = '   ';
+  app.api.saveEdit(); // the test harness confirms right away
+  assert(app.sent.some((x) => x.packet.t === 'del' && x.packet.m.id === 'mine2'), 'Deleted after confirming');
 });
 
 test('an owner opens their own selected file in the viewer without it leaving the app', async () => {
