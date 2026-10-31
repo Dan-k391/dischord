@@ -214,7 +214,7 @@ function createApp(windowOverrides = {}) {
       set deaf(value) { deaf = value; },
       set msgSound(value) { msgSound = value; },
       get fileTransfers() { return fileTransfers; },
-      held, holdFile, leaveServer, settingsModal, formatText, editMessage, saveEdit, stopEditing,
+      held, holdFile, leaveServer, settingsModal, formatText, editMessage, saveEdit, stopEditing, topoHtml,
       get editing() { return editing; },
     };
   `;
@@ -1132,6 +1132,21 @@ test('saving an emptied edit asks to delete the message', () => {
   app.api.editing.draft = '   ';
   app.api.saveEdit(); // the test harness confirms right away
   assert(app.sent.some((x) => x.packet.t === 'del' && x.packet.m.id === 'mine2'), 'Deleted after confirming');
+});
+
+test('topology: a line per person, coloured by the worst route they use, with the best round trip', () => {
+  const app = createApp();
+  app.api.members.testserver = { bob: { user: { id: 'bob', name: 'Bob <3', color: '#57f287' } }, carol: { user: { id: 'carol', name: 'Carol', color: '#eb459e' } } };
+  const svg = app.api.topoHtml(new Map([
+    ['bob', [{ kind: 'chat', route: 'lan', rtt: 40 }, { kind: 'voice', route: 'relay', rtt: 25 }]],
+    ['carol', [{ kind: 'screen', route: 'stun', rtt: null }]],
+  ]));
+  assert.strictEqual((svg.match(/class="tp-link /g) || []).length, 2, 'One line per person');
+  assert(svg.includes('tp-link relay') && svg.includes('tp-link stun'), 'Bob is relayed for one use, so his line is relayed');
+  assert(svg.includes('>25 ms<') && !svg.includes('>40 ms<'), 'The best round trip is shown');
+  assert(svg.includes('Bob &lt;3') && !svg.includes('Bob <3'), 'Names are escaped');
+  assert(svg.includes('chat · voice') && svg.includes('>screen<'), 'What each link carries');
+  assert(svg.includes('2 people connected to you, 1 relayed'));
 });
 
 test('an owner opens their own selected file in the viewer without it leaving the app', async () => {

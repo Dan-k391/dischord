@@ -4762,11 +4762,41 @@
         routeChanges: c.changes.map((x) => ({ at: new Date(x.at).toISOString(), from: x.from, to: x.to })) })),
     };
   }
+  // Topology: me in the middle, a line to each person I am connected to, styled by how it travels. Only my own
+  // links are known here; how the others reach each other is not visible from this device.
+  const TOPO_USES = { chat: 'chat', voice: 'voice', camera: 'camera', screen: 'screen', share: 'my share' };
+  function topoHtml(people) {
+    const nodes = [...people].map(([uid, list]) => {
+      const rtts = list.map((c) => c.rtt).filter((x) => Number.isFinite(x));
+      return { u: diagUser(uid), rtt: rtts.length ? Math.min(...rtts) : null, uses: [...new Set(list.map((c) => TOPO_USES[c.kind]))].join(' · '),
+        route: list.some((c) => c.route === 'relay') ? 'relay' : list.some((c) => c.route === 'stun') ? 'stun' : 'lan' };
+    }).sort((a, b) => ((a.u || {}).name || '~').localeCompare((b.u || {}).name || '~'));
+    const W = 640, H = 380, cx = W / 2, cy = H / 2, rx = 230, ry = 128;
+    const at = nodes.map((n, i) => { const a = -Math.PI / 2 + (2 * Math.PI * i) / nodes.length; return { ...n, x: cx + rx * Math.cos(a), y: cy + ry * Math.sin(a) }; });
+    const dot = (u, x, y, r) => `<circle cx="${x}" cy="${y}" r="${r}" fill="${u ? esc(u.color) : '#4e5058'}"/><text x="${x}" y="${y}" class="tp-init" style="font-size:${r * 0.9}px">${esc(u ? u.name[0].toUpperCase() : '?')}</text>`;
+    let lines = '', marks = '';
+    for (const n of at) {
+      lines += `<line x1="${cx}" y1="${cy}" x2="${n.x}" y2="${n.y}" class="tp-link ${n.route}"/>`;
+      if (n.rtt != null) lines += `<text x="${cx + (n.x - cx) * 0.55}" y="${cy + (n.y - cy) * 0.55}" class="tp-rtt">${n.rtt} ms</text>`;
+      const down = n.y >= cy - 1; // labels point away from the middle, so they never sit on a line
+      marks += `<g class="tp-node">${dot(n.u, n.x, n.y, 20)}<text x="${n.x}" y="${n.y + (down ? 36 : -42)}" class="tp-name">${esc(n.u ? n.u.name : 'Not identified')}</text><text x="${n.x}" y="${n.y + (down ? 51 : -27)}" class="tp-uses">${esc(n.uses)}</text></g>`;
+    }
+    const relayed = nodes.filter((n) => n.route === 'relay').length;
+    return `<svg class="tp" viewBox="0 0 ${W} ${H}" role="img" aria-label="Your connections">${lines}${marks}<g class="tp-node me">${dot(me, cx, cy, 28)}<text x="${cx}" y="${cy + 46}" class="tp-name">You</text></g></svg>
+      <div class="tp-legend"><span class="dg-tag lan">${ROUTES.lan}</span><span class="dg-tag stun">${ROUTES.stun}</span><span class="dg-tag relay">${ROUTES.relay}</span></div>
+      <div class="dg-sub">${nodes.length} ${nodes.length === 1 ? 'person' : 'people'} connected to you, ${relayed} relayed. Numbers on the lines are round-trip times. Only your own links are shown: how the others connect to each other can't be seen from here.</div>`;
+  }
   function paintDiag() {
     const box = $('dgBody');
     if (!box) return;
     const mine = [...diag.conns.values()].filter((c) => now() - c.seen < 15000 && c.self);
     const live = [...diag.conns.values()].filter((c) => now() - c.seen < 15000 && !c.self);
+    if (diag.tab === 'topo') {
+      const byPerson = new Map();
+      for (const c of live) { const k = c.uid || '?'; if (!byPerson.has(k)) byPerson.set(k, []); byPerson.get(k).push(c); }
+      box.innerHTML = byPerson.size ? topoHtml(byPerson) : `<div class="dg-empty">${Object.keys(meshes).length ? 'No one else is connected right now. Connections appear here as people come online.' : 'Join a server to see connections.'}</div>`;
+      return;
+    }
     const t = share(diag.total.time), b = share(diag.total.bytes);
     const card = (id) => `<div class="dg-card ${id}"><b>${t ? pct(t[id]) : '–'}</b><span>${ROUTES[id]}</span><em>${b ? pct(b[id]) + ' of data · ' + fmtBytes(diag.total.bytes[id]) : 'no data yet'}</em></div>`;
     let h = `<div class="dg-cards">${card('lan')}${card('stun')}${card('relay')}</div>
@@ -4796,11 +4826,16 @@
   function diagModal() {
     modal(`<h2>Connection diagnostics</h2>
       <p class="dg-lead">How your traffic reaches each person: straight to them, or relayed through a TURN server when no direct path could be found.</p>
+      <div class="tabs dg-tabs" role="tablist"><button type="button" role="tab" data-dg-tab="conns">Connections</button><button type="button" role="tab" data-dg-tab="topo">Topology</button></div>
       <div id="dgBody"></div>
       <div class="actions"><label class="dg-rec"><input type="checkbox" id="dgOn" ${diag.on ? 'checked' : ''}> Keep recording when this is closed</label><span class="spacer"></span>
         <button class="btn link" id="dgReset">Reset totals</button><button class="btn" id="dgCopy">Copy report</button><button class="btn primary" data-close>Close</button></div>`, () => {
       diag.open = true;
       modalCleanup = () => { diag.open = false; store.set('diagTotal', diag.total); };
+      const tabs = [...$('modal').querySelectorAll('[data-dg-tab]')];
+      const pick = (t) => { diag.tab = t; tabs.forEach((b) => { b.classList.toggle('sel', b.dataset.dgTab === t); b.setAttribute('aria-selected', String(b.dataset.dgTab === t)); }); paintDiag(); };
+      tabs.forEach((b) => (b.onclick = () => pick(b.dataset.dgTab)));
+      pick(diag.tab || 'conns');
       $('dgOn').onchange = () => { diag.on = $('dgOn').checked; store.set('diagOn', diag.on); };
       $('dgReset').onclick = () => { diag.total = { time: zeroRoutes(), bytes: zeroRoutes(), since: now() }; diag.conns.forEach((c) => { c.time = zeroRoutes(); c.bytes = zeroRoutes(); c.changes = []; }); store.set('diagTotal', diag.total); paintDiag(); };
       $('dgCopy').onclick = () => { const text = JSON.stringify(diagReport(), null, 2); (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject()).then(() => toast('Report copied'), () => toast('Could not copy the report here.')); };

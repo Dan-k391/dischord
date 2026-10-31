@@ -1197,6 +1197,18 @@ body.search-open #searchTop { color: var(--text-strong); background: var(--bg-ac
 .dg-chg { flex: none; font-size: 11px; color: #f5c060; cursor: help; }
 .dg-rec { display: flex !important; align-items: center; gap: 8px; margin: 0 !important; text-transform: none !important; font-weight: 500 !important; font-size: 13px !important; color: var(--text) !important; cursor: pointer; }
 #modal.diag .actions { align-items: center; flex-wrap: wrap; }
+/* topology: me in the middle, a line to each person, coloured by route */
+.dg-tabs { margin: 0 0 14px; }
+.tp { display: block; width: 100%; height: auto; max-height: 52vh; border-radius: 10px; background: var(--bg-side); }
+.tp-link { stroke-width: 2.5; stroke-linecap: round; }
+.tp-link.lan { stroke: var(--green); } .tp-link.stun { stroke: var(--accent); } .tp-link.relay { stroke: #f0a020; stroke-dasharray: 7 6; }
+.tp text { text-anchor: middle; dominant-baseline: central; font-family: inherit; }
+.tp-init { fill: #fff; font-weight: 700; }
+.tp-name { fill: var(--text-strong); font-size: 13px; font-weight: 600; }
+.tp-uses { fill: var(--text-muted); font-size: 11px; }
+.tp-rtt { fill: var(--text); font-size: 11px; font-variant-numeric: tabular-nums; paint-order: stroke; stroke: var(--bg-side); stroke-width: 5px; stroke-linejoin: round; }
+.tp-node.me circle { stroke: var(--bg-side); stroke-width: 4; }
+.tp-legend { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 @media (max-width: 760px), (max-width: 1024px) and (pointer: coarse) {
   .dg-cards { grid-template-columns: 1fr; }
   .dg-bar { display: none; }
