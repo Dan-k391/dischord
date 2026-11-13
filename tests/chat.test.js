@@ -1097,6 +1097,7 @@ test('code blocks: a language line, highlighting, a copy button, and nothing els
   assert(oneLine.includes('<code>npm test</code>'), 'A one-line block keeps its text');
   assert(formatText('use `x < y` here').includes('<code>x &lt; y</code>'), 'Inline code still works');
   assert(!formatText('``` not closed').includes('code-block'), 'An unclosed block is plain text');
+  assert(formatText('a\n```\nx\n```\nb').endsWith('</pre>b'), 'The line break that ends a block leaves no empty line under it');
   assert(!formatText('a\u0000' + '0\u0000b').includes('\u0000'), 'Placeholders cannot be forged');
 });
 

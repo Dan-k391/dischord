@@ -6,12 +6,12 @@
   <meta name="theme-color" content="#2b2d31">
   <title>Dischord</title>
   <link rel="icon" type="image/svg+xml" href="icon.svg?v=3">
-  <link rel="stylesheet" href="style.css?v=77">
+  <link rel="stylesheet" href="style.css?v=78">
 </head>
 <body>
   <div id="desktopTitlebar" aria-hidden="true"><img src="icon.svg?v=3" alt=""><span>Dischord</span></div>
   <header id="mobileNav">
-    <button id="mobileChannels" class="mobile-nav-btn" aria-label="Open servers and channels" aria-controls="rail sidebar" aria-expanded="false"><span aria-hidden="true">☰</span><span id="mobileChannelsLabel">Channels</span></button>
+    <button id="mobileChannels" class="mobile-nav-btn" aria-label="Open servers and channels" aria-controls="rail sidebar" aria-expanded="false"><i data-icon="menu"></i><span id="mobileChannelsLabel">Channels</span></button>
     <span id="mobileServerName">Dischord</span>
     <button id="mobileCall" class="mobile-nav-btn hidden" title="Back to call" aria-label="Back to call"><i data-icon="speaker"></i></button>
     <button id="mobileSettings" class="mobile-nav-btn" title="User settings" aria-label="User settings"><i data-icon="gear"></i></button>
@@ -44,7 +44,7 @@
       <div id="voiceStatus" class="hidden">
         <div class="vs-row">
           <div class="vs-info">
-            <div class="vs-title"><i data-icon="signal"></i><span id="vsState">Voice Connected</span><span id="vsTime" title="Time in this call"></span></div>
+            <div class="vs-title"><i data-icon="signal"></i><span id="vsState">Voice connected</span><span id="vsTime" title="Time in this call"></span></div>
             <div class="vs-where" id="voiceWhere"></div>
           </div>
           <button class="icon-btn" id="vsLeave" title="Disconnect"><i data-icon="hangup"></i></button>
@@ -106,7 +106,7 @@
             <button type="button" class="icon-btn" id="attachBtn" title="Attach files (sent only when downloaded)"><i data-icon="plusCircle"></i></button>
             <div class="input-wrap"><div id="msgMirror" aria-hidden="true"></div><textarea id="msgInput" rows="1" placeholder="Message"></textarea></div>
             <button type="button" class="icon-btn" id="emojiBtn" title="Emoji"><i data-icon="smile"></i></button>
-            <button type="submit" class="icon-btn" id="sendBtn" title="Send message" aria-label="Send message"><i data-icon="chevron"></i></button>
+            <button type="submit" class="icon-btn" id="sendBtn" title="Send message" aria-label="Send message"><i data-icon="send"></i></button>
           </div>
           <input type="file" id="fileInput" multiple hidden>
         </form>
@@ -119,8 +119,8 @@
           <h2 id="voiceIdleTitle"></h2>
           <div id="voiceIdleWho"></div>
           <div class="row">
-            <button class="btn green" id="joinVoiceBtn"><i data-icon="mic"></i>Join Voice</button>
-            <button class="btn" id="joinVideoBtn"><i data-icon="camera"></i>Join with Camera</button>
+            <button class="btn green" id="joinVoiceBtn"><i data-icon="mic"></i>Join voice</button>
+            <button class="btn" id="joinVideoBtn"><i data-icon="camera"></i>Join with camera</button>
           </div>
         </div>
       </section>
@@ -173,6 +173,6 @@
   <script src="file-transfer.js?v=20"></script>
   <script src="image-preview.js?v=3"></script>
   <script src="screen-quality.js?v=1"></script>
-  <script src="app.js?v=98"></script>
+  <script src="app.js?v=99"></script>
 </body>
 </html>

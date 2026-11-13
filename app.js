@@ -134,6 +134,8 @@
     chevDown: '<path d="M6 9l6 6 6-6"/>',
     people: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.5 3-5.5 6.5-5.5s6.5 2 6.5 5.5"/><circle cx="17" cy="9" r="2.5"/><path d="M17.5 14.5c2.5.2 4 1.8 4 4.5"/>',
     live: '<rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><circle cx="12" cy="10.5" r="2" fill="currentColor"/>',
+    menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+    send: '<path d="M21.5 2.5L10.5 13.5M21.5 2.5l-7 19-4-8-8-4z"/>',
   };
   const icon = (name, cls = '') => `<svg class="ico-svg ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[name] || ''}</svg>`;
   function paintIcons(root = document) {
@@ -214,7 +216,7 @@
   // Its packets go only to that person's connections, through any server we both have open (sendDm, dmPacket).
   const DM = 'dm';
   let dms = [];          // people I have a conversation with: { id, name, color, hid?: closed at }
-  const dmServer = { id: DM, name: 'Direct Messages', dm: true, v: 0, get channels() { return dms.filter((u) => !u.hid).map((u) => ({ id: u.id, name: u.name, type: 'text' })); } };
+  const dmServer = { id: DM, name: 'Direct messages', dm: true, v: 0, get channels() { return dms.filter((u) => !u.hid).map((u) => ({ id: u.id, name: u.name, type: 'text' })); } };
   const server = (sid) => (sid === DM ? dmServer : servers.find((s) => s.id === sid));
   const channel = (s, cid) => s && s.channels.find((c) => c.id === cid);
   const saveServers = () => store.set('servers', servers);
@@ -951,7 +953,7 @@
     editing = { sid: cur.sid, cid: cur.cid, id, draft: m.text, start: m.text.length, end: m.text.length };
     drawBackTo(id);
     renderMessages();
-    const box = $('messages').querySelector('.edit-box');
+    const box = $('messages').querySelector('.msg-edit'); // the box and the hint under it
     if (box && typeof box.scrollIntoView === 'function') box.scrollIntoView({ block: 'nearest' });
   }
   function editorHtml() {
@@ -4419,7 +4421,8 @@
     const blocks = [];
     const keep = (html) => { blocks.push(html); return `\u0000${blocks.length - 1}\u0000`; };
     // code is taken out of the raw text first, so nothing else (links, mentions, bold) applies inside it
-    let t = String(raw).replace(/\u0000/g, '').replace(/```([\s\S]*?)```/g, (_, inner) => keep(codeBlock(inner)));
+    // (the line break that ends a block is not an empty line after it)
+    let t = String(raw).replace(/\u0000/g, '').replace(/```([\s\S]*?)```\n?/g, (_, inner) => keep(codeBlock(inner)));
     t = esc(t).replace(/`([^`\n]+)`/g, (_, code) => keep(`<code>${code}</code>`));
     t = t
       .replace(/\b(https?:\/\/[^\s<]+[^\s<.,:;!?)\]'"])/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>')
@@ -4968,7 +4971,9 @@
     $('meName').textContent = me.name;
     let peersN = 0;
     if (cur.sid) for (const id in members[cur.sid] || {}) if (isOnline(members[cur.sid][id])) peersN++;
-    $('meStatus').textContent = cur.sid ? (peersN ? `${peersN} other${peersN === 1 ? '' : 's'} online` : 'Waiting for others…') : 'Online';
+    // the panel has room for a word or two: the short form shows, the sentence is its tooltip
+    $('meStatus').textContent = cur.sid ? (peersN ? `${peersN + 1} online` : 'Just you') : 'Online';
+    $('meStatus').title = cur.sid ? (peersN ? `${peersN} other${peersN === 1 ? '' : 's'} online in this server` : 'Nobody else from this server is online right now') : '';
     $('voiceStatus').classList.toggle('hidden', !voice);
     if (voice) {
       const s = server(voice.sid), c = channel(s, voice.cid);
@@ -5141,7 +5146,7 @@
   const appUpdates = () => ['desktop-update', 'android-update'].some((c) => document.documentElement.classList.contains(c));
   function settingsModal(tab = 'profile') {
     const state = { color: me.color };
-    modal(`<div class="tabs settings-tabs" role="tablist" aria-label="Settings sections"><button id="settingsProfileTab" data-tab="profile" role="tab" aria-controls="settingsProfile">My profile</button><button id="settingsAvTab" data-tab="av" role="tab" aria-controls="settingsAv">Voice &amp; Video</button></div>
+    modal(`<div class="tabs settings-tabs" role="tablist" aria-label="Settings sections"><button id="settingsProfileTab" data-tab="profile" role="tab" aria-controls="settingsProfile">My profile</button><button id="settingsAvTab" data-tab="av" role="tab" aria-controls="settingsAv">Voice &amp; video</button></div>
       <div class="settings-content">
       <div class="tab-body" id="settingsProfile" data-body="profile" role="tabpanel" aria-labelledby="settingsProfileTab">
         ${profileEditor(me.name, me.color)}
