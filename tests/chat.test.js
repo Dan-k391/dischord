@@ -1125,6 +1125,30 @@ test('editing happens in place: the text becomes a box, saving sends the edit, n
   assert.strictEqual(app.api.editing, null);
 });
 
+test('a long channel draws its newest messages; earlier ones come on scrolling up or when one is needed', () => {
+  const app = createApp();
+  const alice = { id: 'alice', name: 'Alice', color: '#5865f2' };
+  for (let i = 0; i < 250; i++) app.api.addMsg('testserver', app.api.cleanMsg(app.message({ id: 'm' + i, ts: 1000 + i, text: `tok${i}end`, ...(i === 120 ? { a: alice } : {}) })));
+  const box = app.node('messages'), has = (i) => box.innerHTML.includes(`tok${i}end`);
+  Object.assign(box, { scrollHeight: 9000, clientHeight: 600 }); // a tall list, as a browser would lay it out
+  app.api.renderMessages(true);
+  assert(has(249) && has(150) && !has(149), 'Opening draws the newest hundred');
+  assert(!box.innerHTML.includes('chan-intro'), 'The start of the channel is not on the page yet');
+  app.api.addMsg('testserver', app.api.cleanMsg(app.message({ id: 'new', ts: 2000, text: 'tok250end' })));
+  box.scrollTop = 5000; // reading back
+  app.api.renderMessages();
+  assert(has(250) && has(150) && !has(149), 'A new message does not push the first drawn one away');
+  app.api.editMessage('m120'); // my own message, above what is drawn
+  assert(box.innerHTML.includes('class="edit-box"') && has(60) && !has(59), 'Drawn back to it, with what led up to it');
+  app.api.stopEditing();
+  box.scrollTop = 0; box.dispatch('scroll');
+  assert(has(0) && box.innerHTML.includes('chan-intro'), 'Scrolling to the top draws the rest');
+  // a peer chooses the time on its messages: one no calendar can show must not stop the channel drawing
+  app.api.addMsg('testserver', app.api.cleanMsg(app.message({ id: 'bad', ts: -1e300, text: 'tokbadend' })));
+  app.api.renderMessages();
+  assert(box.innerHTML.includes('tokbadend') && has(250), 'An impossible time is still drawn');
+});
+
 test('saving an emptied edit asks to delete the message', () => {
   const app = createApp();
   app.api.addMsg('testserver', app.api.cleanMsg(app.message({ id: 'mine2', a: { id: 'alice', name: 'Alice', color: '#5865f2' }, text: 'oops' })));

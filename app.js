@@ -747,7 +747,15 @@
         break;
       }
     }
-    if ((via === cur.sid || cur.sid === DM) && p.t !== 'imgc' && !p.t?.startsWith('f-')) renderPresence();
+    if ((via === cur.sid || cur.sid === DM) && p.t !== 'imgc' && !p.t?.startsWith('f-')) presenceSoon();
+  }
+  // Packets come in bursts (everyone's pings, each mouse move of a remote control): draw presence once for
+  // the lot. The wait is a worker timer, so it is just as short in a background tab.
+  let presenceDue = false;
+  function presenceSoon() {
+    if (presenceDue) return;
+    presenceDue = true;
+    bgTimer.sleep(100).then(() => { presenceDue = false; if (me) renderPresence(); });
   }
 
   function mergeServer(sid, def) {
@@ -941,6 +949,7 @@
     const m = (getMsgs(cur.sid)[cur.cid] || []).find((x) => x.id === id);
     if (!m || m.a.id !== me.id || !m.text) return;
     editing = { sid: cur.sid, cid: cur.cid, id, draft: m.text, start: m.text.length, end: m.text.length };
+    drawBackTo(id);
     renderMessages();
     const box = $('messages').querySelector('.edit-box');
     if (box && typeof box.scrollIntoView === 'function') box.scrollIntoView({ block: 'nearest' });
@@ -1890,6 +1899,7 @@
         };
         el.onerror = () => {
           imageErrors.add(imageMessageKey(sid, cid, mid));
+          staleRow(el); // a later redraw must give it a new, empty picture to try again with
           el.hidden = true;
           el.parentElement.classList.remove('loading');
           if (status) { status.hidden = false; status.textContent = 'Image preview unavailable.'; }
@@ -2051,29 +2061,21 @@
     return `${icon(kindIcon(kind))}<div class="mf-text"><button type="button" class="mf-name" data-file-download="${esc(m.id)}" title="${esc(m.file.name)}" aria-label="${esc((opens ? 'Open ' : 'Download ') + m.file.name)}" ${active || unavailable || saving ? 'disabled' : ''}>${esc(m.file.name)}</button><div class="mf-sub" role="status">${esc(sub)}</div></div>${btn}`;
   }
   function paintFileCards(mid, sid = cur.sid, cid = cur.cid) {
+    const put = (el, html) => { if (el.innerHTML !== html) { el.innerHTML = html; staleRow(el); } };
     document.querySelectorAll('[data-file-card]').forEach((el) => {
       if (el.dataset.fileCard !== mid || sid !== cur.sid || cid !== cur.cid) return;
       const m = (getMsgs(sid)[cid] || []).find((x) => x.id === el.dataset.fileCard);
-      if (m && !m.del && m.file) {
-        const html = fileCardContent(sid, m);
-        if (el.innerHTML !== html) el.innerHTML = html;
-      }
+      if (m && !m.del && m.file) put(el, fileCardContent(sid, m));
     });
     document.querySelectorAll('[data-video-poster]').forEach((el) => {
       if (el.dataset.videoPoster !== mid || sid !== cur.sid || cid !== cur.cid) return;
       const m = (getMsgs(sid)[cid] || []).find((x) => x.id === mid);
-      if (m && !m.del && m.file) {
-        const html = videoPosterContent(sid, m);
-        if (el.innerHTML !== html) el.innerHTML = html;
-      }
+      if (m && !m.del && m.file) put(el, videoPosterContent(sid, m));
     });
     document.querySelectorAll('[data-image-download]').forEach((el) => {
       if (el.dataset.imageDownload !== mid || el.dataset.imageSid !== sid || el.dataset.imageCid !== cid) return;
       const m = (getMsgs(sid)[cid] || []).find((x) => x.id === mid);
-      if (m && !m.del && m.file) {
-        const html = imageDownloadContent(sid, m, el.dataset.imageCompact || '');
-        if (el.innerHTML !== html) el.innerHTML = html;
-      }
+      if (m && !m.del && m.file) put(el, imageDownloadContent(sid, m, el.dataset.imageCompact || ''));
     });
   }
 
@@ -2947,8 +2949,14 @@
     }
     if (changed) paintSpeaking();
   }
+  let anySpoke = false; // someone was lit up by the last pass
   function paintSpeaking() {
-    document.querySelectorAll('[data-uid]:not([data-ctx])').forEach((el) => el.classList.toggle('speaking', speaking[el.dataset.uid] > now()));
+    const t = now();
+    let any = false;
+    for (const uid in speaking) if (speaking[uid] > t) { any = true; break; }
+    if (!any && !anySpoke) return; // quiet before and quiet now: nothing is lit (this runs four times a second)
+    anySpoke = any;
+    document.querySelectorAll('[data-uid]:not([data-ctx])').forEach((el) => el.classList.toggle('speaking', speaking[el.dataset.uid] > t));
   }
 
   // ---------------------------------------------------------------- iframe API listener
@@ -3235,6 +3243,33 @@
   const avatar = (u, dot, cls = '') => `<div class="avatar ${cls}" style="background:${avBg(u.color)}">${esc((u.name[0] || '?').toUpperCase())}${dot ? '<span class="dot"></span>' : ''}</div>`;
   const stateIcons = (st) => (st ? (st.s ? '<span class="live-tag">LIVE</span>' : '') + (st.c ? icon('camera', 'mini') : '') + (st.d ? icon('deaf', 'mini off') : st.m ? icon('micOff', 'mini off') : '') : '');
 
+  // The lists are redrawn every few seconds and on every packet from a peer, mostly with nothing new to show.
+  // Identical HTML is left alone, which keeps what the pointer is over and saves the rebuild.
+  function setHtml(el, html) { if (el._html !== html) { el._html = html; el.innerHTML = html; } }
+  // Redraw a list of rows, replacing only the ones whose HTML changed. The others keep their loaded
+  // pictures, selected text and place on screen, and a new message costs one row instead of the whole
+  // history. rows: [unique key, html of exactly one element].
+  function patchRows(box, rows) {
+    if (typeof box.insertBefore !== 'function') { box.innerHTML = rows.map((r) => r[1]).join(''); return; }
+    const want = new Map(rows), kept = new Map(), gone = [];
+    for (const el of box.children) { if (el._h != null && want.get(el._k) === el._h) kept.set(el._k, el); else gone.push(el); }
+    const fresh = document.createElement('template');
+    fresh.innerHTML = rows.filter((r) => !kept.has(r[0])).map((r) => r[1]).join('');
+    const made = [...fresh.content.children];
+    if (made.length !== rows.length - kept.size) { box.innerHTML = rows.map((r) => r[1]).join(''); return; } // not one element per row: draw it whole
+    let i = 0;
+    const next = (key, html) => { const el = made[i++]; el._k = key; el._h = html; return el; };
+    if (!kept.size) return box.replaceChildren(...rows.map((r) => next(r[0], r[1]))); // another channel: all at once
+    gone.forEach((el) => el.remove());
+    let at = box.firstElementChild;
+    for (const [key, html] of rows) {
+      const el = kept.get(key) || next(key, html);
+      if (el === at) at = at.nextElementSibling; else box.insertBefore(el, at);
+    }
+  }
+  // A row that was changed in place no longer matches the HTML it was drawn from: the next redraw replaces it.
+  function staleRow(el) { const row = el.closest && el.closest('#messages > *'); if (row) row._h = null; }
+
   function render() {
     if (!me) return;
     renderRail();
@@ -3250,8 +3285,8 @@
 
   function renderRail() {
     if (!me) return;
-    $('serverList').innerHTML = servers.map((s) =>
-      `<button class="rail-btn ${s.id === cur.sid ? 'active' : ''} ${serverUnread(s) && s.id !== cur.sid ? 'unread' : ''} ${voice && voice.sid === s.id ? 'in-voice' : ''}" data-sid="${esc(s.id)}" title="${esc(s.name)}">${esc(initials(s.name))}</button>`).join('');
+    setHtml($('serverList'), servers.map((s) =>
+      `<button class="rail-btn ${s.id === cur.sid ? 'active' : ''} ${serverUnread(s) && s.id !== cur.sid ? 'unread' : ''} ${voice && voice.sid === s.id ? 'in-voice' : ''}" data-sid="${esc(s.id)}" title="${esc(s.name)}">${esc(initials(s.name))}</button>`).join(''));
     let total = dmServer.channels.reduce((n, c) => n + unreadCount(DM, c.id), 0);
     $('homeBtn').classList.toggle('active', !cur.sid || cur.sid === DM);
     $('homeBtn').dataset.badge = total ? (total > 99 ? '99+' : total) : '';
@@ -3286,18 +3321,18 @@
     const s = server(cur.sid);
     const el = $('channelList');
     if (!s) {
-      el.innerHTML = `<div class="cat"><span>Your servers</span></div>` + (servers.length
+      setHtml(el, `<div class="cat"><span>Your servers</span></div>` + (servers.length
         ? servers.map((x) => `<div class="chan" data-sid="${esc(x.id)}"><span class="ico">${icon('hash')}</span><span class="name">${esc(x.name)}</span></div>`).join('')
-        : `<div class="chan" style="cursor:default">No servers yet</div>`);
+        : `<div class="chan" style="cursor:default">No servers yet</div>`));
       return;
     }
     if (s.dm) {
       const last = (u) => { const l = getMsgs(DM)[u.id] || []; return l.length ? l[l.length - 1].ts : 0; };
       const list = dms.filter((u) => !u.hid).sort((a, b) => last(b) - last(a));
-      el.innerHTML = `<div class="cat"><span>Direct messages</span></div>` + (list.length ? list.map((u) => {
+      setHtml(el, `<div class="cat"><span>Direct messages</span></div>` + (list.length ? list.map((u) => {
         const n = u.id === cur.cid ? 0 : unreadCount(DM, u.id);
         return `<div class="chan dm ${u.id === cur.cid ? 'active' : ''} ${n ? 'unread' : ''} ${dmOnline(u.id) ? '' : 'offline'}" data-cid="${esc(u.id)}" data-type="text">${avatar(u, true)}<span class="name">${esc(u.name)}</span>${n ? `<span class="badge">${n > 99 ? '99+' : n}</span>` : ''}</div>`;
-      }).join('') : `<div class="dm-empty">No conversations yet. Right-click someone in a server and choose <b>Message</b>.</div>`);
+      }).join('') : `<div class="dm-empty">No conversations yet. Right-click someone in a server and choose <b>Message</b>.</div>`));
       if (channel(s, cur.cid)) $('chanTopic').textContent = dmTopic(cur.cid); // presence changes repaint this list
       return;
     }
@@ -3318,14 +3353,15 @@
       const mine = voice && voice.sid === s.id && voice.cid === c.id;
       h += `<div class="chan ${c.id === cur.cid ? 'active' : ''} ${mine ? 'connected' : ''}" data-cid="${esc(c.id)}" data-type="voice" draggable="true">
         <span class="ico">${icon('speaker')}</span><span class="name">${esc(c.name)}</span>
-        ${who.length && callStart(s.id, c.id) ? `<span class="chan-time" data-start="${callStart(s.id, c.id)}" title="Call running for">${fmtDur(now() - callStart(s.id, c.id))}</span>` : ''}
+        ${who.length && callStart(s.id, c.id) ? `<span class="chan-time" data-start="${callStart(s.id, c.id)}" title="Call running for"></span>` : ''}
         ${who.length ? `<span class="count">${who.length}</span>` : ''}
 </div>`;
       if (who.length) {
         h += `<div class="voice-users" data-vc="${esc(c.id)}">${who.map((o) => `<div class="voice-user" data-uid="${esc(o.self ? me.id : o.user.id)}" draggable="true">${avatar(o.user)}<span class="vu-name">${esc(o.user.name)}</span>${pingTag(o)}<span class="vu-icons">${stateIcons(o.st)}</span></div>`).join('')}</div>`;
       }
     }
-    el.innerHTML = h;
+    setHtml(el, h);
+    paintChannelTimes(); // the running time is painted, not part of the HTML: it would make every redraw a change
     paintSpeaking();
   }
 
@@ -4279,18 +4315,25 @@
     if (!c || c.type !== 'voice') return;
     const who = voiceOccupants(s.id, c.id);
     $('voiceIdleTitle').textContent = c.name;
-    $('voiceIdleWho').innerHTML = who.length
+    setHtml($('voiceIdleWho'), who.length
       ? `<div class="vi-people">${who.map((o) => `<div class="vi-person" data-uid="${esc(o.user.id)}">${avatar(o.user, false, 'big')}<span>${esc(o.user.name)}</span></div>`).join('')}</div>`
-      : '<p>No one is here yet. Jump in and others will see you in the channel list.</p>';
+      : '<p>No one is here yet. Jump in and others will see you in the channel list.</p>');
   }
 
-  function fmtTime(ts) { return new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
+  // Formatters are made once: toLocaleTimeString and friends build a new one on every call, which was a
+  // third of the time it took to draw a channel. Same text as the toLocale…String calls they replace.
+  const dateFormat = (options) => {
+    const f = new Intl.DateTimeFormat([], options);
+    return (ts) => { try { return f.format(ts); } catch { return 'Invalid Date'; } }; // format() throws on a time out of range, and a peer chooses the time on its messages
+  };
+  const fmtTime = dateFormat({ hour: 'numeric', minute: '2-digit' }), fmtDate = dateFormat();
+  const fmtFull = dateFormat({ year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' });
   function fmtStamp(ts) {
     const d = new Date(ts), t = new Date();
     const y = new Date(t); y.setDate(t.getDate() - 1);
     if (d.toDateString() === t.toDateString()) return 'Today at ' + fmtTime(ts);
     if (d.toDateString() === y.toDateString()) return 'Yesterday at ' + fmtTime(ts);
-    return d.toLocaleDateString() + ' ' + fmtTime(ts);
+    return fmtDate(ts) + ' ' + fmtTime(ts);
   }
 
   // a mention is "@" + the name without spaces or punctuation; resolve it back to a person in this server
@@ -4408,7 +4451,39 @@
     const a = liveUser(original ? original.a : r.a);
     return `<button type="button" class="msg-reply" data-reply-jump="${esc(r.id)}" title="Jump to original message">${icon('reply')}<b>${esc(a.name)}</b><span>${esc(excerpt.replace(/\s+/g, ' ').slice(0, 240))}</span></button>`;
   }
+  // A long channel is drawn from its newest messages back to drawFrom.ts (ALL: the whole of it). Earlier ones
+  // are drawn on scrolling up to them, so opening a channel does not lay out its whole history.
+  const MSG_DRAW = 100, MSG_MORE = 100, ALL = -Infinity;
+  let drawFrom = { key: '', ts: ALL };
+  const drawnList = () => (getMsgs(cur.sid)[cur.cid] || []).filter((m) => !m.del);
+  // make sure this message is among the drawn ones, with some of what came before it
+  function drawBackTo(mid) {
+    const all = drawnList(), i = all.findIndex((m) => m.id === mid);
+    if (i < 0 || all[i].ts >= drawFrom.ts) return;
+    drawFrom.ts = i > 60 ? all[i - 60].ts : ALL;
+    renderMessages();
+  }
+  // At the top of what is drawn, or it does not fill the view yet: draw the hundred before it.
+  let drawingEarlier = false;
+  function drawEarlier() {
+    const box = $('messages');
+    if (drawingEarlier) return; // the redraw below comes back here
+    drawingEarlier = true;
+    try {
+      while (drawFrom.ts !== ALL && box.scrollTop < 400) {
+        const all = drawnList(), i = all.findIndex((m) => m.ts >= drawFrom.ts);
+        const next = i > MSG_MORE ? all[i - MSG_MORE].ts : ALL;
+        drawFrom.ts = next < drawFrom.ts ? next : ALL; // always further back, even past a run of messages with one time
+        const below = box.scrollHeight - box.scrollTop;
+        renderMessages();
+        // what was on screen stays where it was (a browser that anchors the scroll may have done it already)
+        // shortcut: setting the position ends a flick in progress on iPhone Safari, which does not anchor; draw the rows ahead of the scroll if that grates
+        if (Math.abs(box.scrollHeight - box.scrollTop - below) > 1) box.scrollTop = box.scrollHeight - below;
+      }
+    } finally { drawingEarlier = false; }
+  }
   function jumpToMessage(mid, instant) {
+    drawBackTo(mid);
     const el = [...$('messages').querySelectorAll('[data-mid]')].find((x) => x.dataset.mid === mid);
     if (!el) return toast('Original message is no longer in local history.');
     el.scrollIntoView({ behavior: instant ? 'auto' : 'smooth', block: 'center' });
@@ -4421,14 +4496,21 @@
     const s = server(cur.sid), c = channel(s, cur.cid);
     if (!c || c.type !== 'text') return;
     const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
-    const list = (getMsgs(s.id)[c.id] || []).filter((m) => !m.del);
-    let h = s.dm
+    const all = drawnList(), key = s.id + '/' + c.id;
+    // another channel, or back at the bottom: start again from the newest. Otherwise the same first message
+    // stays first, so nothing above someone reading back disappears as new messages arrive.
+    let from = drawFrom.key === key && !forceBottom ? all.findIndex((m) => m.ts >= drawFrom.ts) : -1;
+    if (from < 0) from = Math.max(0, all.length - MSG_DRAW);
+    drawFrom = { key, ts: from ? all[from].ts : ALL };
+    const list = from ? all.slice(from) : all;
+    const rows = from ? [] : [['intro', s.dm
       ? `<div class="chan-intro"><div class="big">${icon('at')}</div><h2>${esc(c.name)}</h2><p>This is the start of your direct messages with ${esc(c.name)}. They go straight from your device to theirs; messages sent while one of you is offline arrive the next time you are both online.</p></div>`
-      : `<div class="chan-intro"><div class="big">${icon('hash')}</div><h2>Welcome to #${esc(c.name)}!</h2><p>This is the start of the #${esc(c.name)} channel. Messages travel peer-to-peer; people who join later get recent history from whoever is online.</p></div>`;
-    let prev = null;
+      : `<div class="chan-intro"><div class="big">${icon('hash')}</div><h2>Welcome to #${esc(c.name)}!</h2><p>This is the start of the #${esc(c.name)} channel. Messages travel peer-to-peer; people who join later get recent history from whoever is online.</p></div>`]];
+    let prev = null, prevDay = '';
     for (const m of list) {
-      const newDay = !prev || new Date(prev.ts).toDateString() !== new Date(m.ts).toDateString();
-      if (newDay) h += `<div class="day-sep"><span>${new Date(m.ts).toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' })}</span></div>`;
+      const day = new Date(m.ts).toDateString(), newDay = day !== prevDay;
+      prevDay = day;
+      if (newDay) rows.push(['day ' + day, `<div class="day-sep"><span>${new Date(m.ts).toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' })}</span></div>`]);
       const head = newDay || !prev || !!m.reply || prev.a.id !== m.a.id || m.ts - prev.ts > 7 * 60000;
       const mine = m.a.id === me.id;
       const a = liveUser(m.a);
@@ -4452,20 +4534,19 @@
       const text = editing && editing.id === m.id && editing.sid === s.id && editing.cid === m.cid && mine ? editorHtml() :
         m.text ? `<div class="text">${formatText(m.text)}${edited}</div>` : '';
       const re = renderRe(m);
-      if (head) {
-        h += `<div class="msg head ${mentionsMe(m.text) ? 'mentions-me' : ''}" data-mid="${esc(m.id)}"><div class="gutter" data-uid="${esc(m.a.id)}" data-ctx="user">${avatar(a)}</div><div class="body">${more}
-          <div class="meta"><span class="author" data-uid="${esc(m.a.id)}" data-ctx="user" style="color:${esc(a.color)}">${esc(a.name)}</span><span class="time" title="${esc(new Date(m.ts).toLocaleString())}">${esc(fmtStamp(m.ts))}</span></div>
-          ${reply}${text}${poster ? img + file : file + img}${re}</div>${acts}</div>`;
-      } else {
-        h += `<div class="msg ${mentionsMe(m.text) ? 'mentions-me' : ''}" data-mid="${esc(m.id)}"><div class="gutter time-side">${esc(fmtTime(m.ts))}</div><div class="body">${more}${reply}${text}${poster ? img + file : file + img}${re}</div>${acts}</div>`;
-      }
+      rows.push(['msg ' + m.id, head
+        ? `<div class="msg head ${mentionsMe(m.text) ? 'mentions-me' : ''}" data-mid="${esc(m.id)}"><div class="gutter" data-uid="${esc(m.a.id)}" data-ctx="user">${avatar(a)}</div><div class="body">${more}
+          <div class="meta"><span class="author" data-uid="${esc(m.a.id)}" data-ctx="user" style="color:${esc(a.color)}">${esc(a.name)}</span><span class="time" title="${esc(fmtFull(m.ts))}">${esc(fmtStamp(m.ts))}</span></div>
+          ${reply}${text}${poster ? img + file : file + img}${re}</div>${acts}</div>`
+        : `<div class="msg ${mentionsMe(m.text) ? 'mentions-me' : ''}" data-mid="${esc(m.id)}"><div class="gutter time-side">${esc(fmtTime(m.ts))}</div><div class="body">${more}${reply}${text}${poster ? img + file : file + img}${re}</div>${acts}</div>`]);
       prev = m;
     }
-    box.innerHTML = h;
+    patchRows(box, rows);
     if (forceBottom || nearBottom) box.scrollTop = box.scrollHeight;
     if (editing) restoreEditor();
     paintImages();
     renderReplyBar();
+    drawEarlier();
   }
 
   function renderRe(m) {
@@ -4874,14 +4955,16 @@
     offline.sort((a, b) => a.user.name.localeCompare(b.user.name));
     const vname = (cid) => { const c = channel(s, cid); return c ? c.name : ''; };
     const row = (m, on) => `<div class="mem ${on ? '' : 'offline'}" data-uid="${esc(m.user.id)}">${avatar(m.user, true)}<div class="mem-text"><div class="nm" style="color:${on ? esc(m.user.color) : 'inherit'}">${esc(m.user.name)}${m.self ? ' <span class="sub">(you)</span>' : ''}</div>${on && m.vc ? `<div class="sub">${icon('speaker', 'mini')} ${esc(vname(m.vc))}</div>` : ''}</div><span class="vu-icons">${on && m.vc ? stateIcons(m.st) : ''}</span></div>`;
-    el.innerHTML = `<div class="mem-cat">Online — ${online.length}</div>${online.map((m) => row(m, true)).join('')}` +
-      (offline.length ? `<div class="mem-cat" style="margin-top:20px"><span>Offline — ${offline.length}</span><button class="icon-btn" data-forget-all title="Remove all offline people">${icon('trash')}</button></div>${offline.map((m) => row(m, false)).join('')}` : '');
+    setHtml(el, `<div class="mem-cat">Online — ${online.length}</div>${online.map((m) => row(m, true)).join('')}` +
+      (offline.length ? `<div class="mem-cat" style="margin-top:20px"><span>Offline — ${offline.length}</span><button class="icon-btn" data-forget-all title="Remove all offline people">${icon('trash')}</button></div>${offline.map((m) => row(m, false)).join('')}` : ''));
     paintSpeaking();
   }
 
   function renderUserPanel() {
     if (!me) return;
-    $('meAvatar').outerHTML = `<div class="avatar" id="meAvatar" style="background:${avBg(me.color)}">${esc(me.name[0].toUpperCase())}<span class="dot"></span></div>`;
+    const mine = $('meAvatar');
+    if (mine._color !== me.color) { mine._color = me.color; mine.style.background = avBg(me.color); }
+    setHtml(mine, `${esc(me.name[0].toUpperCase())}<span class="dot"></span>`);
     $('meName').textContent = me.name;
     let peersN = 0;
     if (cur.sid) for (const id in members[cur.sid] || {}) if (isOnline(members[cur.sid][id])) peersN++;
@@ -5377,7 +5460,7 @@
       listDrag = null; // let the list redraw
       bumpServer(s);
     });
-    list.addEventListener('dragend', () => { listDrag = null; clearMarks(); renderChannels(); });
+    list.addEventListener('dragend', () => { listDrag = null; clearMarks(); list.querySelectorAll('.dragging').forEach((el) => el.classList.remove('dragging')); renderChannels(); }); // an unchanged list is not rebuilt, so the mark comes off here
   })();
 
   $('channelList').onclick = (e) => {
@@ -5449,6 +5532,7 @@
     if (e.target.closest('[data-edit-save]')) return saveEdit();
     if (e.target.closest('[data-edit-cancel]')) return stopEditing();
   };
+  $('messages').addEventListener('scroll', drawEarlier, { passive: true });
   $('messages').addEventListener('input', (e) => {
     if (!editing || !e.target.classList || !e.target.classList.contains('edit-box')) return;
     editing.draft = e.target.value; editing.start = e.target.selectionStart; editing.end = e.target.selectionEnd;
